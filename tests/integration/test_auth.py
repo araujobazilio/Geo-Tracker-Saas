@@ -9,6 +9,7 @@ since TestClient-based tests commit real data to the test database.
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
@@ -22,8 +23,9 @@ from app.db.session import reset_engine
 from app.main import create_app
 from app.models.user import User
 
-TEST_DB_URL = (
-    "postgresql+psycopg://geo_tracker:geo_tracker_dev_password@localhost:15432/geo_tracker_test"
+TEST_DB_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://geo_tracker:geo_tracker_dev_password@localhost:15432/geo_tracker_test",
 )
 
 
