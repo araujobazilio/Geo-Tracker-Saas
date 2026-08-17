@@ -2,14 +2,34 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, update
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.core.security import generate_session_token
 from app.db.redis import get_redis, reset_redis
 from app.db.session import reset_engine
 from app.main import create_app
+from app.models.user import User
+
+TEST_DB_URL = (
+    "postgresql+psycopg://geo_tracker:geo_tracker_dev_password@localhost:15432/geo_tracker_test"
+)
+
+
+def _unique_email() -> str:
+    return f"sess-{uuid.uuid4().hex[:8]}@example.com"
+
+
+def _direct_db_session() -> Session:
+    """Create a direct DB session that commits are visible to the app."""
+    engine = create_engine(TEST_DB_URL, pool_pre_ping=True, future=True)
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    return factory()
 
 
 @pytest.fixture()
@@ -43,84 +63,72 @@ class TestSessionTokens:
     def test_token_is_hashed_in_redis(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
         client.post(
             "/api/v1/auth/register",
-            json={"email": "hash-test@example.com", "password": "secure-password-123"},
+            json={"email": _unique_email(), "password": "secure-password-123"},
         )
         redis = get_redis()
-        # Check that no raw token is stored as a Redis key.
         keys = redis.keys("geo:session:*")
         assert len(keys) > 0
-        # Keys should be hashes, not raw tokens.
         for key in keys:
-            # The key suffix should be a 64-char hex SHA-256 hash.
             suffix = key.replace("geo:session:", "")
             assert len(suffix) == 64
-            int(suffix, 16)  # Should be valid hex.
+            int(suffix, 16)  # valid hex
 
     def test_new_token_on_login(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
-        # Register.
+        email = _unique_email()
         client.post(
             "/api/v1/auth/register",
-            json={"email": "rotate@example.com", "password": "secure-password-123"},
+            json={"email": email, "password": "secure-password-123"},
         )
         cookie1 = client.cookies.get("geo_session")
 
-        # Login again.
         client.post(
             "/api/v1/auth/login",
-            json={"email": "rotate@example.com", "password": "secure-password-123"},
+            json={"email": email, "password": "secure-password-123"},
         )
         cookie2 = client.cookies.get("geo_session")
 
-        # Session tokens should be different (session fixation protection).
         assert cookie1 != cookie2
 
     def test_revoked_token_rejected(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
         client.post(
             "/api/v1/auth/register",
-            json={"email": "revoke@example.com", "password": "secure-password-123"},
+            json={"email": _unique_email(), "password": "secure-password-123"},
         )
-        # Logout revokes the session.
         csrf = client.get("/api/v1/auth/csrf").json()["csrf_token"]
         client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})
 
-        # Should not be authenticated.
         response = client.get("/api/v1/auth/me")
         assert response.status_code == 401
 
     def test_tampered_session_rejected(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
         client.post(
             "/api/v1/auth/register",
-            json={"email": "tamper@example.com", "password": "secure-password-123"},
+            json={"email": _unique_email(), "password": "secure-password-123"},
         )
-        # Tamper with the cookie.
         client.cookies.set("geo_session", "tampered-token-value")
         response = client.get("/api/v1/auth/me")
         assert response.status_code == 401
 
     def test_unknown_session_rejected(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
-        # Set a random session cookie without registering.
         client.cookies.set("geo_session", generate_session_token())
         response = client.get("/api/v1/auth/me")
         assert response.status_code == 401
 
-    def test_inactive_user_rejected_with_valid_session(
-        self, client, clean_redis, db_session
-    ) -> None:  # type: ignore[no-untyped-def]
-        # Register and get a valid session.
+    def test_inactive_user_rejected_with_valid_session(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
+        email = _unique_email()
         client.post(
             "/api/v1/auth/register",
-            json={"email": "deactivate@example.com", "password": "secure-password-123"},
+            json={"email": email, "password": "secure-password-123"},
         )
         assert client.get("/api/v1/auth/me").status_code == 200
 
-        # Deactivate the user directly in the DB.
-        from app.models.user import User
+        # Deactivate user via direct DB session (visible to app).
+        session = _direct_db_session()
+        try:
+            session.execute(update(User).where(User.email == email).values(is_active=False))
+            session.commit()
+        finally:
+            session.close()
 
-        user = db_session.query(User).filter_by(email="deactivate@example.com").first()
-        assert user is not None
-        user.is_active = False
-        db_session.commit()
-
-        # Session should no longer grant access.
         response = client.get("/api/v1/auth/me")
         assert response.status_code == 401

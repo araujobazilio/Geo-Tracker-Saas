@@ -63,9 +63,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         settings = get_settings()
         session_cookie = request.cookies.get(settings.session_cookie_name)
+
+        # If there's no session cookie, there's nothing to CSRF-protect.
+        # This allows idempotent logout for already-expired sessions.
+        if not session_cookie:
+            return await call_next(request)
+
         csrf_header = request.headers.get("X-CSRF-Token", "")
 
-        if not session_cookie or not csrf_header:
+        if not csrf_header:
             return JSONResponse(
                 status_code=403,
                 content={"error": {"code": "csrf_error", "message": "CSRF token required."}},

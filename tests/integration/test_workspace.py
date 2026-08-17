@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 
@@ -9,9 +11,13 @@ from app.core.enums import WorkspaceRole, WorkspaceType
 from app.models import User, Workspace, WorkspaceMember
 
 
+def _unique_email() -> str:
+    return f"model-{uuid.uuid4().hex[:8]}@example.com"
+
+
 @pytest.mark.integration
 def test_create_user(db_session) -> None:  # type: ignore[no-untyped-def]
-    user = User(email="alice@example.com", password_hash="hashed")
+    user = User(email=_unique_email(), password_hash="hashed")
     db_session.add(user)
     db_session.flush()
     assert user.id is not None
@@ -22,9 +28,10 @@ def test_create_user(db_session) -> None:  # type: ignore[no-untyped-def]
 
 @pytest.mark.integration
 def test_user_email_unique(db_session) -> None:  # type: ignore[no-untyped-def]
-    db_session.add(User(email="bob@example.com", password_hash="h1"))
+    email = _unique_email()
+    db_session.add(User(email=email, password_hash="h1"))
     db_session.flush()
-    db_session.add(User(email="bob@example.com", password_hash="h2"))
+    db_session.add(User(email=email, password_hash="h2"))
     with pytest.raises(IntegrityError):
         db_session.flush()
 
@@ -40,7 +47,7 @@ def test_create_workspace(db_session) -> None:  # type: ignore[no-untyped-def]
 
 @pytest.mark.integration
 def test_workspace_membership(db_session) -> None:  # type: ignore[no-untyped-def]
-    user = User(email="carol@example.com", password_hash="h")
+    user = User(email=_unique_email(), password_hash="h")
     ws = Workspace(name="Carol WS", workspace_type=WorkspaceType.PERSONAL)
     db_session.add_all([user, ws])
     db_session.flush()
@@ -53,7 +60,7 @@ def test_workspace_membership(db_session) -> None:  # type: ignore[no-untyped-de
 
 @pytest.mark.integration
 def test_duplicate_membership_prevented(db_session) -> None:  # type: ignore[no-untyped-def]
-    user = User(email="dave@example.com", password_hash="h")
+    user = User(email=_unique_email(), password_hash="h")
     ws = Workspace(name="Dave WS", workspace_type=WorkspaceType.PERSONAL)
     db_session.add_all([user, ws])
     db_session.flush()
