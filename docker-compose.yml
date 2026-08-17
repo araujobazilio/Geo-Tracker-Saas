@@ -1,0 +1,73 @@
+# =============================================================================
+# GEO Tracker — local development Docker Compose stack
+# Services: app (FastAPI), postgres, redis
+# =============================================================================
+# Usage:
+#   docker compose up -d
+#   docker compose exec app alembic upgrade head
+# =============================================================================
+
+name: geo-tracker
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: geo_tracker
+      POSTGRES_PASSWORD: geo_tracker_dev_password
+      POSTGRES_DB: geo_tracker
+    volumes:
+      - geo_tracker_pg_data:/var/lib/postgresql/data
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U geo_tracker -d geo_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - geo_tracker_redis_data:/data
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://geo_tracker:geo_tracker_dev_password@postgres:5432/geo_tracker
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  geo_tracker_pg_data:
+  geo_tracker_redis_data:
