@@ -9,6 +9,23 @@ Phase 2. Security hardening is Phase 17.
 ## Implemented
 
 - **Password hashing:** Argon2id via `argon2-cffi` (`app/core/security.py`).
+- **Opaque server-side sessions:** session tokens are cryptographically
+  secure random values; session data stored in Redis under SHA-256 hash
+  of the token. See `docs/AUTHENTICATION.md`.
+- **Cookie security:** HttpOnly, SameSite=Lax, Secure (enforced in
+  staging/production), Path=/, explicit Max-Age.
+- **CSRF protection:** server-side CSRF token stored in session; validated
+  via `X-CSRF-Token` header on POST/PUT/PATCH/DELETE. Constant-time
+  comparison.
+- **Session fixation protection:** new token issued on every login.
+- **Login timing mitigation:** dummy Argon2id verification for nonexistent
+  users.
+- **Password rehash:** outdated Argon2id parameters detected and upgraded
+  on successful login.
+- **Rate limiting:** Redis-backed throttling for login and register
+  endpoints.
+- **Email normalization:** canonical lowercase storage prevents
+  casing-based duplicate accounts.
 - **Secrets:** loaded from environment via `pydantic-settings`; `.env` is
   git-ignored; only `.env.example` is committed.
 - **Production secret validation:** `APP_SECRET_KEY` is validated at config
@@ -17,25 +34,21 @@ Phase 2. Security hardening is Phase 17.
   real secret value is never included in error messages.
   See `app/config.py` (`Settings._validate_production_secret`).
 - **Constant-time comparison:** `safe_eq` helper for sensitive comparisons.
-- **Tenant data model:** the Workspace tenant boundary, membership model,
-  and tenant-scoped data model are in place (see `docs/MULTITENANCY.md`).
-  Authenticated tenant-access enforcement is PLANNED for Phase 2.
+- **Tenant isolation enforcement:** `WorkspaceAuthorizationService` checks
+  database membership for every workspace-scoped operation. Non-members
+  receive 404 (not 403) to avoid revealing resource existence.
+  See `docs/MULTITENANCY.md`.
 - **UUIDs:** public-facing identifiers are UUIDs to reduce IDOR risk.
 - **Database accounting integrity:** `usage_events` has database-level
   non-negative CHECK constraints for `ai_checks`, token counts, and
   `cost_usd` (see `docs/DATABASE.md`).
 - **AppSumo license uniqueness:** `external_license_id` is UNIQUE at the
   database level.
+- **Audit logging:** centralized `AuditService` records auth and workspace
+  events. Never stores session tokens, CSRF tokens, passwords, or hashes.
 - **Logging:** structured logs never include passwords, API keys, or tokens.
 - **Error handling:** application errors never expose stack traces to
   clients (see `app/core/exceptions.py`).
-
-## Planned (Phase 2)
-
-- HttpOnly + Secure + SameSite cookies for sessions.
-- CSRF protection where relevant.
-- Authenticated tenant-access enforcement (repository/service
-  authorization, role enforcement, IDOR prevention).
 
 ## Planned (later phases)
 

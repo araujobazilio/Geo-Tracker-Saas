@@ -19,7 +19,7 @@ an action was implemented.
 |-------|-------------|--------|
 | 0 | Repository and application foundation | IMPLEMENTED |
 | 1 | Core database and multi-tenancy | IMPLEMENTED |
-| 2 | Authentication, Workspaces and authorization | PLANNED |
+| 2 | Authentication, Workspaces and authorization | IMPLEMENTED |
 | 3 | Entitlements, plans, usage and quotas | PLANNED |
 | 4 | Project onboarding and prompt system | PLANNED |
 | 5 | AI provider abstraction and integrations | PLANNED |
@@ -96,6 +96,15 @@ uvicorn app.main:app --reload
 |--------|------|-------------|
 | GET | `/health` | Liveness probe (no external dependencies) |
 | GET | `/ready` | Readiness probe (verifies PostgreSQL + Redis) |
+| POST | `/api/v1/auth/register` | Create account + default workspace |
+| POST | `/api/v1/auth/login` | Authenticate + issue session cookie |
+| POST | `/api/v1/auth/logout` | Revoke session + clear cookie |
+| GET | `/api/v1/auth/me` | Current user info + workspaces |
+| GET | `/api/v1/auth/csrf` | Get CSRF token |
+| GET | `/api/v1/workspaces` | List user's workspaces |
+| POST | `/api/v1/workspaces` | Create workspace |
+| GET | `/api/v1/workspaces/{id}` | Get workspace (member-only) |
+| PATCH | `/api/v1/workspaces/{id}` | Update workspace (OWNER/ADMIN) |
 | GET | `/docs` | OpenAPI interactive docs (non-production) |
 
 ---
@@ -178,13 +187,14 @@ geo-tracker/
 ## Security notes
 
 - Passwords are hashed with Argon2id.
-- Authentication uses HttpOnly cookies (planned for Phase 2).
+- Authentication uses opaque server-side sessions with HttpOnly cookies.
+- CSRF protection on all state-changing requests.
+- Session tokens are hashed (SHA-256) before storage in Redis.
 - Secrets are loaded from environment variables; `.env` is git-ignored.
 - Production secret validation: unsafe `APP_SECRET_KEY` values are rejected
   at startup in staging/production (see `docs/SECURITY.md`).
-- Multi-tenant data model is in place; authenticated tenant-access
-  enforcement is planned for Phase 2.
-- See `docs/SECURITY.md` for details.
+- Multi-tenant isolation enforced: cross-tenant access returns 404.
+- See `docs/SECURITY.md` and `docs/AUTHENTICATION.md` for details.
 
 ---
 

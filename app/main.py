@@ -1,6 +1,7 @@
 """FastAPI application entrypoint.
 
-Creates the ASGI app, configures logging, CORS, and registers routers.
+Creates the ASGI app, configures logging, CORS, CSRF middleware,
+exception handlers, and registers routers.
 """
 
 from __future__ import annotations
@@ -8,12 +9,17 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.core.csrf import CSRFMiddleware
+from app.core.exceptions import AppError, TenantAccessError
 from app.core.logging import configure_logging, get_logger
 from app.routers import infra
+from app.routers.api import auth as auth_router
+from app.routers.api import workspaces as workspaces_router
 
 
 @asynccontextmanager
@@ -46,6 +52,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS — never allow_credentials with wildcard origins.
     if settings.cors_origin_list:
         app.add_middleware(
             CORSMiddleware,
@@ -55,7 +62,30 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
 
+    # CSRF protection for state-changing requests.
+    app.add_middleware(CSRFMiddleware)
+
+    # Centralized exception handlers.
+    @app.exception_handler(TenantAccessError)
+    async def tenant_access_handler(request: Request, exc: TenantAccessError) -> JSONResponse:
+        # Return 404 to avoid revealing whether an inaccessible resource exists.
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "not_found", "message": "Resource not found."}},
+        )
+
+    @app.exception_handler(AppError)
+    async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )
+
+    # Infrastructure endpoints (unversioned).
     app.include_router(infra.router)
+    # API v1 routers.
+    app.include_router(auth_router.router)
+    app.include_router(workspaces_router.router)
     return app
 
 

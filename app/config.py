@@ -60,6 +60,19 @@ class Settings(BaseSettings):
     # --- Security ---
     cors_origins: str = ""
 
+    # --- Session / cookie ---
+    session_cookie_name: str = "geo_session"
+    session_ttl_seconds: int = 7 * 24 * 3600  # 7 days
+    session_cookie_secure: bool = False  # enforced True in staging/production
+    session_cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    csrf_cookie_name: str = "geo_csrf"
+
+    # --- Rate limiting (auth endpoints) ---
+    rate_limit_login_max: int = 8
+    rate_limit_login_window_seconds: int = 300  # 5 minutes
+    rate_limit_register_max: int = 5
+    rate_limit_register_window_seconds: int = 3600  # 1 hour
+
     # --- AI providers (placeholders, not validated in Phase 0/1) ---
     openai_api_key: SecretStr = SecretStr("")
     openai_scan_model: str = ""
@@ -114,6 +127,9 @@ class Settings(BaseSettings):
                 f"APP_SECRET_KEY must be at least {_MIN_SECRET_LENGTH} "
                 "characters in staging/production."
             )
+        # Enforce secure cookies in staging/production.
+        if not self.session_cookie_secure:
+            self.session_cookie_secure = True
         return self
 
     @property

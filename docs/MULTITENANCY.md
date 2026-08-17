@@ -49,24 +49,26 @@ browser without checking membership. This prevents IDOR vulnerabilities.
   duplicate memberships.
 - UUIDs (not sequential IDs) reduce IDOR exposure.
 
-### PLANNED (Phase 2)
+### IMPLEMENTED (Phase 2)
 
-- Authenticated tenant-access enforcement (every protected operation
-  validates membership against the authenticated user).
-- Repository / service authorization layer.
-- Role enforcement (OWNER / ADMIN / MEMBER permissions).
-- IDOR prevention enforcement.
-
-The data model establishes the structural foundation; the concrete
-enforcement layer is implemented in Phase 2 alongside authentication.
+- Authenticated tenant-access enforcement: every protected workspace
+  operation validates membership against the authenticated user via
+  `WorkspaceAuthorizationService`.
+- Repository / service authorization layer: `WorkspaceRepository`,
+  `WorkspaceMemberRepository`, `WorkspaceService`,
+  `WorkspaceAuthorizationService`.
+- Role enforcement: OWNER/ADMIN can update workspace settings; MEMBER
+  cannot. Centralized in `WorkspaceAuthorizationService.require_role()`.
+- IDOR prevention enforcement: cross-tenant access returns 404 (not 403)
+  to avoid revealing resource existence.
 
 ## Status
 
 - Workspace tenant model: **IMPLEMENTED** (Phase 1)
 - Workspace membership model: **IMPLEMENTED** (Phase 1)
 - Tenant-scoped data model: **IMPLEMENTED** (Phase 1)
-- Authenticated tenant-access enforcement: **PLANNED** (Phase 2)
-- Repository/service authorization: **PLANNED** (Phase 2)
-- Role enforcement: **PLANNED** (Phase 2)
-- IDOR prevention enforcement: **PLANNED** (Phase 2)
+- Authenticated tenant-access enforcement: **IMPLEMENTED** (Phase 2)
+- Repository/service authorization: **IMPLEMENTED** (Phase 2)
+- Role enforcement: **IMPLEMENTED** (Phase 2)
+- IDOR prevention enforcement: **IMPLEMENTED** (Phase 2)
 - Agency dashboard / team management: **PLANNED** (Phase 13)

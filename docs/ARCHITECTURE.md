@@ -41,10 +41,10 @@ Tenant boundary = **Workspace**.
 User → WorkspaceMembership → Workspace → Projects
 ```
 
-The tenant-scoped data model is in place. Authenticated tenant-access
-enforcement (membership checks, role enforcement, IDOR prevention) is
-PLANNED for Phase 2. Public-facing identifiers are UUIDs to reduce
-IDOR risk.
+Tenant-access enforcement is implemented: every protected workspace
+operation validates membership via `WorkspaceAuthorizationService`.
+Cross-tenant access returns 404. Public-facing identifiers are UUIDs
+to reduce IDOR risk.
 
 See `docs/MULTITENANCY.md`.
 
@@ -60,7 +60,7 @@ See `docs/MULTITENANCY.md`.
 | Cache / broker | Redis |
 | Background jobs | Celery + Celery Beat |
 | Frontend | Jinja2, HTMX, Tailwind CSS, Chart.js (planned) |
-| Auth | HttpOnly cookies, Argon2id (Phase 2) |
+| Auth | Opaque server-side sessions, HttpOnly cookies, Argon2id |
 | Infra | Docker, Docker Compose, Nginx, HTTPS (production) |
 | Quality | pytest, Ruff, mypy (strict) |
 
@@ -92,7 +92,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 |---------|--------|
 | Application foundation | IMPLEMENTED (Phase 0) |
 | Core multi-tenant data model | IMPLEMENTED (Phase 1) |
-| Authentication | PLANNED (Phase 2) |
+| Authentication, workspaces, authorization | IMPLEMENTED (Phase 2) |
 | Entitlements / quotas | PLANNED (Phase 3) |
 | Project onboarding / prompts | PLANNED (Phase 4) |
 | AI provider abstraction | PLANNED (Phase 5) |
