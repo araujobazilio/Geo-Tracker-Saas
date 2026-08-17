@@ -24,6 +24,7 @@ MANIFEST
 
 # --- Virtual environments ---
 .venv/
+.venv*/
 venv/
 env/
 ENV/
@@ -86,4 +87,4 @@ logs/
 *.spec
 
 # --- Misc ---
-.python-version
+# .python-version is intentionally committed to pin the runtime baseline.

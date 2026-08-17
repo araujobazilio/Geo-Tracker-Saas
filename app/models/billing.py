@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import AppSumoLicenseStatus, BillingAccountStatus, BillingSource
@@ -24,7 +25,7 @@ class BillingAccount(UUIDPrimaryKey, TimestampMixin, Base):
 
     __tablename__ = "billing_accounts"
 
-    workspace_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     source: Mapped[BillingSource] = mapped_column(String(20), nullable=False, index=True)
@@ -50,11 +51,14 @@ class AppSumoLicense(UUIDPrimaryKey, TimestampMixin, Base):
     """
 
     __tablename__ = "appsumo_licenses"
+    __table_args__ = (
+        UniqueConstraint("external_license_id", name="uq_appsumo_licenses_external_license_id"),
+    )
 
-    workspace_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    billing_account_id: Mapped[str | None] = mapped_column(
+    billing_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType, ForeignKey("billing_accounts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     external_license_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)

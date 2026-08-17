@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, ForeignKey, String, UniqueConstraint
@@ -24,7 +25,7 @@ class ProjectKeyword(UUIDPrimaryKey, TimestampMixin, Base):
         UniqueConstraint("project_id", "text", name="uq_project_keyword_project_text"),
     )
 
-    project_id: Mapped[str] = mapped_column(
+    project_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     text: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -49,7 +50,7 @@ class Competitor(UUIDPrimaryKey, TimestampMixin, Base):
         UniqueConstraint("project_id", "domain", name="uq_competitor_project_domain"),
     )
 
-    project_id: Mapped[str] = mapped_column(
+    project_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -74,7 +75,7 @@ class ProjectProvider(UUIDPrimaryKey, TimestampMixin, Base):
         UniqueConstraint("project_id", "provider", name="uq_project_provider_project_provider"),
     )
 
-    project_id: Mapped[str] = mapped_column(
+    project_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
     )
     provider: Mapped[LLMProvider] = mapped_column(String(30), nullable=False)
@@ -99,7 +100,7 @@ class Prompt(UUIDPrimaryKey, Base):
 
     __tablename__ = "prompts"
 
-    project_keyword_id: Mapped[str] = mapped_column(
+    project_keyword_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType,
         ForeignKey("project_keywords.id", ondelete="CASCADE"),
         nullable=False,

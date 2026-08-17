@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: geo_tracker
+          POSTGRES_PASSWORD: geo_tracker_dev_password
+          POSTGRES_DB: geo_tracker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U geo_tracker -d geo_tracker"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      APP_ENV: test
+      APP_SECRET_KEY: ci-test-secret-not-for-production-use-1234567890
+      DATABASE_URL: postgresql+psycopg://geo_tracker:geo_tracker_dev_password@localhost:5432/geo_tracker_test
+      REDIS_URL: redis://localhost:6379/0
+      LOG_JSON: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create test database
+        run: |
+          PGPASSWORD=geo_tracker_dev_password psql -h localhost -U geo_tracker -d geo_tracker -c "CREATE DATABASE geo_tracker_test;"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff check
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: mypy
+        run: mypy app
+
+      - name: Alembic migration to head
+        run: alembic upgrade head
+
+      - name: Alembic drift check
+        run: alembic check
+
+      - name: pytest
+        run: pytest -v

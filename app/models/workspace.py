@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,10 +39,10 @@ class WorkspaceMember(UUIDPrimaryKey, TimestampMixin, Base):
         UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member_workspace_user"),
     )
 
-    workspace_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    user_id: Mapped[str] = mapped_column(
+    user_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     role: Mapped[WorkspaceRole] = mapped_column(

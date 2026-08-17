@@ -19,6 +19,7 @@ services:
       POSTGRES_DB: geo_tracker
     volumes:
       - geo_tracker_pg_data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sh:/docker-entrypoint-initdb.d/10-create-test-db.sh:ro
     ports:
       - "15432:5432"
     healthcheck:
@@ -52,7 +53,7 @@ services:
       DATABASE_URL: postgresql+psycopg://geo_tracker:geo_tracker_dev_password@postgres:5432/geo_tracker
       REDIS_URL: redis://redis:6379/0
     ports:
-      - "8000:8000"
+      - "18000:8000"
     depends_on:
       postgres:
         condition: service_healthy

@@ -43,14 +43,20 @@ See `docs/` for detailed architecture and roadmap documentation.
 
 ## Technology stack
 
-- **Backend:** Python 3.11+, FastAPI, SQLAlchemy 2.x, Pydantic v2
+- **Backend:** Python 3.11, FastAPI, SQLAlchemy 2.x, Pydantic v2
 - **Database:** PostgreSQL 15+
 - **Cache / queue broker:** Redis
 - **Background jobs:** Celery + Celery Beat
 - **Migrations:** Alembic
 - **Frontend:** Jinja2, HTMX, Tailwind CSS, Chart.js (planned)
 - **Infrastructure:** Docker, Docker Compose, Nginx, HTTPS (production)
-- **Quality:** pytest, Ruff, mypy (strict)
+- **Quality:** pytest, Ruff, mypy (strict), GitHub Actions CI
+
+### Python runtime baseline
+
+The project targets **Python 3.11**. Docker, Ruff, and mypy are all
+configured for Python 3.11. A `.python-version` file pins the runtime
+for tools that support it (pyenv, uv, etc.).
 
 ---
 
@@ -59,7 +65,7 @@ See `docs/` for detailed architecture and roadmap documentation.
 ### Prerequisites
 
 - Docker + Docker Compose (recommended), or
-- Python 3.11+ with local PostgreSQL 15+ and Redis 7+
+- Python 3.11 with local PostgreSQL 15+ and Redis 7+
 
 ### Using Docker Compose (recommended)
 
@@ -104,6 +110,36 @@ mypy app               # static type checking
 alembic upgrade head   # apply migrations
 ```
 
+### Test database
+
+Integration tests use a **dedicated test database** (`geo_tracker_test`),
+never the development database (`geo_tracker`). The Docker Compose
+PostgreSQL container auto-creates `geo_tracker_test` on first
+initialization via `docker/postgres-init.sh`.
+
+Integration tests prepare the schema via the **real Alembic migration
+path** (`alembic upgrade head`), not `Base.metadata.create_all()`, so
+migration drift is detectable.
+
+Set the test database URL before running integration tests:
+
+```bash
+export DATABASE_URL="postgresql+psycopg://geo_tracker:geo_tracker_dev_password@localhost:15432/geo_tracker_test"
+```
+
+## CI
+
+GitHub Actions runs the full validation suite on every push to `main`
+and on pull requests targeting `main`:
+
+- Ruff check + format check
+- mypy (strict)
+- Alembic migration to head (against a PostgreSQL 15 service)
+- pytest (unit + integration)
+- Alembic migration drift check (`alembic check`)
+
+See `.github/workflows/ci.yml`.
+
 ---
 
 ## Project structure
@@ -144,7 +180,10 @@ geo-tracker/
 - Passwords are hashed with Argon2id.
 - Authentication uses HttpOnly cookies (planned for Phase 2).
 - Secrets are loaded from environment variables; `.env` is git-ignored.
-- Multi-tenant isolation is enforced at the data-access layer.
+- Production secret validation: unsafe `APP_SECRET_KEY` values are rejected
+  at startup in staging/production (see `docs/SECURITY.md`).
+- Multi-tenant data model is in place; authenticated tenant-access
+  enforcement is planned for Phase 2.
 - See `docs/SECURITY.md` for details.
 
 ---

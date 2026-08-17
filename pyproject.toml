@@ -120,9 +120,6 @@ markers = [
 ]
 filterwarnings = [
     "error::DeprecationWarning",
-    # pytest-asyncio 0.24 uses asyncio APIs deprecated in Python 3.14.
-    # Ignore until a compatible pytest-asyncio is released.
-    "ignore:.*'asyncio\\..*' is deprecated.*:DeprecationWarning",
 ]
 
 # =============================================================================

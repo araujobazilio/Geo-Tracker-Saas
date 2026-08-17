@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -34,11 +35,11 @@ class AuditLog(UUIDPrimaryKey, Base):
         Index("ix_audit_logs_user_action_timestamp", "user_id", "action", "created_at"),
     )
 
-    user_id: Mapped[str | None] = mapped_column(UUIDType, nullable=True)
-    workspace_id: Mapped[str | None] = mapped_column(UUIDType, nullable=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUIDType, nullable=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(UUIDType, nullable=True)
     action: Mapped[str] = mapped_column(String(80), nullable=False)
     entity_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    entity_id: Mapped[str | None] = mapped_column(UUIDType, nullable=True)
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(UUIDType, nullable=True)
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONBType, nullable=False, default=dict
     )

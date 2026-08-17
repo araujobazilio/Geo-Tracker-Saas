@@ -39,19 +39,34 @@ a member of the workspace that owns the target resource.
 Never trust `project_id`, `workspace_id`, or `scan_id` provided by the
 browser without checking membership. This prevents IDOR vulnerabilities.
 
-The concrete enforcement layer (repository / service authorization) is
-implemented in Phase 2 alongside authentication. The data model in
-Phase 1 establishes the structural foundation:
+### IMPLEMENTED (Phase 1)
 
+- Workspace tenant model (`Workspace`, `WorkspaceMember`).
+- Workspace membership model with roles (`OWNER`, `ADMIN`, `MEMBER`).
+- Tenant-scoped data model (all project-scoped tables carry `workspace_id`
+  directly or via their project).
 - `workspace_members (workspace_id, user_id)` unique constraint prevents
   duplicate memberships.
-- All project-scoped tables carry `workspace_id` (directly or via their
-  project) so tenant filtering is always possible.
 - UUIDs (not sequential IDs) reduce IDOR exposure.
+
+### PLANNED (Phase 2)
+
+- Authenticated tenant-access enforcement (every protected operation
+  validates membership against the authenticated user).
+- Repository / service authorization layer.
+- Role enforcement (OWNER / ADMIN / MEMBER permissions).
+- IDOR prevention enforcement.
+
+The data model establishes the structural foundation; the concrete
+enforcement layer is implemented in Phase 2 alongside authentication.
 
 ## Status
 
-- Data model: **IMPLEMENTED** (Phase 1)
-- Membership / role storage: **IMPLEMENTED**
-- Authentication + authorization enforcement: **PLANNED** (Phase 2)
+- Workspace tenant model: **IMPLEMENTED** (Phase 1)
+- Workspace membership model: **IMPLEMENTED** (Phase 1)
+- Tenant-scoped data model: **IMPLEMENTED** (Phase 1)
+- Authenticated tenant-access enforcement: **PLANNED** (Phase 2)
+- Repository/service authorization: **PLANNED** (Phase 2)
+- Role enforcement: **PLANNED** (Phase 2)
+- IDOR prevention enforcement: **PLANNED** (Phase 2)
 - Agency dashboard / team management: **PLANNED** (Phase 13)

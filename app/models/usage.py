@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
 
 from sqlalchemy import DECIMAL as SQL_DECIMAL
-from sqlalchemy import ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enums import UsageEventType
@@ -22,17 +23,37 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
 
     UsageEvent is NEVER cascade-deleted; it is required for billing
     disputes and cost accounting. See docs/DATABASE.md.
+
+    Database-level CHECK constraints enforce non-negative accounting
+    values. These are declared on the model AND created by the Alembic
+    migration so both layers stay in sync.
     """
 
     __tablename__ = "usage_events"
+    __table_args__ = (
+        CheckConstraint("ai_checks >= 0", name="ck_usage_events_ai_checks_non_negative"),
+        CheckConstraint(
+            "input_tokens IS NULL OR input_tokens >= 0",
+            name="ck_usage_events_input_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0",
+            name="ck_usage_events_output_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "total_tokens IS NULL OR total_tokens >= 0",
+            name="ck_usage_events_total_tokens_non_negative",
+        ),
+        CheckConstraint("cost_usd >= 0", name="ck_usage_events_cost_usd_non_negative"),
+    )
 
-    workspace_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    user_id: Mapped[str | None] = mapped_column(
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    project_id: Mapped[str | None] = mapped_column(
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType, ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
     )
     event_type: Mapped[UsageEventType] = mapped_column(String(30), nullable=False, index=True)

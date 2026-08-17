@@ -9,8 +9,20 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Known insecure placeholder values that must never be accepted in
+# staging or production. They are only permitted in development/test.
+_INSECURE_PLACEHOLDERS = frozenset(
+    {
+        "change-me",
+        "change-me-to-a-long-random-string",
+    }
+)
+
+# Minimum length for a production-grade secret key.
+_MIN_SECRET_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -74,9 +86,43 @@ class Settings(BaseSettings):
             return v.upper()
         return v
 
+    @model_validator(mode="after")
+    def _validate_production_secret(self) -> Settings:
+        """Fail fast when APP_SECRET_KEY is unsafe in staging/production.
+
+        - Development/test: placeholders and short values are allowed.
+        - Staging/production: empty, known placeholder, or too-short
+          secrets are rejected at config load time.
+
+        The real secret value is NEVER included in the error message.
+        """
+        if self.app_env in {"development", "test"}:
+            return self
+
+        secret = self.app_secret_key.get_secret_value()
+        if not secret:
+            raise ValueError(
+                "APP_SECRET_KEY must be set in staging/production " "(it is currently empty)."
+            )
+        if secret.lower() in _INSECURE_PLACEHOLDERS:
+            raise ValueError(
+                "APP_SECRET_KEY is set to a known insecure placeholder. "
+                "Provide a strong, unique secret for staging/production."
+            )
+        if len(secret) < _MIN_SECRET_LENGTH:
+            raise ValueError(
+                f"APP_SECRET_KEY must be at least {_MIN_SECRET_LENGTH} "
+                "characters in staging/production."
+            )
+        return self
+
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def is_staging(self) -> bool:
+        return self.app_env == "staging"
 
     @property
     def is_test(self) -> bool:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -29,7 +30,7 @@ class Project(UUIDPrimaryKey, TimestampMixin, Base):
 
     __tablename__ = "projects"
 
-    workspace_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType,
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,

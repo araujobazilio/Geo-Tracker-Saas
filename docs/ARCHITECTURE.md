@@ -41,8 +41,10 @@ Tenant boundary = **Workspace**.
 User → WorkspaceMembership → Workspace → Projects
 ```
 
-Every protected database operation validates tenant membership.
-Public-facing identifiers are UUIDs to reduce IDOR risk.
+The tenant-scoped data model is in place. Authenticated tenant-access
+enforcement (membership checks, role enforcement, IDOR prevention) is
+PLANNED for Phase 2. Public-facing identifiers are UUIDs to reduce
+IDOR risk.
 
 See `docs/MULTITENANCY.md`.
 
