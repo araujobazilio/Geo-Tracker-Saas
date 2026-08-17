@@ -15,9 +15,8 @@ from app.config import get_settings
 from app.db.base import Base
 
 # Import models here so they are registered on Base.metadata before
-# autogenerate runs. As models are added in later phases, import them
-# from app.models so Alembic can detect them.
-# (added in Phase 1)
+# autogenerate runs.
+from app.models import *  # noqa: F403
 
 config = context.config
 

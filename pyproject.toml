@@ -54,6 +54,7 @@ include = ["app*"]
 target-version = "py311"
 line-length = 100
 src = ["app", "tests"]
+extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = [
