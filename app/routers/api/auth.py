@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from app.config import Settings, get_settings
 from app.core.exceptions import AuthenticationError, RateLimitExceededError
@@ -94,27 +94,45 @@ def login(
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> UserResponse:
-    """Authenticate and issue a session cookie."""
-    if not rate_limiter.check("login", client_ip):
+    """Authenticate and issue a session cookie.
+
+    Rate limiting uses failure-based semantics:
+    - Check if already limited BEFORE authentication.
+    - Increment failure counter only on FAILED authentication.
+    - Reset failure counter on SUCCESSFUL authentication.
+    """
+    if rate_limiter.is_limited("login", client_ip):
         raise RateLimitExceededError("Too many login attempts. Please try again later.")
 
-    result = auth_service.login(request.email, request.password)
+    try:
+        result = auth_service.login(request.email, request.password)
+    except AuthenticationError:
+        rate_limiter.record_failure("login", client_ip)
+        if rate_limiter.is_limited("login", client_ip):
+            raise RateLimitExceededError(
+                "Too many login attempts. Please try again later."
+            ) from None
+        raise
+
+    # Successful login — reset failure counter.
+    rate_limiter.reset("login", client_ip)
     _set_session_cookie(response, result.session_token, settings)
     return UserResponse.model_validate(result.user)
 
 
 @router.post("/logout", response_model=MessageResponse)
 def logout(
+    request: Request,
     response: Response,
     settings: Annotated[Settings, Depends(get_settings)],
     session_service: Annotated[SessionService, Depends(get_session_service)],
     user: Annotated[User | None, Depends(get_current_user)],
-    geo_session: Annotated[str | None, Cookie(alias="geo_session")] = None,
 ) -> MessageResponse:
     """Revoke the session and clear the cookie. Idempotent."""
     _clear_session_cookie(response, settings)
-    if geo_session:
-        session_service.revoke_session(geo_session)
+    session_cookie = request.cookies.get(settings.session_cookie_name)
+    if session_cookie:
+        session_service.revoke_session(session_cookie)
     return MessageResponse(message="Logged out.")
 
 
@@ -147,18 +165,20 @@ def me(
 
 @router.get("/csrf", response_model=CsrfResponse)
 def get_csrf_token(
+    request: Request,
     user: Annotated[User, Depends(require_authenticated_user)],
     session_service: Annotated[SessionService, Depends(get_session_service)],
-    geo_session: Annotated[str | None, Cookie(alias="geo_session")] = None,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> CsrfResponse:
     """Return the CSRF token for the current session.
 
     The browser sends this token back via the X-CSRF-Token header on
     state-changing requests.
     """
-    if geo_session is None:
+    session_cookie = request.cookies.get(settings.session_cookie_name)
+    if session_cookie is None:
         raise AuthenticationError("Authentication required.")
-    session = session_service.get_session(geo_session)
+    session = session_service.get_session(session_cookie)
     if session is None:
         raise AuthenticationError("Authentication required.")
     return CsrfResponse(csrf_token=session.csrf_token)

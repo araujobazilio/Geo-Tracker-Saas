@@ -81,13 +81,14 @@ class TestSessionTokens:
             "/api/v1/auth/register",
             json={"email": email, "password": "secure-password-123"},
         )
-        cookie1 = client.cookies.get("geo_session")
+        cookie_name = get_settings().session_cookie_name
+        cookie1 = client.cookies.get(cookie_name)
 
         client.post(
             "/api/v1/auth/login",
             json={"email": email, "password": "secure-password-123"},
         )
-        cookie2 = client.cookies.get("geo_session")
+        cookie2 = client.cookies.get(cookie_name)
 
         assert cookie1 != cookie2
 
@@ -107,12 +108,14 @@ class TestSessionTokens:
             "/api/v1/auth/register",
             json={"email": _unique_email(), "password": "secure-password-123"},
         )
-        client.cookies.set("geo_session", "tampered-token-value")
+        cookie_name = get_settings().session_cookie_name
+        client.cookies.set(cookie_name, "tampered-token-value")
         response = client.get("/api/v1/auth/me")
         assert response.status_code == 401
 
     def test_unknown_session_rejected(self, client, clean_redis) -> None:  # type: ignore[no-untyped-def]
-        client.cookies.set("geo_session", generate_session_token())
+        cookie_name = get_settings().session_cookie_name
+        client.cookies.set(cookie_name, generate_session_token())
         response = client.get("/api/v1/auth/me")
         assert response.status_code == 401
 

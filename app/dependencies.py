@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import Cookie, Depends, Request
+from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
@@ -71,12 +71,17 @@ def get_rate_limiter(
 
 
 def get_current_user(
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     session_service: Annotated[SessionService, Depends(get_session_service)],
     settings: Annotated[Settings, Depends(get_settings)],
-    session_cookie: Annotated[str | None, Cookie(alias="geo_session")] = None,
 ) -> User | None:
-    """Resolve the current User from the session cookie, or None."""
+    """Resolve the current User from the session cookie, or None.
+
+    Reads the session cookie by name from `settings.session_cookie_name`
+    so the cookie name remains fully configurable.
+    """
+    session_cookie = request.cookies.get(settings.session_cookie_name)
     if session_cookie is None:
         return None
     session = session_service.get_session(session_cookie)

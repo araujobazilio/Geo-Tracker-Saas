@@ -28,8 +28,8 @@ class WorkspaceService:
         self._session = session
         self._repo = WorkspaceRepository(session)
         self._member_repo = WorkspaceMemberRepository(session)
-        self._authz = WorkspaceAuthorizationService(session)
         self._audit = audit_service or AuditService()
+        self._authz = WorkspaceAuthorizationService(session, audit_service=self._audit)
 
     def list_workspaces(self, user_id: uuid.UUID) -> list[Workspace]:
         """Return all workspaces where the user is a member."""
