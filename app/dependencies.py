@@ -7,7 +7,8 @@ Provides:
   - get_audit_service: AuditService factory
   - get_workspace_service: WorkspaceService factory
   - get_auth_service: AuthService factory
-  - get_rate_limiter: RateLimiter factory
+  - get_login_rate_limiter: RateLimiter factory for login
+  - get_register_rate_limiter: RateLimiter factory for register
 """
 
 from __future__ import annotations
@@ -57,13 +58,25 @@ def get_workspace_service(
     return WorkspaceService(session=db, audit_service=audit_service)
 
 
-def get_rate_limiter(
+def get_login_rate_limiter(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> RateLimiter:
+    """Rate limiter for login endpoints (failure-based)."""
     return RateLimiter(
         redis=get_redis(),
         max_attempts=settings.rate_limit_login_max,
         window_seconds=settings.rate_limit_login_window_seconds,
+    )
+
+
+def get_register_rate_limiter(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> RateLimiter:
+    """Rate limiter for register endpoints (request-based)."""
+    return RateLimiter(
+        redis=get_redis(),
+        max_attempts=settings.rate_limit_register_max,
+        window_seconds=settings.rate_limit_register_window_seconds,
     )
 
 

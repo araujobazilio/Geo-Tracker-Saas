@@ -20,7 +20,8 @@ from app.dependencies import (
     get_auth_service,
     get_client_ip,
     get_current_user,
-    get_rate_limiter,
+    get_login_rate_limiter,
+    get_register_rate_limiter,
     get_session_service,
     get_workspace_service,
     require_authenticated_user,
@@ -72,7 +73,7 @@ def register(
     request: RegisterRequest,
     response: Response,
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
-    rate_limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+    rate_limiter: Annotated[RateLimiter, Depends(get_register_rate_limiter)],
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> UserResponse:
@@ -90,7 +91,7 @@ def login(
     request: LoginRequest,
     response: Response,
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
-    rate_limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
+    rate_limiter: Annotated[RateLimiter, Depends(get_login_rate_limiter)],
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> UserResponse:
