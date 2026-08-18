@@ -27,6 +27,12 @@ where quota was originally reserved (usage_period_id). Commit, release,
 and expire operations always update the ORIGINAL period, never the
 current month's period. This ensures correct accounting across UTC
 month boundaries.
+
+Transaction lifecycle: QuotaService owns its transaction boundaries.
+Every code path that acquires a FOR UPDATE lock MUST explicitly finish
+the transaction (commit or rollback) before returning. No method may
+return while holding row locks — that would leave locks dependent on
+some outer caller eventually closing the Session.
 """
 
 from __future__ import annotations
@@ -83,6 +89,10 @@ class QuotaService:
     Transaction error handling: on any exception (QuotaExceededError,
     ConflictError, IntegrityError), the session is rolled back so it
     is left in a usable state with no held locks or partial mutations.
+
+    Transaction lifecycle invariant: no method returns while holding
+    a FOR UPDATE lock. Every path that acquires a lock explicitly
+    commits or rolls back before returning.
     """
 
     def __init__(
@@ -176,6 +186,64 @@ class QuotaService:
                 f"Project {project_id} does not belong to workspace {workspace_id}."
             )
 
+    def _validate_reservation_idempotency_match(
+        self,
+        existing: QuotaReservation,
+        workspace_id: uuid.UUID,
+        requested_checks: int,
+        user_id: uuid.UUID | None,
+        project_id: uuid.UUID | None,
+    ) -> None:
+        """Validate that an existing reservation matches the request parameters.
+
+        Used in both the normal idempotency re-check path and the
+        IntegrityError race fallback path. Ensures the same idempotency
+        key cannot alias different workspaces or request parameters.
+
+        Raises ConflictError if any parameter differs.
+        """
+        if (
+            existing.workspace_id != workspace_id
+            or existing.ai_checks_reserved != requested_checks
+            or (existing.user_id or None) != (user_id or None)
+            or (existing.project_id or None) != (project_id or None)
+        ):
+            raise ConflictError("Idempotency key reused with conflicting parameters.")
+
+    def _validate_usage_event_match(
+        self,
+        existing: UsageEvent,
+        reservation_id: uuid.UUID,
+        quantity: int,
+        provider: str | None,
+        model: str | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        total_tokens: int | None,
+        cost_usd: Decimal,
+    ) -> None:
+        """Validate that an existing UsageEvent matches the request's material fields.
+
+        Compares all material accounting fields: reservation_id,
+        ai_checks, provider, model, tokens, and cost. Used in both the
+        normal idempotency re-check path and the IntegrityError race
+        fallback path. Ensures contradictory provider cost data is
+        never silently discarded.
+
+        Raises ConflictError if any material field differs.
+        """
+        if (
+            existing.quota_reservation_id != reservation_id
+            or existing.ai_checks != quantity
+            or existing.provider != provider
+            or existing.model != model
+            or existing.input_tokens != input_tokens
+            or existing.output_tokens != output_tokens
+            or existing.total_tokens != total_tokens
+            or existing.cost_usd != cost_usd
+        ):
+            raise ConflictError("Usage idempotency key reused with conflicting parameters.")
+
     def reserve_ai_checks(
         self,
         workspace_id: uuid.UUID,
@@ -193,6 +261,10 @@ class QuotaService:
         acquiring the period lock, so concurrent calls with the same
         key do not leak IntegrityError — one creates, the other returns
         the existing record.
+
+        Transaction lifecycle: the period lock is always released
+        (commit or rollback) before this method returns, including on
+        idempotent early returns.
 
         Raises:
             ValueError: if requested_checks <= 0.
@@ -219,13 +291,11 @@ class QuotaService:
             # an IntegrityError on the unique constraint.
             existing = self._reservation_repo.get_by_idempotency_key(idempotency_key)
             if existing is not None:
-                if (
-                    existing.workspace_id != workspace_id
-                    or existing.ai_checks_reserved != requested_checks
-                    or (existing.user_id or None) != (user_id or None)
-                    or (existing.project_id or None) != (project_id or None)
-                ):
-                    raise ConflictError("Idempotency key reused with conflicting parameters.")
+                self._validate_reservation_idempotency_match(
+                    existing, workspace_id, requested_checks, user_id, project_id
+                )
+                # Release the period lock before returning.
+                self._session.commit()
                 return existing
 
             available = limit - period.ai_checks_used - period.ai_checks_reserved
@@ -271,10 +341,14 @@ class QuotaService:
             except IntegrityError:
                 # Race: another worker inserted the same idempotency_key
                 # between our re-check and insert. Roll back the reserved
-                # increment, then return the existing reservation.
+                # increment, then validate and return the existing
+                # reservation using the SAME validation as the normal path.
                 self._session.rollback()
                 existing = self._reservation_repo.get_by_idempotency_key(idempotency_key)
                 if existing is not None:
+                    self._validate_reservation_idempotency_match(
+                        existing, workspace_id, requested_checks, user_id, project_id
+                    )
                     return existing
                 raise ConflictError("Reservation idempotency conflict.") from None
             self._session.commit()
@@ -319,12 +393,20 @@ class QuotaService:
 
         Idempotent on usage_idempotency_key: retrying returns the
         existing UsageEvent without double-counting. The idempotency
-        re-check happens AFTER acquiring locks.
+        re-check happens AFTER acquiring locks and validates ALL
+        material accounting fields (reservation, quantity, provider,
+        model, tokens, cost).
+
+        Transaction lifecycle: all locks (reservation + period) are
+        always released (commit or rollback) before this method
+        returns, including on idempotent early returns.
 
         Raises:
             ValueError: if quantity is invalid.
             ConflictError: if reservation not found, status invalid,
-                quantity exceeds remaining, or idempotency key conflict.
+                quantity exceeds remaining, or idempotency key conflict
+                (different reservation, quantity, provider, model,
+                tokens, or cost).
         """
         if quantity <= 0:
             raise ValueError("quantity must be positive")
@@ -338,12 +420,20 @@ class QuotaService:
             # Re-check usage idempotency AFTER acquiring the reservation lock.
             existing_event = self._usage_repo.get_by_idempotency_key(usage_idempotency_key)
             if existing_event is not None:
-                # Verify the existing event matches this request.
-                if (
-                    existing_event.quota_reservation_id != reservation.id
-                    or existing_event.ai_checks != quantity
-                ):
-                    raise ConflictError("Usage idempotency key reused with conflicting parameters.")
+                # Validate ALL material accounting fields match.
+                self._validate_usage_event_match(
+                    existing_event,
+                    reservation.id,
+                    quantity,
+                    provider,
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    cost_usd,
+                )
+                # Release the reservation lock before returning.
+                self._session.commit()
                 return existing_event
 
             if reservation.status not in (
@@ -395,9 +485,22 @@ class QuotaService:
                 self._usage_repo.create(event)
             except IntegrityError:
                 # Race: another worker inserted the same usage_idempotency_key.
+                # Roll back, fetch the winner, and run THE SAME material
+                # payload validation as the normal path.
                 self._session.rollback()
                 existing_event = self._usage_repo.get_by_idempotency_key(usage_idempotency_key)
                 if existing_event is not None:
+                    self._validate_usage_event_match(
+                        existing_event,
+                        reservation.id,
+                        quantity,
+                        provider,
+                        model,
+                        input_tokens,
+                        output_tokens,
+                        total_tokens,
+                        cost_usd,
+                    )
                     return existing_event
                 raise ConflictError("Usage idempotency conflict.") from None
             self._session.flush()
@@ -427,8 +530,14 @@ class QuotaService:
         month. This ensures August reservations released in September
         update August's counters, not September's.
 
-        Idempotent: calling release twice does not subtract twice.
-        Sets reservation status to RELEASED.
+        Idempotent: calling release on a terminal reservation (RELEASED,
+        EXPIRED, or COMMITTED) is a no-op. The reservation remains in
+        its current terminal state — COMMITTED is never changed to
+        RELEASED.
+
+        Transaction lifecycle: all locks are always released (commit or
+        rollback) before this method returns, including on idempotent
+        early returns.
         """
         try:
             # Lock the reservation first.
@@ -436,11 +545,17 @@ class QuotaService:
             if reservation is None:
                 raise ConflictError("Reservation not found.")
 
+            # COMMITTED, RELEASED, and EXPIRED are all terminal.
+            # Releasing a terminal reservation is an idempotent no-op.
+            # COMMITTED must NOT become RELEASED — the reservation was
+            # fully consumed and its history must be preserved.
             if reservation.status in (
+                QuotaReservationStatus.COMMITTED,
                 QuotaReservationStatus.RELEASED,
                 QuotaReservationStatus.EXPIRED,
             ):
-                # Already released/expired — idempotent no-op.
+                # Release the reservation lock before returning.
+                self._session.commit()
                 return
 
             remaining = reservation.ai_checks_reserved - reservation.ai_checks_committed
@@ -479,6 +594,12 @@ class QuotaService:
         Each reservation is expired against its ORIGINAL usage period
         (via usage_period_id), not the current month.
 
+        Transaction lifecycle: the transaction is always finished
+        (commit or rollback) before returning, even when zero
+        reservations are processed. A missing referenced usage period
+        is treated as accounting corruption — the method raises and
+        rolls back rather than silently continuing.
+
         Returns the number of reservations expired.
         """
         try:
@@ -491,13 +612,15 @@ class QuotaService:
                     # Lock the ORIGINAL usage period for this reservation.
                     period = self._period_repo.get_by_id_for_update(reservation.usage_period_id)
                     if period is None:
-                        # Period was deleted — skip this reservation.
-                        logger.error(
-                            "quota_expire_period_missing",
-                            reservation_id=str(reservation.id),
-                            usage_period_id=str(reservation.usage_period_id),
+                        # Period was deleted — accounting corruption.
+                        # Raise rather than silently continuing, since
+                        # usage_period_id has a RESTRICT FK and a
+                        # missing period indicates data integrity failure.
+                        raise ConflictError(
+                            f"Original usage period {reservation.usage_period_id} "
+                            f"not found for reservation {reservation.id} — "
+                            f"possible accounting corruption."
                         )
-                        continue
                     period.ai_checks_reserved -= remaining
 
                 reservation.status = QuotaReservationStatus.EXPIRED
@@ -512,9 +635,11 @@ class QuotaService:
                     metadata={"expired": remaining},
                 )
 
-            if count > 0:
-                self._session.flush()
-                self._session.commit()
+            # Always commit to release any FOR UPDATE SKIP LOCKED locks,
+            # even when count == 0 (the SKIP LOCKED query may have
+            # acquired locks on rows that were then skipped).
+            self._session.flush()
+            self._session.commit()
 
             return count
 
