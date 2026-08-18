@@ -120,3 +120,12 @@ class ProviderErrorCode(str, Enum):
     INVALID_REQUEST = "INVALID_REQUEST"
     MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
     UNKNOWN_PROVIDER_ERROR = "UNKNOWN_PROVIDER_ERROR"
+
+
+class QuotaReservationStatus(str, Enum):
+    """Lifecycle states for a QuotaReservation."""
+
+    ACTIVE = "ACTIVE"
+    COMMITTED = "COMMITTED"
+    RELEASED = "RELEASED"
+    EXPIRED = "EXPIRED"

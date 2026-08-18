@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     rate_limit_register_max: int = 5
     rate_limit_register_window_seconds: int = 3600  # 1 hour
 
+    # --- Quota ---
+    quota_reservation_ttl_seconds: int = 1800  # 30 minutes default
+
     # --- AI providers (placeholders, not validated in Phase 0/1) ---
     openai_api_key: SecretStr = SecretStr("")
     openai_scan_model: str = ""

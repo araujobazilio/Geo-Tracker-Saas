@@ -20,7 +20,7 @@ an action was implemented.
 | 0 | Repository and application foundation | IMPLEMENTED |
 | 1 | Core database and multi-tenancy | IMPLEMENTED |
 | 2 | Authentication, Workspaces and authorization | IMPLEMENTED |
-| 3 | Entitlements, plans, usage and quotas | PLANNED |
+| 3 | Entitlements, plans, usage and quotas | IMPLEMENTED |
 | 4 | Project onboarding and prompt system | PLANNED |
 | 5 | AI provider abstraction and integrations | PLANNED |
 | 6 | Scan Engine | PLANNED |
@@ -38,6 +38,23 @@ an action was implemented.
 | 18 | AppSumo launch preparation | PLANNED |
 
 See `docs/` for detailed architecture and roadmap documentation.
+
+---
+
+## Features
+
+- **Multi-tenant workspaces:** tenant boundary enforced on every
+  workspace-scoped operation; cross-tenant access returns 404.
+- **Authentication:** opaque server-side sessions with HttpOnly cookies,
+  Argon2id password hashing, CSRF protection.
+- **Entitlements:** plan-driven capabilities resolved from
+  `BillingAccount` → `PlanDefinition` → `EffectiveEntitlements`.
+  Fail-safe UNENTITLED behavior for misconfigured or lapsed workspaces.
+  See `docs/ENTITLEMENTS.md`.
+- **Usage and quotas:** atomic AI Check quota management with
+  PostgreSQL row-level locking, idempotent reservations, and a monthly
+  UTC quota period. AI usage is never unbounded. See
+  `docs/USAGE_AND_QUOTAS.md`.
 
 ---
 
@@ -105,6 +122,8 @@ uvicorn app.main:app --reload
 | POST | `/api/v1/workspaces` | Create workspace |
 | GET | `/api/v1/workspaces/{id}` | Get workspace (member-only) |
 | PATCH | `/api/v1/workspaces/{id}` | Update workspace (OWNER/ADMIN) |
+| GET | `/api/v1/workspaces/{id}/entitlements` | Workspace entitlements (product capabilities) |
+| GET | `/api/v1/workspaces/{id}/usage` | Monthly AI Check quota state |
 | GET | `/docs` | OpenAPI interactive docs (non-production) |
 
 ---

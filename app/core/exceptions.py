@@ -56,6 +56,13 @@ class QuotaExceededError(AppError):
     code = "quota_exceeded"
 
 
+class EntitlementDeniedError(AppError):
+    """Raised when a feature or provider is not available on the current plan."""
+
+    status_code = 403
+    code = "entitlement_denied"
+
+
 class RateLimitExceededError(AppError):
     status_code = 429
     code = "rate_limited"

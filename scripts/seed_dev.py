@@ -36,6 +36,8 @@ from app.models import (
     AppSumoLicense,
     BillingAccount,
     Competitor,
+    PlanDefinition,
+    PlanProvider,
     Project,
     ProjectKeyword,
     ProjectProvider,
@@ -177,11 +179,76 @@ def _seed(session: Session) -> None:
         )
     )
 
+    # --- Development plan definitions (NOT commercial plans) ---
+    dev_standard = PlanDefinition(
+        code="DEV_STANDARD",
+        name="Dev Standard (Fixture)",
+        description="Development fixture plan — NOT a commercial offering.",
+        is_active=True,
+        max_projects=3,
+        max_keywords_per_project=20,
+        max_competitors_per_project=10,
+        max_team_members=3,
+        monthly_ai_checks=500,
+        min_scheduled_scan_interval_hours=24,
+        confidence_scans_enabled=False,
+        verification_scans_enabled=False,
+        white_label_reports=False,
+        exports_enabled=True,
+        agency_dashboard=False,
+        integrations_enabled=False,
+        byok_enabled=False,
+    )
+    session.add(dev_standard)
+    session.flush()
+
+    dev_agency = PlanDefinition(
+        code="DEV_AGENCY",
+        name="Dev Agency (Fixture)",
+        description="Development fixture plan — NOT a commercial offering.",
+        is_active=True,
+        max_projects=10,
+        max_keywords_per_project=50,
+        max_competitors_per_project=20,
+        max_team_members=10,
+        monthly_ai_checks=5000,
+        min_scheduled_scan_interval_hours=6,
+        confidence_scans_enabled=True,
+        verification_scans_enabled=True,
+        white_label_reports=True,
+        exports_enabled=True,
+        agency_dashboard=True,
+        integrations_enabled=True,
+        byok_enabled=True,
+    )
+    session.add(dev_agency)
+    session.flush()
+
+    # Assign all providers to the dev agency plan.
+    for provider in LLMProvider:
+        session.add(
+            PlanProvider(
+                plan_id=dev_agency.id,
+                provider=provider,
+            )
+        )
+    # Assign OpenAI + Anthropic to the dev standard plan.
+    for provider in (LLMProvider.OPENAI, LLMProvider.ANTHROPIC):
+        session.add(
+            PlanProvider(
+                plan_id=dev_standard.id,
+                provider=provider,
+            )
+        )
+    session.flush()
+
+    # --- Billing account with DEV_AGENCY plan ---
     billing = BillingAccount(
         workspace_id=workspace.id,
         source=BillingSource.ADMIN,
         status=BillingAccountStatus.ACTIVE,
-        plan_code="dev_seed",
+        plan_code="DEV_AGENCY",
+        is_primary=True,
     )
     session.add(billing)
     session.flush()

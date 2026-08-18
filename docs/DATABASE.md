@@ -54,6 +54,16 @@ Creates the Phase 1 schema (13 tables):
 | `provider_webhook_events` | Inbound webhook idempotency store |
 | `audit_logs` | Append-only audit trail |
 
+Phase 3 adds four new tables and modifies two existing ones (see
+"Entitlements, usage and quota migration" below):
+
+| Table | Purpose |
+|-------|---------|
+| `plan_definitions` | Typed plan limits and feature flags (code unique) |
+| `plan_providers` | Allowed AI providers per plan |
+| `workspace_usage_periods` | Monthly quota state per workspace |
+| `quota_reservations` | Atomic AI Check reservations |
+
 ## Identifiers
 
 All public-facing entities use **UUID primary keys** (Python-generated
@@ -76,6 +86,11 @@ JSONB arrays of strings via the `StringList` custom type. This is a
 deliberate trade-off: small, schemaless, read-mostly collections that
 do not justify a full child table but should not lose structure.
 
+Plan limits and feature flags (`plan_definitions`) are deliberately
+**NOT** stored as JSONB. They are typed columns with CHECK constraints
+so limits are queryable, validated at the database level, and type-safe
+in Python. See `docs/ENTITLEMENTS.md`.
+
 ## Cascade & retention policy
 
 Conservative cascade behavior — financial/audit history must survive
@@ -94,10 +109,19 @@ entity deletion.
 | `appsumo_licenses` | **RESTRICT** (workspace), SET NULL (billing_account) | License history retention |
 | `provider_webhook_events` | (no FK) | Audit / dispute retention |
 | `audit_logs` | (no FK on user/workspace) | Audit history must survive entity deletion |
+| `plan_definitions` | (no parent FK) | Plan catalog, not tenant-scoped |
+| `plan_providers` | CASCADE (plan_definition) | Owned by plan |
+| `workspace_usage_periods` | **RESTRICT** (workspace) | Usage history must survive |
+| `quota_reservations` | **RESTRICT** (workspace), SET NULL (project/user) | Reservation history retention |
 
 `audit_logs.user_id` and `audit_logs.workspace_id` are plain UUID
 columns (no foreign key) so historical audit records remain valid even
 if the referenced user or workspace is later deleted.
+
+`usage_events.quota_reservation_id` is likewise a plain UUID column
+(no foreign key) so usage/cost history remains valid even if the
+originating reservation is deleted. Reservation rows are normally
+retained, but the lack of FK guarantees retention is never compromised.
 
 ## Unique constraints
 
@@ -108,6 +132,14 @@ if the referenced user or workspace is later deleted.
 - `project_providers (project_id, provider)` — unique
 - `provider_webhook_events (provider, external_event_id)` — unique (idempotency)
 - `appsumo_licenses.external_license_id` — unique (one external license per record)
+- `plan_definitions.code` — unique (one plan per code)
+- `plan_providers (plan_id, provider)` — unique (no duplicate provider per plan)
+- `workspace_usage_periods (workspace_id, period_start)` — unique (one period per workspace per month)
+- `quota_reservations.idempotency_key` — unique (idempotent reservations)
+- `usage_events.idempotency_key` — unique when present (prevents double-counting on retries)
+- `billing_accounts` partial unique index `uq_billing_accounts_primary_per_workspace`
+  on `workspace_id` where `is_primary = true` — at most one primary billing account
+  per workspace at any time
 
 ## CHECK constraints
 
@@ -122,6 +154,34 @@ accounting integrity (added in the hardening migration):
 | `ck_usage_events_total_tokens_non_negative` | `total_tokens IS NULL OR total_tokens >= 0` |
 | `ck_usage_events_cost_usd_non_negative` | `cost_usd >= 0` |
 
+`plan_definitions` has database-level non-negative CHECK constraints for
+all resource and usage limits (added in the entitlements migration):
+
+| Constraint | Rule |
+|-----------|------|
+| `ck_plan_definitions_max_projects_non_negative` | `max_projects >= 0` |
+| `ck_plan_definitions_max_keywords_non_negative` | `max_keywords_per_project >= 0` |
+| `ck_plan_definitions_max_competitors_non_negative` | `max_competitors_per_project >= 0` |
+| `ck_plan_definitions_max_team_members_non_negative` | `max_team_members >= 0` |
+| `ck_plan_definitions_monthly_ai_checks_non_negative` | `monthly_ai_checks >= 0` (always finite, never unlimited) |
+| `ck_plan_definitions_scan_interval_positive` | `min_scheduled_scan_interval_hours IS NULL OR min_scheduled_scan_interval_hours > 0` |
+
+`workspace_usage_periods` has non-negative CHECK constraints:
+
+| Constraint | Rule |
+|-----------|------|
+| `ck_workspace_usage_periods_used_non_negative` | `ai_checks_used >= 0` |
+| `ck_workspace_usage_periods_reserved_non_negative` | `ai_checks_reserved >= 0` |
+
+`quota_reservations` has CHECK constraints enforcing reservation
+invariants:
+
+| Constraint | Rule |
+|-----------|------|
+| `ck_quota_reservations_reserved_positive` | `ai_checks_reserved > 0` (must reserve at least 1) |
+| `ck_quota_reservations_committed_non_negative` | `ai_checks_committed >= 0` |
+| `ck_quota_reservations_committed_le_reserved` | `ai_checks_committed <= ai_checks_reserved` |
+
 ## Hardening migration
 
 **Name:** `harden foundation constraints`
@@ -132,13 +192,51 @@ Adds:
 - `uq_appsumo_licenses_external_license_id` unique constraint
 - Five non-negative CHECK constraints on `usage_events`
 
+## Entitlements, usage and quota migration
+
+**Name:** `add entitlements usage and quota engine`
+**Revision ID:** `b3c4d5e6f7a8`
+**Revises:** `a1b2c3d4e5f6`
+
+Creates four new tables:
+
+| Table | Purpose |
+|-------|---------|
+| `plan_definitions` | Typed plan limits and feature flags (code unique) |
+| `plan_providers` | Allowed AI providers per plan (unique on plan_id + provider) |
+| `workspace_usage_periods` | Monthly quota state per workspace (unique on workspace_id + period_start) |
+| `quota_reservations` | Atomic AI Check reservations (unique idempotency_key) |
+
+Modifies two existing tables:
+
+| Table | Change |
+|-------|--------|
+| `billing_accounts` | Adds `is_primary` boolean column + partial unique index `uq_billing_accounts_primary_per_workspace` (at most one primary per workspace) |
+| `usage_events` | Adds `idempotency_key` (nullable, unique) and `quota_reservation_id` (nullable, plain UUID — no FK, no cascade) |
+
+Adds:
+- Six non-negative CHECK constraints on `plan_definitions`
+- Two non-negative CHECK constraints on `workspace_usage_periods`
+- Three CHECK constraints on `quota_reservations` (reserved > 0,
+  committed >= 0, committed <= reserved)
+- `uq_plan_providers_plan_provider` unique constraint
+- `uq_workspace_usage_period_workspace_period` unique constraint
+- `uq_quota_reservations_idempotency_key` unique constraint
+- `uq_usage_events_idempotency_key` unique constraint
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
 `projects.domain`, `projects.status`, `prompts.prompt_type`,
 `prompts.prompt_set_version`, `usage_events.event_type`,
-`billing_accounts.source`, `appsumo_licenses.status`,
-`provider_webhook_events.provider`, `provider_webhook_events.status`.
+`usage_events.idempotency_key`, `usage_events.quota_reservation_id`,
+`billing_accounts.source`, `billing_accounts.plan_code`,
+`appsumo_licenses.status`, `provider_webhook_events.provider`,
+`provider_webhook_events.status`, `plan_definitions.code`,
+`plan_providers.plan_id`, `workspace_usage_periods.workspace_id`,
+`workspace_usage_periods.period_start`, `quota_reservations.workspace_id`,
+`quota_reservations.project_id`, `quota_reservations.user_id`,
+`quota_reservations.status`.
 
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`

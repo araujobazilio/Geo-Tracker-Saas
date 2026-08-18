@@ -48,6 +48,59 @@ to reduce IDOR risk.
 
 See `docs/MULTITENANCY.md`.
 
+## Service layer
+
+Domain and application logic lives in `app/services`. Each service is a
+single responsibility boundary consumed by routers and other services.
+
+| Service | Responsibility |
+|---------|----------------|
+| `WorkspaceAuthorizationService` | Tenant-access enforcement (membership checks) |
+| `AuditService` | Centralized audit logging |
+| `EntitlementService` | Resolves effective entitlements for a workspace |
+| `QuotaService` | Atomic AI Check quota reservations and usage accounting |
+
+### Entitlement resolution
+
+`EntitlementService` resolves what a workspace is entitled to via a
+single chain:
+
+```
+BillingAccount (primary, eligible status) → plan_code → PlanDefinition → EffectiveEntitlements
+```
+
+It is **fail-safe**: if there is no primary billing account, the status
+is not eligible, the plan code is missing/unknown, or the plan is
+inactive, it returns a conservative `UNENTITLED` snapshot (all limits
+zero, all flags false, no providers). It never raises. Routers and
+services consume the immutable `EffectiveEntitlements` value object,
+never billing tables directly.
+
+See `docs/ENTITLEMENTS.md`.
+
+### Quota reservation flow
+
+`QuotaService` enforces AI Check quotas atomically using PostgreSQL
+row-level locking (`SELECT ... FOR UPDATE`):
+
+```
+reserve_ai_checks()  →  ACTIVE reservation (quota held)
+        ↓
+provider call executes
+        ↓
+commit_ai_checks()   →  COMMITTED (used incremented, UsageEvent created)
+        or
+release_reservation() → RELEASED (unused reserved returned)
+        or
+expire_stale_reservations() → EXPIRED (TTL passed)
+```
+
+PostgreSQL is the quota source of truth (NOT Redis). The monthly quota
+period is the UTC calendar month. Reservations are idempotent via
+`idempotency_key` and retained after completion for history.
+
+See `docs/USAGE_AND_QUOTAS.md`.
+
 ## Technology stack
 
 | Layer | Technology |
@@ -93,7 +146,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Application foundation | IMPLEMENTED (Phase 0) |
 | Core multi-tenant data model | IMPLEMENTED (Phase 1) |
 | Authentication, workspaces, authorization | IMPLEMENTED (Phase 2) |
-| Entitlements / quotas | PLANNED (Phase 3) |
+| Entitlements / quotas | IMPLEMENTED (Phase 3) |
 | Project onboarding / prompts | PLANNED (Phase 4) |
 | AI provider abstraction | PLANNED (Phase 5) |
 | Scan Engine | PLANNED (Phase 6) |

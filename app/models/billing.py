@@ -6,7 +6,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+import sqlalchemy as sa
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import AppSumoLicenseStatus, BillingAccountStatus, BillingSource
@@ -21,9 +22,23 @@ class BillingAccount(UUIDPrimaryKey, TimestampMixin, Base):
     Independent from User so a workspace can be billed via AppSumo,
     Stripe, or an admin grant without coupling to a single user.
     BillingAccount is NEVER cascade-deleted (financial history retention).
+
+    `is_primary` designates the current/primary billing account for a
+    workspace. A partial unique index ensures at most one primary billing
+    account per workspace at any time. Historical canceled accounts
+    remain in the database with `is_primary = false`.
     """
 
     __tablename__ = "billing_accounts"
+    __table_args__ = (
+        # Partial unique index: at most one primary billing account per workspace.
+        Index(
+            "uq_billing_accounts_primary_per_workspace",
+            "workspace_id",
+            unique=True,
+            postgresql_where=sa.text("is_primary = true"),
+        ),
+    )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType, ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -34,6 +49,9 @@ class BillingAccount(UUIDPrimaryKey, TimestampMixin, Base):
     )
     external_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     plan_code: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     appsumo_licenses: Mapped[list[AppSumoLicense]] = relationship(back_populates="billing_account")
 

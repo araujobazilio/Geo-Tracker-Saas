@@ -9,6 +9,9 @@ Provides:
   - get_auth_service: AuthService factory
   - get_login_rate_limiter: RateLimiter factory for login
   - get_register_rate_limiter: RateLimiter factory for register
+  - get_workspace_auth_service: WorkspaceAuthorizationService factory
+  - get_entitlement_service: EntitlementService factory
+  - get_quota_service: QuotaService factory
 """
 
 from __future__ import annotations
@@ -27,8 +30,11 @@ from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.services.audit_service import AuditService
 from app.services.auth_service import AuthService
+from app.services.entitlement_service import EntitlementService
+from app.services.quota_service import QuotaService
 from app.services.rate_limiter import RateLimiter
 from app.services.session_service import SessionService
+from app.services.workspace_auth_service import WorkspaceAuthorizationService
 from app.services.workspace_service import WorkspaceService
 
 # --- Service factories ---
@@ -56,6 +62,26 @@ def get_workspace_service(
     audit_service: Annotated[AuditService, Depends(get_audit_service)],
 ) -> WorkspaceService:
     return WorkspaceService(session=db, audit_service=audit_service)
+
+
+def get_workspace_auth_service(
+    db: Annotated[Session, Depends(get_db)],
+    audit_service: Annotated[AuditService, Depends(get_audit_service)],
+) -> WorkspaceAuthorizationService:
+    return WorkspaceAuthorizationService(session=db, audit_service=audit_service)
+
+
+def get_entitlement_service(
+    db: Annotated[Session, Depends(get_db)],
+) -> EntitlementService:
+    return EntitlementService(session=db)
+
+
+def get_quota_service(
+    db: Annotated[Session, Depends(get_db)],
+    audit_service: Annotated[AuditService, Depends(get_audit_service)],
+) -> QuotaService:
+    return QuotaService(session=db, audit_service=audit_service)
 
 
 def get_login_rate_limiter(

@@ -44,6 +44,35 @@ Phase 2. Security hardening is Phase 17.
   `cost_usd` (see `docs/DATABASE.md`).
 - **AppSumo license uniqueness:** `external_license_id` is UNIQUE at the
   database level.
+- **Quota enforcement (cost protection):** AI usage is NEVER unbounded.
+  `monthly_ai_checks` is always a finite integer on every plan (never
+  unlimited) to protect paid-provider API economics. `QuotaService`
+  reserves quota before every AI call using PostgreSQL row-level locking
+  (`SELECT ... FOR UPDATE`) to prevent concurrent oversubscription.
+  See `docs/USAGE_AND_QUOTAS.md`.
+- **Fail-safe UNENTITLED behavior:** `EntitlementService` never raises.
+  If a workspace has no primary billing account, an ineligible status,
+  a missing/unknown plan code, or an inactive plan, it returns a
+  conservative `UNENTITLED` snapshot (all limits zero, all flags false,
+  no providers). A misconfigured or lapsed workspace cannot accidentally
+  access paid capabilities. See `docs/ENTITLEMENTS.md`.
+- **Usage accounting idempotency:** `usage_events.idempotency_key` is
+  unique when present, preventing double-counted AI Checks, tokens, or
+  cost on provider-call retries. `quota_reservations.idempotency_key`
+  is unique, making reservation retries idempotent.
+- **Entitlements/usage endpoint isolation:** the
+  `GET /api/v1/workspaces/{workspace_id}/entitlements` and
+  `GET /api/v1/workspaces/{workspace_id}/usage` endpoints require
+  authentication and workspace membership via
+  `WorkspaceAuthorizationService`. Cross-tenant access returns 404
+  (not 403) to avoid revealing resource existence, consistent with all
+  other workspace-scoped endpoints. These endpoints expose only product
+  capabilities and quota state — never billing internals (customer IDs,
+  license IDs).
+- **Plan limit integrity:** `plan_definitions` limits are typed columns
+  with database-level CHECK constraints (non-negative), not JSON blobs.
+  `quota_reservations` enforces `reserved > 0` and
+  `committed <= reserved` at the database level.
 - **Audit logging:** centralized `AuditService` records auth and workspace
   events. Never stores session tokens, CSRF tokens, passwords, or hashes.
 - **Logging:** structured logs never include passwords, API keys, or tokens.

@@ -6,7 +6,7 @@ import uuid
 from decimal import Decimal
 
 from sqlalchemy import DECIMAL as SQL_DECIMAL
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, String
+from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enums import UsageEventType
@@ -20,6 +20,13 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
 
     Money is stored as NUMERIC (Decimal) — never binary floating point.
     `cost_usd` is the estimated USD cost of the underlying provider call.
+
+    `idempotency_key` is unique when present — a provider-call retry
+    must not result in double-counted AI Checks, tokens, or cost.
+
+    `quota_reservation_id` links to the QuotaReservation that reserved
+    this usage, for traceability. It is a plain UUID (no FK cascade) so
+    that UsageEvent retention is not compromised by reservation deletion.
 
     UsageEvent is NEVER cascade-deleted; it is required for billing
     disputes and cost accounting. See docs/DATABASE.md.
@@ -45,6 +52,8 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
             name="ck_usage_events_total_tokens_non_negative",
         ),
         CheckConstraint("cost_usd >= 0", name="ck_usage_events_cost_usd_non_negative"),
+        # Partial uniqueness on idempotency_key: only enforced when not NULL.
+        UniqueConstraint("idempotency_key", name="uq_usage_events_idempotency_key"),
     )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -64,6 +73,12 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[Decimal] = mapped_column(SQL_DECIMAL(12, 6), nullable=False, default=0)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=False, index=True
+    )
+    quota_reservation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType, nullable=True, index=True
+    )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<UsageEvent workspace={self.workspace_id} type={self.event_type} checks={self.ai_checks}>"
