@@ -117,6 +117,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "integration: marks tests that require external infrastructure (db, redis)",
+    "unit: marks tests that do not require external infrastructure",
 ]
 filterwarnings = [
     "error::DeprecationWarning",

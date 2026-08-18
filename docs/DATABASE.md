@@ -47,12 +47,24 @@ Creates the Phase 1 schema (13 tables):
 | `project_keywords` | Tracked buyer intents |
 | `competitors` | Competitor brands per project |
 | `project_providers` | Per-project enabled AI providers |
-| `prompts` | Versioned AI-search prompts |
+| `prompts` | Versioned AI-search prompts (linked to PromptSet) |
 | `usage_events` | AI Check accounting (cost in NUMERIC) |
 | `billing_accounts` | Billing / entitlement source per workspace |
 | `appsumo_licenses` | AppSumo lifetime-deal licenses |
 | `provider_webhook_events` | Inbound webhook idempotency store |
 | `audit_logs` | Append-only audit trail |
+
+Phase 4 adds one new table and modifies three existing ones (see
+"Project onboarding and versioned prompts migration" below):
+
+| Table | Purpose |
+|-------|---------|
+| `prompt_sets` | Versioned prompt set per project (ACTIVE/SUPERSEDED) |
+
+Phase 4 also adds columns to `projects` (`prompt_input_revision`),
+`project_keywords` (`normalized_text`), and `prompts`
+(`prompt_set_id`, `variant_index`, `created_at`; removes
+`prompt_set_version`).
 
 Phase 3 adds four new tables and modifies two existing ones (see
 "Entitlements, usage and quota migration" below):
@@ -103,7 +115,8 @@ entity deletion.
 | `project_keywords` | CASCADE (project) | Owned by project |
 | `competitors` | CASCADE (project) | Owned by project |
 | `project_providers` | CASCADE (project) | Owned by project |
-| `prompts` | CASCADE (project_keyword) | Owned by keyword |
+| `prompts` | **RESTRICT** (prompt_set), CASCADE (project_keyword) | Owned by keyword; prompt set history must survive |
+| `prompt_sets` | CASCADE (project) | Owned by project |
 | `usage_events` | **RESTRICT** (workspace, quota_reservation), SET NULL (user/project) | Billing/cost history must survive |
 | `billing_accounts` | **RESTRICT** (workspace) | Financial history retention |
 | `appsumo_licenses` | **RESTRICT** (workspace), SET NULL (billing_account) | License history retention |
@@ -129,9 +142,14 @@ can never be orphaned from its originating reservation.
 
 - `users.email` — unique
 - `workspace_members (workspace_id, user_id)` — unique (no duplicate membership)
-- `project_keywords (project_id, text)` — unique
+- `project_keywords (project_id, normalized_text)` — unique (Phase 4: changed from `text` to `normalized_text`)
 - `competitors (project_id, domain)` — unique
 - `project_providers (project_id, provider)` — unique
+- `prompt_sets (project_id, version)` — unique (Phase 4)
+- `prompts (prompt_set_id, project_keyword_id, variant_index)` — unique (Phase 4)
+- `prompt_sets` partial unique index `uq_prompt_sets_active_per_project`
+  on `project_id` where `status = 'ACTIVE'` — at most one ACTIVE prompt set
+  per project at any time (Phase 4)
 - `provider_webhook_events (provider, external_event_id)` — unique (idempotency)
 - `appsumo_licenses.external_license_id` — unique (one external license per record)
 - `plan_definitions.code` — unique (one plan per code)
@@ -265,11 +283,49 @@ Adds:
   `ON DELETE RESTRICT`
 - Index on `quota_reservations.usage_period_id`
 
+## Project onboarding and versioned prompts migration
+
+**Name:** `add project onboarding and versioned prompts`
+**Revision ID:** `d5e6f7a8b9c0`
+**Revises:** `c4d5e6f7a8b9`
+
+Introduces the stable, versioned prompt system and project onboarding
+enhancements. Prompts are now linked to a `PromptSet` entity (first-class,
+versioned, never overwritten) rather than being keyed by a version integer
+on the project.
+
+Adds:
+- `prompt_sets` table: `id`, `project_id` (CASCADE), `version`, `input_revision`,
+  `status` (ACTIVE/SUPERSEDED), `generator_key`, `created_by_user_id`,
+  `created_at`, `activated_at`
+- `uq_prompt_sets_project_version` unique constraint on `(project_id, version)`
+- `uq_prompt_sets_active_per_project` partial unique index on `project_id`
+  where `status = 'ACTIVE'` — at most one active set per project
+- `projects.prompt_input_revision` column (NOT NULL, default 1, CHECK >= 1)
+- `project_keywords.normalized_text` column (NOT NULL)
+- `prompts.prompt_set_id` column (UUID, FK → `prompt_sets.id` ON DELETE RESTRICT)
+- `prompts.variant_index` column (integer)
+- `prompts.created_at` column
+- `uq_prompts_set_keyword_variant` unique constraint on
+  `(prompt_set_id, project_keyword_id, variant_index)`
+- Index on `prompts.prompt_set_id`
+
+Backfills:
+- Existing projects get `prompt_input_revision = 1`
+- Existing keywords get `normalized_text` derived from `text` (lowercase, trimmed)
+- Existing prompts get a new `PromptSet` (version 1, ACTIVE) per project,
+  and `prompt_set_id` / `variant_index` are assigned
+
+Removes:
+- `prompts.prompt_set_version` column (replaced by `prompt_set_id` FK)
+- Old `project_keywords (project_id, text)` unique constraint (replaced by
+  `normalized_text`)
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
 `projects.domain`, `projects.status`, `prompts.prompt_type`,
-`prompts.prompt_set_version`, `usage_events.event_type`,
+`prompts.prompt_set_id`, `usage_events.event_type`,
 `usage_events.idempotency_key`, `usage_events.quota_reservation_id`,
 `billing_accounts.source`, `billing_accounts.plan_code`,
 `appsumo_licenses.status`, `provider_webhook_events.provider`,

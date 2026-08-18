@@ -21,7 +21,7 @@ an action was implemented.
 | 1 | Core database and multi-tenancy | IMPLEMENTED |
 | 2 | Authentication, Workspaces and authorization | IMPLEMENTED |
 | 3 | Entitlements, plans, usage and quotas | IMPLEMENTED |
-| 4 | Project onboarding and prompt system | PLANNED |
+| 4 | Project onboarding and prompt system | IMPLEMENTED |
 | 5 | AI provider abstraction and integrations | PLANNED |
 | 6 | Scan Engine | PLANNED |
 | 7 | Brand / citation detection and metrics | PLANNED |
@@ -55,6 +55,15 @@ See `docs/` for detailed architecture and roadmap documentation.
   PostgreSQL row-level locking, idempotent reservations, and a monthly
   UTC quota period. AI usage is never unbounded. See
   `docs/USAGE_AND_QUOTAS.md`.
+- **Project onboarding:** atomic project creation with brand/market
+  configuration, keywords, competitors, and enabled LLM providers.
+  Plan-based capacity limits enforced with row-level locking. See
+  `docs/PROJECT_ONBOARDING.md`.
+- **Stable versioned prompts:** deterministic prompt generation
+  (5 variants per keyword: 3x NON_BRANDED, 1x BRANDED, 1x COMPETITOR)
+  with versioned PromptSets that are never overwritten. Historical
+  prompt sets are preserved for auditability. EN/PT language support.
+  See `docs/PROMPT_SYSTEM.md`.
 
 ---
 

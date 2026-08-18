@@ -59,6 +59,13 @@ single responsibility boundary consumed by routers and other services.
 | `AuditService` | Centralized audit logging |
 | `EntitlementService` | Resolves effective entitlements for a workspace |
 | `QuotaService` | Atomic AI Check quota reservations and usage accounting |
+| `ProjectOnboardingService` | Atomic project creation with keywords, competitors, providers, and initial prompt set |
+| `ProjectService` | Project CRUD, status transitions (pause/activate/archive), summary |
+| `KeywordService` | Keyword CRUD with normalization, capacity enforcement, revision tracking |
+| `CompetitorService` | Competitor CRUD with domain normalization, capacity enforcement |
+| `ProjectProviderService` | Provider configuration (PUT replace), entitlement enforcement |
+| `PromptGenerationService` | Deterministic prompt generation (5 variants/keyword, EN/PT) |
+| `PromptSetService` | PromptSet versioning, regeneration, staleness detection |
 
 ### Entitlement resolution
 
@@ -147,7 +154,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Core multi-tenant data model | IMPLEMENTED (Phase 1) |
 | Authentication, workspaces, authorization | IMPLEMENTED (Phase 2) |
 | Entitlements / quotas | IMPLEMENTED (Phase 3) |
-| Project onboarding / prompts | PLANNED (Phase 4) |
+| Project onboarding / prompts | IMPLEMENTED (Phase 4) |
 | AI provider abstraction | PLANNED (Phase 5) |
 | Scan Engine | PLANNED (Phase 6) |
 | Brand / citation detection | PLANNED (Phase 7) |

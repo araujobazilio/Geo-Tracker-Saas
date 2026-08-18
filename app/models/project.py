@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import ProjectStatus
@@ -15,6 +15,7 @@ from app.db.mixins import UUIDPrimaryKey
 from app.db.types import StringList, UUIDType
 
 if TYPE_CHECKING:
+    from app.models.prompt_set import PromptSet
     from app.models.tracking import Competitor, ProjectKeyword, ProjectProvider
 
 
@@ -26,9 +27,19 @@ class Project(UUIDPrimaryKey, TimestampMixin, Base):
     collection that does not justify a full child table, while still
     preserving structure (vs. comma-separated text). See
     `docs/DATABASE.md` for the rationale.
+
+    `prompt_input_revision` increments whenever configuration affecting
+    generated prompts changes (brand, market, keywords, competitors).
+    Provider changes do NOT increment it. This revision is compared
+    against `PromptSet.input_revision` to determine staleness.
     """
 
     __tablename__ = "projects"
+    __table_args__ = (
+        CheckConstraint(
+            "prompt_input_revision > 0", name="ck_projects_prompt_input_revision_positive"
+        ),
+    )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUIDType,
@@ -48,6 +59,7 @@ class Project(UUIDPrimaryKey, TimestampMixin, Base):
         String(20), nullable=False, default=ProjectStatus.ACTIVE, index=True
     )
     last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    prompt_input_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     keywords: Mapped[list[ProjectKeyword]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -56,6 +68,9 @@ class Project(UUIDPrimaryKey, TimestampMixin, Base):
         back_populates="project", cascade="all, delete-orphan"
     )
     providers: Mapped[list[ProjectProvider]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    prompt_sets: Mapped[list[PromptSet]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 

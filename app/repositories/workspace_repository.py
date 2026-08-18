@@ -20,6 +20,16 @@ class WorkspaceRepository:
     def get_by_id(self, workspace_id: uuid.UUID) -> Workspace | None:
         return self._session.get(Workspace, workspace_id)
 
+    def get_for_update(self, workspace_id: uuid.UUID) -> Workspace | None:
+        """Lock the workspace row for update (for capacity checks)."""
+        result = self._session.execute(
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
+
     def list_for_user(self, user_id: uuid.UUID) -> list[Workspace]:
         """Return all workspaces where `user_id` is a member."""
         stmt = (

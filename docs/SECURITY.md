@@ -65,6 +65,21 @@ Phase 2. Security hardening is Phase 17.
   `GET /api/v1/workspaces/{workspace_id}/usage` endpoints require
   authentication and workspace membership via
   `WorkspaceAuthorizationService`. Cross-tenant access returns 404
+- **Project resource isolation (Phase 4):** all project, keyword,
+  competitor, provider, and prompt-set endpoints require workspace
+  membership. Write operations (create, update, pause, archive,
+  regenerate) require ADMIN or OWNER role. Cross-workspace access to
+  project resources returns 404. Keyword and competitor IDs are scoped
+  to their project — accessing a keyword from project B via project A
+  returns 404/409. See `docs/PROJECT_ONBOARDING.md`.
+- **Plan-based capacity enforcement (Phase 4):** project, keyword, and
+  competitor limits are enforced with PostgreSQL row-level locking
+  (`SELECT ... FOR UPDATE`) to prevent concurrent oversubscription.
+  Archived projects free capacity but reactivation re-checks limits.
+- **Prompt stability (Phase 4):** prompt sets are versioned and never
+  overwritten. Historical prompt sets are preserved with `ON DELETE
+  RESTRICT` on the `prompts → prompt_sets` foreign key, ensuring audit
+  history cannot be silently destroyed. See `docs/PROMPT_SYSTEM.md`.
   (not 403) to avoid revealing resource existence, consistent with all
   other workspace-scoped endpoints. These endpoints expose only product
   capabilities and quota state — never billing internals (customer IDs,

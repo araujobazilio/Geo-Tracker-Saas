@@ -20,6 +20,7 @@ from app.core.logging import configure_logging, get_logger
 from app.routers import infra
 from app.routers.api import auth as auth_router
 from app.routers.api import entitlements as entitlements_router
+from app.routers.api import projects as projects_router
 from app.routers.api import workspaces as workspaces_router
 
 
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router)
     app.include_router(workspaces_router.router)
     app.include_router(entitlements_router.router)
+    app.include_router(projects_router.router)
     return app
 
 

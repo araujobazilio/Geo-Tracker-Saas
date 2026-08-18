@@ -11,6 +11,7 @@ from app.models.billing import AppSumoLicense, BillingAccount
 from app.models.plan_definition import PlanDefinition
 from app.models.plan_provider import PlanProvider
 from app.models.project import Project
+from app.models.prompt_set import PromptSet
 from app.models.quota_reservation import QuotaReservation
 from app.models.tracking import Competitor, ProjectKeyword, ProjectProvider, Prompt
 from app.models.usage import UsageEvent
@@ -30,6 +31,7 @@ __all__ = [
     "ProjectKeyword",
     "ProjectProvider",
     "Prompt",
+    "PromptSet",
     "ProviderWebhookEvent",
     "QuotaReservation",
     "UsageEvent",

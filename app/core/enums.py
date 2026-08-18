@@ -129,3 +129,10 @@ class QuotaReservationStatus(str, Enum):
     COMMITTED = "COMMITTED"
     RELEASED = "RELEASED"
     EXPIRED = "EXPIRED"
+
+
+class PromptSetStatus(str, Enum):
+    """Lifecycle states for a PromptSet."""
+
+    ACTIVE = "ACTIVE"
+    SUPERSEDED = "SUPERSEDED"
