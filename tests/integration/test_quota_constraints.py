@@ -1,4 +1,4 @@
-"""Database constraint tests for Phase 3 models.
+"""Database constraint tests for Phase 3 and 3.1 models.
 
 Verifies database rejects:
   - negative plan limits
@@ -9,10 +9,12 @@ Verifies database rejects:
   - duplicate reservation idempotency key
   - duplicate UsageEvent idempotency key
   - multiple primary billing accounts for same workspace
+  - reservation without usage_period_id (NOT NULL)
 """
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -45,6 +47,17 @@ def _make_workspace(db, name: str = "Constraint WS") -> Workspace:  # type: igno
     db.add(WorkspaceMember(workspace_id=ws.id, user_id=user.id, role=WorkspaceRole.OWNER))
     db.flush()
     return ws
+
+
+def _make_period(db, workspace_id: uuid.UUID) -> WorkspaceUsagePeriod:  # type: ignore[no-untyped-def]
+    period = WorkspaceUsagePeriod(
+        workspace_id=workspace_id,
+        period_start=datetime(2026, 8, 1, tzinfo=UTC),
+        period_end=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    db.add(period)
+    db.flush()
+    return period
 
 
 @pytest.mark.integration
@@ -115,8 +128,10 @@ class TestWorkspaceUsagePeriodConstraints:
 class TestQuotaReservationConstraints:
     def test_zero_reserved_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
         ws = _make_workspace(db_session)
+        period = _make_period(db_session, ws.id)
         res = QuotaReservation(
             workspace_id=ws.id,
+            usage_period_id=period.id,
             idempotency_key="zero-res",
             ai_checks_reserved=0,
         )
@@ -126,8 +141,10 @@ class TestQuotaReservationConstraints:
 
     def test_negative_reserved_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
         ws = _make_workspace(db_session)
+        period = _make_period(db_session, ws.id)
         res = QuotaReservation(
             workspace_id=ws.id,
+            usage_period_id=period.id,
             idempotency_key="neg-res",
             ai_checks_reserved=-5,
         )
@@ -137,8 +154,10 @@ class TestQuotaReservationConstraints:
 
     def test_committed_exceeds_reserved_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
         ws = _make_workspace(db_session)
+        period = _make_period(db_session, ws.id)
         res = QuotaReservation(
             workspace_id=ws.id,
+            usage_period_id=period.id,
             idempotency_key="over-commit",
             ai_checks_reserved=10,
             ai_checks_committed=15,
@@ -149,9 +168,11 @@ class TestQuotaReservationConstraints:
 
     def test_duplicate_idempotency_key_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
         ws = _make_workspace(db_session)
+        period = _make_period(db_session, ws.id)
         db_session.add(
             QuotaReservation(
                 workspace_id=ws.id,
+                usage_period_id=period.id,
                 idempotency_key="dup-key",
                 ai_checks_reserved=10,
             )
@@ -160,10 +181,23 @@ class TestQuotaReservationConstraints:
         db_session.add(
             QuotaReservation(
                 workspace_id=ws.id,
+                usage_period_id=period.id,
                 idempotency_key="dup-key",
                 ai_checks_reserved=20,
             )
         )
+        with pytest.raises(IntegrityError):
+            db_session.flush()
+
+    def test_missing_usage_period_id_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        ws = _make_workspace(db_session)
+        res = QuotaReservation(
+            workspace_id=ws.id,
+            usage_period_id=None,
+            idempotency_key="no-period",
+            ai_checks_reserved=10,
+        )
+        db_session.add(res)
         with pytest.raises(IntegrityError):
             db_session.flush()
 

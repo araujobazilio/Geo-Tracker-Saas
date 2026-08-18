@@ -25,8 +25,9 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
     must not result in double-counted AI Checks, tokens, or cost.
 
     `quota_reservation_id` links to the QuotaReservation that reserved
-    this usage, for traceability. It is a plain UUID (no FK cascade) so
-    that UsageEvent retention is not compromised by reservation deletion.
+    this usage, for traceability. It is a real FK with ON DELETE RESTRICT
+    so that UsageEvent retention is protected — a reservation cannot be
+    deleted while usage events reference it.
 
     UsageEvent is NEVER cascade-deleted; it is required for billing
     disputes and cost accounting. See docs/DATABASE.md.
@@ -77,7 +78,10 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
         String(255), nullable=True, unique=False, index=True
     )
     quota_reservation_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUIDType, nullable=True, index=True
+        UUIDType,
+        ForeignKey("quota_reservations.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
 
     def __repr__(self) -> str:  # pragma: no cover

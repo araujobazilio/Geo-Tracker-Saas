@@ -104,7 +104,7 @@ entity deletion.
 | `competitors` | CASCADE (project) | Owned by project |
 | `project_providers` | CASCADE (project) | Owned by project |
 | `prompts` | CASCADE (project_keyword) | Owned by keyword |
-| `usage_events` | **RESTRICT** (workspace), SET NULL (user/project) | Billing/cost history must survive |
+| `usage_events` | **RESTRICT** (workspace, quota_reservation), SET NULL (user/project) | Billing/cost history must survive |
 | `billing_accounts` | **RESTRICT** (workspace) | Financial history retention |
 | `appsumo_licenses` | **RESTRICT** (workspace), SET NULL (billing_account) | License history retention |
 | `provider_webhook_events` | (no FK) | Audit / dispute retention |
@@ -112,16 +112,18 @@ entity deletion.
 | `plan_definitions` | (no parent FK) | Plan catalog, not tenant-scoped |
 | `plan_providers` | CASCADE (plan_definition) | Owned by plan |
 | `workspace_usage_periods` | **RESTRICT** (workspace) | Usage history must survive |
-| `quota_reservations` | **RESTRICT** (workspace), SET NULL (project/user) | Reservation history retention |
+| `quota_reservations` | **RESTRICT** (workspace, usage_period), SET NULL (project/user) | Reservation history retention; permanently bound to originating period |
 
 `audit_logs.user_id` and `audit_logs.workspace_id` are plain UUID
 columns (no foreign key) so historical audit records remain valid even
 if the referenced user or workspace is later deleted.
 
-`usage_events.quota_reservation_id` is likewise a plain UUID column
-(no foreign key) so usage/cost history remains valid even if the
-originating reservation is deleted. Reservation rows are normally
-retained, but the lack of FK guarantees retention is never compromised.
+`usage_events.quota_reservation_id` is a real foreign key to
+`quota_reservations.id` with `ON DELETE RESTRICT` (added in the quota
+period and concurrency integrity hardening migration). This strengthens
+referential integrity while preserving accounting history: reservation
+rows are never deleted, and the RESTRICT policy guarantees a usage event
+can never be orphaned from its originating reservation.
 
 ## Unique constraints
 
@@ -182,6 +184,11 @@ invariants:
 | `ck_quota_reservations_committed_non_negative` | `ai_checks_committed >= 0` |
 | `ck_quota_reservations_committed_le_reserved` | `ai_checks_committed <= ai_checks_reserved` |
 
+`quota_reservations` also enforces a `NOT NULL` constraint on
+`usage_period_id` (added in the quota period and concurrency integrity
+hardening migration), permanently binding each reservation to its
+originating `WorkspaceUsagePeriod`.
+
 ## Hardening migration
 
 **Name:** `harden foundation constraints`
@@ -224,6 +231,40 @@ Adds:
 - `uq_quota_reservations_idempotency_key` unique constraint
 - `uq_usage_events_idempotency_key` unique constraint
 
+## Quota period and concurrency integrity hardening migration
+
+**Name:** `harden quota period and concurrency integrity`
+**Revision ID:** `c4d5e6f7a8b9`
+**Revises:** `b3c4d5e6f7a8`
+
+Permanently binds each `QuotaReservation` to the `WorkspaceUsagePeriod`
+where quota was originally reserved, and strengthens referential
+integrity on `usage_events`.
+
+Modifies two existing tables:
+
+| Table | Change |
+|-------|--------|
+| `quota_reservations` | Adds `usage_period_id` column (UUID NOT NULL, FK → `workspace_usage_periods.id` `ON DELETE RESTRICT`, indexed). Permanently binds each reservation to its originating period. |
+| `usage_events` | Converts `quota_reservation_id` from a plain UUID to a real FK → `quota_reservations.id` `ON DELETE RESTRICT`. Strengthens referential integrity while preserving accounting history (no cascade deletion). |
+
+The `usage_period_id` backfill is safe and explicit:
+
+1. For each existing reservation, derives the UTC calendar month from
+   `created_at`.
+2. Matches the corresponding `workspace_usage_periods` row by
+   `(workspace_id, period_start)`.
+3. Fails explicitly (raises) if any reservation cannot be matched to a
+   period, rather than silently assigning a wrong period.
+
+Adds:
+- `NOT NULL` constraint on `quota_reservations.usage_period_id`
+- FK `quota_reservations.usage_period_id` → `workspace_usage_periods.id`
+  `ON DELETE RESTRICT`
+- FK `usage_events.quota_reservation_id` → `quota_reservations.id`
+  `ON DELETE RESTRICT`
+- Index on `quota_reservations.usage_period_id`
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
@@ -236,7 +277,7 @@ Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
 `plan_providers.plan_id`, `workspace_usage_periods.workspace_id`,
 `workspace_usage_periods.period_start`, `quota_reservations.workspace_id`,
 `quota_reservations.project_id`, `quota_reservations.user_id`,
-`quota_reservations.status`.
+`quota_reservations.status`, `quota_reservations.usage_period_id`.
 
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`

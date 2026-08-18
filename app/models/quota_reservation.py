@@ -35,10 +35,16 @@ class QuotaReservation(UUIDPrimaryKey, TimestampMixin, Base):
     the existing record rather than creating a duplicate. Reusing the
     same key with conflicting parameters raises a conflict error.
 
+    `usage_period_id` permanently binds the reservation to the
+    WorkspaceUsagePeriod where quota was originally reserved. This
+    ensures that commit/release/expire operations always update the
+    correct monthly period, even across UTC month boundaries.
+
     Constraints:
       - ai_checks_reserved > 0 (must reserve at least 1)
       - ai_checks_committed >= 0
       - ai_checks_committed <= ai_checks_reserved
+      - usage_period_id NOT NULL (every reservation belongs to a period)
     """
 
     __tablename__ = "quota_reservations"
@@ -62,6 +68,12 @@ class QuotaReservation(UUIDPrimaryKey, TimestampMixin, Base):
     )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    usage_period_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType,
+        ForeignKey("workspace_usage_periods.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
     )
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     ai_checks_reserved: Mapped[int] = mapped_column(Integer, nullable=False)

@@ -38,6 +38,27 @@ Quota mutations use `SELECT ... FOR UPDATE` row-level locking on the
 concurrent workers both see "100 available" and each reserves 80
 (total 160 > limit 100).
 
+### Fixed period locking with `populate_existing()`
+
+Period rows are locked via `get_for_period_for_update()` /
+`get_by_id_for_update()`, which issue `SELECT ... FOR UPDATE` with
+`populate_existing()`. This refreshes the ORM object in place with the
+CURRENT row values after the lock is acquired, rather than loading the
+ORM object normally and then running a separate `SELECT id FOR UPDATE`.
+Without `populate_existing()`, quota math could operate on stale
+pre-lock snapshots, defeating the purpose of the lock.
+
+### Lock ordering
+
+Lock ordering is documented and enforced to avoid deadlocks:
+
+- **New reservations:** `WorkspaceUsagePeriod` (`FOR UPDATE`) → create
+  `QuotaReservation`.
+- **Existing reservation mutations** (`commit_ai_checks`,
+  `release_reservation`): `QuotaReservation` (`FOR UPDATE`) →
+  `WorkspaceUsagePeriod` (`FOR UPDATE`, via
+  `reservation.usage_period_id`).
+
 ## WorkspaceUsagePeriod model
 
 `WorkspaceUsagePeriod` (`app/models/workspace_usage_period.py`) tracks
@@ -64,6 +85,7 @@ reservation of AI Checks for a workspace.
 | Column | Type | Notes |
 |--------|------|-------|
 | `workspace_id` | UUID FK → `workspaces.id` (RESTRICT) | |
+| `usage_period_id` | UUID FK → `workspace_usage_periods.id` (RESTRICT), NOT NULL | Permanently binds reservation to its originating period |
 | `project_id` | UUID FK → `projects.id` (SET NULL), nullable | |
 | `user_id` | UUID FK → `users.id` (SET NULL), nullable | |
 | `idempotency_key` | String(255) | Unique — retry returns existing record |
@@ -75,6 +97,9 @@ reservation of AI Checks for a workspace.
 Constraints:
 
 - `uq_quota_reservations_idempotency_key` — unique idempotency key.
+- `quota_reservations.usage_period_id` — `NOT NULL`, FK →
+  `workspace_usage_periods.id` (`ON DELETE RESTRICT`). Permanently binds
+  each reservation to the period where quota was originally reserved.
 - `ck_quota_reservations_reserved_positive` — `ai_checks_reserved > 0`.
 - `ck_quota_reservations_committed_non_negative` —
   `ai_checks_committed >= 0`.
@@ -122,6 +147,21 @@ State transitions:
 `COMMITTED`, `RELEASED`, and `EXPIRED` are terminal states. Releasing
 or expiring an already-terminal reservation is an idempotent no-op.
 
+### Period binding and the cross-month invariant
+
+Each reservation stores `usage_period_id`, a `NOT NULL` foreign key to
+`workspace_usage_periods.id` (`ON DELETE RESTRICT`). This permanently
+binds the reservation to the exact `WorkspaceUsagePeriod` where quota
+was originally reserved.
+
+The cross-month invariant: `commit_ai_checks()`,
+`release_reservation()`, and `expire_stale_reservations()` always
+update the **ORIGINAL** period referenced by
+`reservation.usage_period_id`, never the current month
+(`month_period(self._now)`). This prevents a reservation created late
+in one month from debiting or crediting the next month's period when it
+is committed, released, or expired after the month boundary.
+
 ## QuotaService methods
 
 `QuotaService` (`app/services/quota_service.py`) controls its own
@@ -132,10 +172,20 @@ transaction boundaries for each mutation. Audit logging is independent
 
 Atomically reserve AI Checks before a scan/provider call executes.
 
-- Uses `SELECT ... FOR UPDATE` on the usage period row.
+- Uses `SELECT ... FOR UPDATE` on the usage period row (via
+  `get_for_period_for_update()` with `populate_existing()`).
+- Creates the reservation with `usage_period_id` pointing to the exact
+  period that was locked.
 - Idempotent on `idempotency_key`: retrying with the same key returns
   the existing reservation. Reusing the same key with conflicting
   parameters raises `ConflictError`.
+- **Re-check under lock:** re-checks the idempotency key AFTER
+  acquiring the period lock. If a concurrent insert wins the race
+  (`IntegrityError`), the session is rolled back and the existing
+  reservation is returned.
+- **Cross-workspace project validation:** validates that `project_id`
+  belongs to `workspace_id` via `ProjectRepository.get_in_workspace()`.
+  Rejects with `ConflictError` if the project is not in the workspace.
 - Raises `QuotaExceededError` (429) if not enough quota remaining.
 - Sets `expires_at = now + quota_reservation_ttl_seconds`.
 
@@ -144,29 +194,44 @@ Atomically reserve AI Checks before a scan/provider call executes.
 Commit N AI Checks against a reservation after the provider call
 succeeds. Atomically:
 
+- Locks the reservation row with `get_by_id_for_update()` before
+  mutation, then locks the originating usage period (via
+  `reservation.usage_period_id`) with `get_by_id_for_update()`.
 - Decrements `ai_checks_reserved`, increments `ai_checks_used` on the
-  usage period.
+  **ORIGINAL** usage period (never the current month).
 - Increments `ai_checks_committed` on the reservation.
 - If `committed == reserved`, marks the reservation `COMMITTED`.
 - Creates an immutable `UsageEvent` linked via `quota_reservation_id`.
 
 Idempotent on `usage_idempotency_key`: retrying returns the existing
-`UsageEvent` without double-counting. Raises `ConflictError` if the
-quantity exceeds the remaining uncommitted balance or the reservation
-is not in an active/committed state.
+`UsageEvent` without double-counting. **Re-check under lock:**
+re-checks the usage idempotency key AFTER acquiring the reservation
+lock. If a concurrent insert wins the race (`IntegrityError`), the
+session is rolled back and the existing usage event is returned.
+Raises `ConflictError` if the same key is reused with conflicting
+parameters (different `reservation_id` or `quantity`), if the quantity
+exceeds the remaining uncommitted balance, or the reservation is not
+in an active/committed state.
 
 ### `release_reservation(reservation_id)`
 
 Release remaining uncommitted reserved checks back to the pool (e.g.
-scan canceled or failed). Sets the reservation to `RELEASED`.
-Idempotent: calling twice does not subtract twice.
+scan canceled or failed). Locks the reservation row with
+`get_by_id_for_update()` before mutation, then locks the originating
+usage period (via `reservation.usage_period_id`). Credits the
+**ORIGINAL** period, never the current month. Sets the reservation to
+`RELEASED`. Idempotent: calling twice does not subtract twice.
 
 ### `expire_stale_reservations()`
 
-Expire `ACTIVE` reservations whose `expires_at` has passed. Releases
-the remaining reserved balance back to the pool and sets each to
-`EXPIRED`. Returns the count of reservations expired. Intended to be
-called by a periodic Celery Beat job.
+Expire `ACTIVE` reservations whose `expires_at` has passed. Uses
+`FOR UPDATE SKIP LOCKED` (via
+`list_expired_active_for_update_skip_locked()`) so multiple workers
+never process the same reservation. Releases the remaining reserved
+balance back to the **ORIGINAL** period (via
+`reservation.usage_period_id`) and sets each to `EXPIRED`. Returns the
+count of reservations expired. Intended to be called by a periodic
+Celery Beat job.
 
 ### `get_usage_snapshot(workspace_id)`
 
@@ -191,15 +256,26 @@ monthly period:
 | Column | Type | Notes |
 |--------|------|-------|
 | `idempotency_key` | String(255), nullable | Unique — prevents double-counting on provider-call retries |
-| `quota_reservation_id` | UUID, nullable | Plain UUID (no FK) linking to the originating reservation |
+| `quota_reservation_id` | UUID FK → `quota_reservations.id` (RESTRICT), nullable | Real FK linking to the originating reservation |
 
 `idempotency_key` is unique when present (partial uniqueness enforced
 via a `UNIQUE` constraint). A provider-call retry must not result in
 double-counted AI Checks, tokens, or cost.
 
-`quota_reservation_id` is a **plain UUID with no foreign key** (no
-cascade). This ensures `UsageEvent` retention is not compromised if a
-reservation row is ever deleted — billing/cost history must survive.
+`quota_reservation_id` is a real foreign key to
+`quota_reservations.id` with `ON DELETE RESTRICT` (added in the quota
+period and concurrency integrity hardening migration). This
+strengthens referential integrity while preserving accounting history:
+reservation rows are never deleted, and the RESTRICT policy guarantees
+a usage event can never be orphaned from its originating reservation.
+
+## Transaction error handling
+
+All `QuotaService` mutation operations roll back the session on
+`QuotaExceededError`, `ConflictError`, or `IntegrityError`. This leaves
+the session in a usable state with no held locks or partial mutations.
+Callers can continue using the same session for subsequent operations
+without encountering stale transaction state.
 
 ## Configuration
 
@@ -223,7 +299,9 @@ authentication and workspace membership; cross-tenant access returns
 1. **PostgreSQL is the quota source of truth**, NOT Redis. Redis may be
    used for caching but never for authoritative quota state.
 2. **Row-level locking** (`SELECT ... FOR UPDATE`) prevents concurrent
-   oversubscription.
+   oversubscription. Period locks use `populate_existing()` to ensure
+   quota math operates on CURRENT row values, not stale pre-lock
+   snapshots.
 3. **Quota reservations are retained** after completion
    (`COMMITTED`/`RELEASED`/`EXPIRED`) for history — they are never
    deleted.
@@ -234,3 +312,16 @@ authentication and workspace membership; cross-tenant access returns
 6. **Monthly quota period = UTC calendar month.**
 7. **Audit logging is independent** of accounting — a failed audit log
    never rolls back a committed quota mutation.
+8. **Reservations are permanently bound to their originating period**
+   via `usage_period_id`. Commit/release/expire always update the
+   ORIGINAL period, never the current month (cross-month invariant).
+9. **Idempotency is re-checked under the lock** to handle concurrent
+   races. `IntegrityError` from a winning concurrent insert is handled
+   by rolling back and returning the existing record.
+10. **Multi-worker expiration uses `FOR UPDATE SKIP LOCKED`** so
+    multiple workers never process the same stale reservation.
+11. **Cross-workspace project validation** rejects `project_id` values
+    that do not belong to `workspace_id` with `ConflictError`.
+12. **Transaction error handling** rolls back the session on
+    `QuotaExceededError`, `ConflictError`, or `IntegrityError`, leaving
+    it usable with no held locks or partial mutations.

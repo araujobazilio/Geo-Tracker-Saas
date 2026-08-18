@@ -9,6 +9,24 @@ Monthly quota period: UTC calendar month (e.g. 2026-08-01 to 2026-09-01).
 Available AI Checks = limit - used - reserved
 
 Redis is NOT the quota source of truth. PostgreSQL is authoritative.
+
+Lock ordering (to minimize deadlocks):
+
+  For new reservations:
+    1. WorkspaceUsagePeriod (FOR UPDATE)
+    2. Create QuotaReservation
+
+  For existing reservation mutations (commit/release/expire):
+    1. QuotaReservation (FOR UPDATE)
+    2. WorkspaceUsagePeriod (FOR UPDATE, via reservation.usage_period_id)
+
+  This ordering is consistent — no circular lock dependencies.
+
+Each QuotaReservation is permanently bound to the WorkspaceUsagePeriod
+where quota was originally reserved (usage_period_id). Commit, release,
+and expire operations always update the ORIGINAL period, never the
+current month's period. This ensures correct accounting across UTC
+month boundaries.
 """
 
 from __future__ import annotations
@@ -18,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -28,6 +47,7 @@ from app.core.logging import get_logger
 from app.models.quota_reservation import QuotaReservation
 from app.models.usage import UsageEvent
 from app.models.workspace_usage_period import WorkspaceUsagePeriod
+from app.repositories.project_repository import ProjectRepository
 from app.repositories.quota_repository import (
     QuotaReservationRepository,
     UsageRepository,
@@ -59,6 +79,10 @@ class QuotaService:
     All reservation/commit/release operations control their own
     transaction boundaries. Audit logging is independent — accounting
     consistency never depends on audit success.
+
+    Transaction error handling: on any exception (QuotaExceededError,
+    ConflictError, IntegrityError), the session is rolled back so it
+    is left in a usable state with no held locks or partial mutations.
     """
 
     def __init__(
@@ -76,6 +100,7 @@ class QuotaService:
         self._period_repo = WorkspaceUsagePeriodRepository(session)
         self._reservation_repo = QuotaReservationRepository(session)
         self._usage_repo = UsageRepository(session)
+        self._project_repo = ProjectRepository(session)
 
     @property
     def _now(self) -> datetime:
@@ -85,7 +110,6 @@ class QuotaService:
         self, workspace_id: uuid.UUID, period_start: datetime, period_end: datetime
     ) -> WorkspaceUsagePeriod:
         """Get or create the usage period row, using upsert to avoid races."""
-        # Try INSERT ... ON CONFLICT DO NOTHING, then SELECT.
         self._session.execute(
             text(
                 "INSERT INTO workspace_usage_periods "
@@ -106,6 +130,20 @@ class QuotaService:
             raise RuntimeError("Failed to get or create usage period")
         return period
 
+    def _get_or_create_period_for_update(
+        self, workspace_id: uuid.UUID, period_start: datetime, period_end: datetime
+    ) -> WorkspaceUsagePeriod:
+        """Upsert period, then SELECT ... FOR UPDATE with populate_existing.
+
+        This ensures the returned ORM instance contains CURRENT row
+        values after the lock is acquired, not a stale pre-lock snapshot.
+        """
+        self._get_or_create_period(workspace_id, period_start, period_end)
+        period = self._period_repo.get_for_period_for_update(workspace_id, period_start)
+        if period is None:  # pragma: no cover
+            raise RuntimeError("Failed to lock usage period")
+        return period
+
     def get_usage_snapshot(self, workspace_id: uuid.UUID) -> UsageSnapshot:
         """Return the current monthly usage snapshot for a workspace."""
         ent = self._entitlement_service.get_effective_entitlements(workspace_id)
@@ -122,6 +160,22 @@ class QuotaService:
             reserved=reserved,
         )
 
+    def _validate_project_workspace(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID | None
+    ) -> None:
+        """Validate that project_id belongs to workspace_id, if provided.
+
+        Fails closed with a ConflictError to prevent cross-workspace
+        project linkage in quota reservations.
+        """
+        if project_id is None:
+            return
+        project = self._project_repo.get_in_workspace(project_id, workspace_id)
+        if project is None:
+            raise ConflictError(
+                f"Project {project_id} does not belong to workspace {workspace_id}."
+            )
+
     def reserve_ai_checks(
         self,
         workspace_id: uuid.UUID,
@@ -132,87 +186,116 @@ class QuotaService:
     ) -> QuotaReservation:
         """Atomically reserve AI Checks for a workspace.
 
-        Uses SELECT ... FOR UPDATE on the usage period row to prevent
-        concurrent oversubscription. Idempotent: retrying with the same
-        idempotency_key returns the existing reservation.
+        Lock ordering: WorkspaceUsagePeriod → create QuotaReservation.
+
+        Idempotent: retrying with the same idempotency_key returns the
+        existing reservation. The idempotency re-check happens AFTER
+        acquiring the period lock, so concurrent calls with the same
+        key do not leak IntegrityError — one creates, the other returns
+        the existing record.
 
         Raises:
+            ValueError: if requested_checks <= 0.
             QuotaExceededError: if not enough quota remaining.
-            ConflictError: if idempotency_key reused with different parameters.
+            ConflictError: if idempotency_key reused with different parameters,
+                or if project_id does not belong to workspace_id.
         """
         if requested_checks <= 0:
             raise ValueError("requested_checks must be positive")
 
-        # Check idempotency: return existing reservation if same key.
-        existing = self._reservation_repo.get_by_idempotency_key(idempotency_key)
-        if existing is not None:
-            if (
-                existing.workspace_id != workspace_id
-                or existing.ai_checks_reserved != requested_checks
-                or (existing.user_id or None) != (user_id or None)
-                or (existing.project_id or None) != (project_id or None)
-            ):
-                raise ConflictError("Idempotency key reused with conflicting parameters.")
-            return existing
+        # Validate project belongs to workspace before any locking.
+        self._validate_project_workspace(workspace_id, project_id)
 
-        ent = self._entitlement_service.get_effective_entitlements(workspace_id)
-        limit = ent.monthly_ai_checks
+        try:
+            ent = self._entitlement_service.get_effective_entitlements(workspace_id)
+            limit = ent.monthly_ai_checks
 
-        period_start, period_end = month_period(self._now)
-        period = self._get_or_create_period(workspace_id, period_start, period_end)
+            period_start, period_end = month_period(self._now)
+            period = self._get_or_create_period_for_update(workspace_id, period_start, period_end)
 
-        # Lock the period row for the duration of this transaction.
-        self._session.execute(
-            text("SELECT id FROM workspace_usage_periods WHERE id = :pid FOR UPDATE"),
-            {"pid": str(period.id)},
-        )
+            # Re-check idempotency AFTER acquiring the period lock.
+            # This prevents two concurrent calls with the same key from
+            # both passing the initial check and then one leaking
+            # an IntegrityError on the unique constraint.
+            existing = self._reservation_repo.get_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                if (
+                    existing.workspace_id != workspace_id
+                    or existing.ai_checks_reserved != requested_checks
+                    or (existing.user_id or None) != (user_id or None)
+                    or (existing.project_id or None) != (project_id or None)
+                ):
+                    raise ConflictError("Idempotency key reused with conflicting parameters.")
+                return existing
 
-        available = limit - period.ai_checks_used - period.ai_checks_reserved
-        if requested_checks > available:
+            available = limit - period.ai_checks_used - period.ai_checks_reserved
+            if requested_checks > available:
+                self._audit_record(
+                    action="QUOTA_EXCEEDED",
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    entity_type="quota",
+                    metadata={
+                        "requested": requested_checks,
+                        "available": available,
+                        "limit": limit,
+                    },
+                )
+                raise QuotaExceededError(
+                    f"AI Check quota exceeded. "
+                    f"Limit: {limit}, Used: {period.ai_checks_used}, "
+                    f"Reserved: {period.ai_checks_reserved}, "
+                    f"Requested: {requested_checks}."
+                )
+
+            # Increment reserved count.
+            period.ai_checks_reserved += requested_checks
+            self._session.flush()
+
+            # Create reservation record, bound to this exact period.
+            settings = get_settings()
+            expires_at = self._now + timedelta(seconds=settings.quota_reservation_ttl_seconds)
+            reservation = QuotaReservation(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                user_id=user_id,
+                usage_period_id=period.id,
+                idempotency_key=idempotency_key,
+                ai_checks_reserved=requested_checks,
+                ai_checks_committed=0,
+                status=QuotaReservationStatus.ACTIVE,
+                expires_at=expires_at,
+            )
+            try:
+                self._reservation_repo.create(reservation)
+            except IntegrityError:
+                # Race: another worker inserted the same idempotency_key
+                # between our re-check and insert. Roll back the reserved
+                # increment, then return the existing reservation.
+                self._session.rollback()
+                existing = self._reservation_repo.get_by_idempotency_key(idempotency_key)
+                if existing is not None:
+                    return existing
+                raise ConflictError("Reservation idempotency conflict.") from None
+            self._session.commit()
+
             self._audit_record(
-                action="QUOTA_EXCEEDED",
+                action="QUOTA_RESERVED",
                 workspace_id=workspace_id,
                 user_id=user_id,
-                entity_type="quota",
-                metadata={"requested": requested_checks, "available": available, "limit": limit},
-            )
-            raise QuotaExceededError(
-                f"AI Check quota exceeded. "
-                f"Limit: {limit}, Used: {period.ai_checks_used}, "
-                f"Reserved: {period.ai_checks_reserved}, "
-                f"Requested: {requested_checks}."
+                entity_type="quota_reservation",
+                entity_id=reservation.id,
+                metadata={"ai_checks": requested_checks},
             )
 
-        # Increment reserved count.
-        period.ai_checks_reserved += requested_checks
-        self._session.flush()
+            return reservation
 
-        # Create reservation record.
-        settings = get_settings()
-        expires_at = self._now + timedelta(seconds=settings.quota_reservation_ttl_seconds)
-        reservation = QuotaReservation(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            user_id=user_id,
-            idempotency_key=idempotency_key,
-            ai_checks_reserved=requested_checks,
-            ai_checks_committed=0,
-            status=QuotaReservationStatus.ACTIVE,
-            expires_at=expires_at,
-        )
-        self._reservation_repo.create(reservation)
-        self._session.commit()
-
-        self._audit_record(
-            action="QUOTA_RESERVED",
-            workspace_id=workspace_id,
-            user_id=user_id,
-            entity_type="quota_reservation",
-            entity_id=reservation.id,
-            metadata={"ai_checks": requested_checks},
-        )
-
-        return reservation
+        except (QuotaExceededError, ConflictError):
+            self._session.rollback()
+            raise
+        except IntegrityError:
+            self._session.rollback()
+            raise
 
     def commit_ai_checks(
         self,
@@ -228,169 +311,216 @@ class QuotaService:
     ) -> UsageEvent:
         """Commit N AI Checks against a reservation.
 
-        Atomically:
-        - Decrements reserved, increments used on the usage period.
-        - Increments committed on the reservation.
-        - If committed == reserved, marks reservation as COMMITTED.
-        - Creates an immutable UsageEvent.
+        Lock ordering: QuotaReservation → WorkspaceUsagePeriod (original).
+
+        Uses the reservation's original usage_period_id, NOT the current
+        month. This ensures August reservations committed in September
+        update August's counters, not September's.
 
         Idempotent on usage_idempotency_key: retrying returns the
-        existing UsageEvent without double-counting.
+        existing UsageEvent without double-counting. The idempotency
+        re-check happens AFTER acquiring locks.
 
         Raises:
             ValueError: if quantity is invalid.
-            ConflictError: if quantity exceeds remaining uncommitted.
+            ConflictError: if reservation not found, status invalid,
+                quantity exceeds remaining, or idempotency key conflict.
         """
         if quantity <= 0:
             raise ValueError("quantity must be positive")
 
-        # Idempotency check on usage event.
-        existing_event = self._usage_repo.get_by_idempotency_key(usage_idempotency_key)
-        if existing_event is not None:
-            return existing_event
+        try:
+            # Lock the reservation first (lock ordering: reservation → period).
+            reservation = self._reservation_repo.get_by_id_for_update(reservation_id)
+            if reservation is None:
+                raise ConflictError("Reservation not found.")
 
-        reservation = self._reservation_repo.get_by_id(reservation_id)
-        if reservation is None:
-            raise ConflictError("Reservation not found.")
+            # Re-check usage idempotency AFTER acquiring the reservation lock.
+            existing_event = self._usage_repo.get_by_idempotency_key(usage_idempotency_key)
+            if existing_event is not None:
+                # Verify the existing event matches this request.
+                if (
+                    existing_event.quota_reservation_id != reservation.id
+                    or existing_event.ai_checks != quantity
+                ):
+                    raise ConflictError("Usage idempotency key reused with conflicting parameters.")
+                return existing_event
 
-        if reservation.status not in (
-            QuotaReservationStatus.ACTIVE,
-            QuotaReservationStatus.COMMITTED,
-        ):
-            raise ConflictError(
-                f"Cannot commit against reservation with status {reservation.status}."
-            )
-
-        remaining_uncommitted = reservation.ai_checks_reserved - reservation.ai_checks_committed
-        if quantity > remaining_uncommitted:
-            raise ConflictError(
-                f"Cannot commit {quantity} checks: only {remaining_uncommitted} "
-                f"uncommitted remaining on this reservation."
-            )
-
-        # Lock the usage period row.
-        period_start, period_end = month_period(self._now)
-        period = self._get_or_create_period(reservation.workspace_id, period_start, period_end)
-        self._session.execute(
-            text("SELECT id FROM workspace_usage_periods WHERE id = :pid FOR UPDATE"),
-            {"pid": str(period.id)},
-        )
-
-        # Transfer from reserved to used.
-        period.ai_checks_reserved -= quantity
-        period.ai_checks_used += quantity
-
-        # Update reservation.
-        reservation.ai_checks_committed += quantity
-        if reservation.ai_checks_committed >= reservation.ai_checks_reserved:
-            reservation.status = QuotaReservationStatus.COMMITTED
-
-        # Create immutable UsageEvent.
-        event = UsageEvent(
-            workspace_id=reservation.workspace_id,
-            user_id=reservation.user_id,
-            project_id=reservation.project_id,
-            event_type=UsageEventType.AI_CHECK,
-            provider=provider,
-            model=model,
-            ai_checks=quantity,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens,
-            cost_usd=cost_usd,
-            idempotency_key=usage_idempotency_key,
-            quota_reservation_id=reservation.id,
-        )
-        self._usage_repo.create(event)
-        self._session.flush()
-        self._session.commit()
-
-        self._audit_record(
-            action="QUOTA_COMMITTED",
-            workspace_id=reservation.workspace_id,
-            user_id=reservation.user_id,
-            entity_type="quota_reservation",
-            entity_id=reservation.id,
-            metadata={"ai_checks": quantity},
-        )
-
-        return event
-
-    def release_reservation(self, reservation_id: uuid.UUID) -> None:
-        """Release remaining uncommitted reserved checks from a reservation.
-
-        Idempotent: calling release twice does not subtract twice.
-        Sets reservation status to RELEASED.
-        """
-        reservation = self._reservation_repo.get_by_id(reservation_id)
-        if reservation is None:
-            raise ConflictError("Reservation not found.")
-
-        if reservation.status in (QuotaReservationStatus.RELEASED, QuotaReservationStatus.EXPIRED):
-            # Already released/expired — idempotent no-op.
-            return
-
-        remaining = reservation.ai_checks_reserved - reservation.ai_checks_committed
-        if remaining > 0:
-            period_start, period_end = month_period(self._now)
-            period = self._get_or_create_period(reservation.workspace_id, period_start, period_end)
-            self._session.execute(
-                text("SELECT id FROM workspace_usage_periods WHERE id = :pid FOR UPDATE"),
-                {"pid": str(period.id)},
-            )
-            period.ai_checks_reserved -= remaining
-
-        reservation.status = QuotaReservationStatus.RELEASED
-        self._session.flush()
-        self._session.commit()
-
-        self._audit_record(
-            action="QUOTA_RELEASED",
-            workspace_id=reservation.workspace_id,
-            user_id=reservation.user_id,
-            entity_type="quota_reservation",
-            entity_id=reservation.id,
-            metadata={"released": remaining},
-        )
-
-    def expire_stale_reservations(self) -> int:
-        """Expire ACTIVE reservations whose TTL has passed.
-
-        Returns the number of reservations expired.
-        """
-        now = self._now
-        stale = self._reservation_repo.list_expired_active(now)
-        count = 0
-        for reservation in stale:
-            remaining = reservation.ai_checks_reserved - reservation.ai_checks_committed
-            if remaining > 0:
-                period_start, period_end = month_period(now)
-                period = self._get_or_create_period(
-                    reservation.workspace_id, period_start, period_end
+            if reservation.status not in (
+                QuotaReservationStatus.ACTIVE,
+                QuotaReservationStatus.COMMITTED,
+            ):
+                raise ConflictError(
+                    f"Cannot commit against reservation with status {reservation.status}."
                 )
-                self._session.execute(
-                    text("SELECT id FROM workspace_usage_periods WHERE id = :pid FOR UPDATE"),
-                    {"pid": str(period.id)},
-                )
-                period.ai_checks_reserved -= remaining
 
-            reservation.status = QuotaReservationStatus.EXPIRED
-            count += 1
+            remaining_uncommitted = reservation.ai_checks_reserved - reservation.ai_checks_committed
+            if quantity > remaining_uncommitted:
+                raise ConflictError(
+                    f"Cannot commit {quantity} checks: only {remaining_uncommitted} "
+                    f"uncommitted remaining on this reservation."
+                )
+
+            # Lock the ORIGINAL usage period (not current month).
+            period = self._period_repo.get_by_id_for_update(reservation.usage_period_id)
+            if period is None:
+                raise ConflictError("Original usage period not found.")
+
+            # Transfer from reserved to used on the original period.
+            period.ai_checks_reserved -= quantity
+            period.ai_checks_used += quantity
+
+            # Update reservation.
+            reservation.ai_checks_committed += quantity
+            if reservation.ai_checks_committed >= reservation.ai_checks_reserved:
+                reservation.status = QuotaReservationStatus.COMMITTED
+
+            # Create immutable UsageEvent.
+            event = UsageEvent(
+                workspace_id=reservation.workspace_id,
+                user_id=reservation.user_id,
+                project_id=reservation.project_id,
+                event_type=UsageEventType.AI_CHECK,
+                provider=provider,
+                model=model,
+                ai_checks=quantity,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                cost_usd=cost_usd,
+                idempotency_key=usage_idempotency_key,
+                quota_reservation_id=reservation.id,
+            )
+            try:
+                self._usage_repo.create(event)
+            except IntegrityError:
+                # Race: another worker inserted the same usage_idempotency_key.
+                self._session.rollback()
+                existing_event = self._usage_repo.get_by_idempotency_key(usage_idempotency_key)
+                if existing_event is not None:
+                    return existing_event
+                raise ConflictError("Usage idempotency conflict.") from None
+            self._session.flush()
+            self._session.commit()
 
             self._audit_record(
-                action="QUOTA_EXPIRED",
+                action="QUOTA_COMMITTED",
                 workspace_id=reservation.workspace_id,
                 user_id=reservation.user_id,
                 entity_type="quota_reservation",
                 entity_id=reservation.id,
-                metadata={"expired": remaining},
+                metadata={"ai_checks": quantity},
             )
 
-        if count > 0:
+            return event
+
+        except (ConflictError, IntegrityError):
+            self._session.rollback()
+            raise
+
+    def release_reservation(self, reservation_id: uuid.UUID) -> None:
+        """Release remaining uncommitted reserved checks from a reservation.
+
+        Lock ordering: QuotaReservation → WorkspaceUsagePeriod (original).
+
+        Uses the reservation's original usage_period_id, NOT the current
+        month. This ensures August reservations released in September
+        update August's counters, not September's.
+
+        Idempotent: calling release twice does not subtract twice.
+        Sets reservation status to RELEASED.
+        """
+        try:
+            # Lock the reservation first.
+            reservation = self._reservation_repo.get_by_id_for_update(reservation_id)
+            if reservation is None:
+                raise ConflictError("Reservation not found.")
+
+            if reservation.status in (
+                QuotaReservationStatus.RELEASED,
+                QuotaReservationStatus.EXPIRED,
+            ):
+                # Already released/expired — idempotent no-op.
+                return
+
+            remaining = reservation.ai_checks_reserved - reservation.ai_checks_committed
+            if remaining > 0:
+                # Lock the ORIGINAL usage period.
+                period = self._period_repo.get_by_id_for_update(reservation.usage_period_id)
+                if period is None:
+                    raise ConflictError("Original usage period not found.")
+                period.ai_checks_reserved -= remaining
+
+            reservation.status = QuotaReservationStatus.RELEASED
             self._session.flush()
             self._session.commit()
 
-        return count
+            self._audit_record(
+                action="QUOTA_RELEASED",
+                workspace_id=reservation.workspace_id,
+                user_id=reservation.user_id,
+                entity_type="quota_reservation",
+                entity_id=reservation.id,
+                metadata={"released": remaining},
+            )
+
+        except ConflictError:
+            self._session.rollback()
+            raise
+
+    def expire_stale_reservations(self) -> int:
+        """Expire ACTIVE reservations whose TTL has passed.
+
+        Uses SELECT ... FOR UPDATE SKIP LOCKED so multiple cleanup
+        workers can process stale reservations concurrently without
+        overlapping. Each worker only processes reservations it has
+        locked.
+
+        Each reservation is expired against its ORIGINAL usage period
+        (via usage_period_id), not the current month.
+
+        Returns the number of reservations expired.
+        """
+        try:
+            now = self._now
+            stale = self._reservation_repo.list_expired_active_for_update_skip_locked(now)
+            count = 0
+            for reservation in stale:
+                remaining = reservation.ai_checks_reserved - reservation.ai_checks_committed
+                if remaining > 0:
+                    # Lock the ORIGINAL usage period for this reservation.
+                    period = self._period_repo.get_by_id_for_update(reservation.usage_period_id)
+                    if period is None:
+                        # Period was deleted — skip this reservation.
+                        logger.error(
+                            "quota_expire_period_missing",
+                            reservation_id=str(reservation.id),
+                            usage_period_id=str(reservation.usage_period_id),
+                        )
+                        continue
+                    period.ai_checks_reserved -= remaining
+
+                reservation.status = QuotaReservationStatus.EXPIRED
+                count += 1
+
+                self._audit_record(
+                    action="QUOTA_EXPIRED",
+                    workspace_id=reservation.workspace_id,
+                    user_id=reservation.user_id,
+                    entity_type="quota_reservation",
+                    entity_id=reservation.id,
+                    metadata={"expired": remaining},
+                )
+
+            if count > 0:
+                self._session.flush()
+                self._session.commit()
+
+            return count
+
+        except Exception:
+            self._session.rollback()
+            raise
 
     def _audit_record(
         self,
