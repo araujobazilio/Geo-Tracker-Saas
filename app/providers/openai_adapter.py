@@ -122,8 +122,8 @@ class OpenAIProviderAdapter:
         }
         if request.mode == ProviderExecutionMode.WEB_GROUNDED:
             body["tools"] = [{"type": "web_search"}]
-            # Force the model to use the web_search tool.
-            body["tool_choice"] = {"type": "web_search"}
+            # Force execution of the only configured tool: web_search.
+            body["tool_choice"] = "required"
             # Request broader source metadata.
             body["include"] = ["web_search_call.action.sources"]
 

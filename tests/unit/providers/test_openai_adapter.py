@@ -3,8 +3,8 @@
 These tests inject an ``httpx.MockTransport`` into ``OpenAIProviderAdapter``
 so that no real network call is ever made. They cover:
 - MODEL_ONLY and WEB_GROUNDED success paths
-- WEB_GROUNDED forces tool_choice={"type": "web_search"} and includes
-  web_search_call.action.sources
+- WEB_GROUNDED forces tool_choice="required" with web_search as the only tool
+  and includes web_search_call.action.sources
 - max_output_tokens sent in the request body
 - provider_request_id from x-request-id HTTP header
 - provider_response_id from response JSON id
@@ -221,7 +221,7 @@ async def test_web_grounded_forces_tool_choice() -> None:
         mode=ProviderExecutionMode.WEB_GROUNDED,
     )
 
-    assert captured["body"]["tool_choice"] == {"type": "web_search"}
+    assert captured["body"]["tool_choice"] == "required"
     assert captured["body"]["include"] == ["web_search_call.action.sources"]
     assert captured["body"]["tools"] == [{"type": "web_search"}]
 

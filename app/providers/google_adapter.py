@@ -1,7 +1,7 @@
 """Google Gemini Interactions API adapter (MODEL_ONLY).
 
 Implements the ProviderAdapter protocol for the Google Gemini Interactions API
-(POST {base_url}/v1beta/interactions).
+(POST {base_url}/v1/interactions).
 
 Key design decisions:
 - Exactly ONE HTTP request per execute() — no automatic retries.
@@ -113,7 +113,7 @@ class GoogleProviderAdapter:
             else self._settings.provider_max_output_tokens
         )
         base_url = self._settings.google_base_url.rstrip("/")
-        url = f"{base_url}/v1beta/interactions"
+        url = f"{base_url}/v1/interactions"
         headers = {
             "x-goog-api-key": api_key,
             "Content-Type": "application/json",

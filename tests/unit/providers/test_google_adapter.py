@@ -2,7 +2,7 @@
 
 These tests exercise the GoogleProviderAdapter against an injected
 httpx.MockTransport so no real network call is ever made. They cover the
-UPDATED Interactions API surface (POST {base_url}/v1beta/interactions):
+UPDATED Interactions API surface (POST {base_url}/v1/interactions):
 
 - MODEL_ONLY success path (text, usage, model, finish reason, interaction ID)
 - Interactions API endpoint used (NOT generateContent)
@@ -146,7 +146,7 @@ async def test_model_only_success() -> None:
 
 @pytest.mark.asyncio
 async def test_interactions_api_endpoint_used() -> None:
-    """The request URL must end with /v1beta/interactions (NOT generateContent)."""
+    """The request URL must end with stable /v1/interactions."""
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -159,7 +159,8 @@ async def test_interactions_api_endpoint_used() -> None:
 
     await adapter.execute(request)
 
-    assert captured["url"].endswith("/v1beta/interactions")
+    assert captured["url"].endswith("/v1/interactions")
+    assert "/v1beta/" not in captured["url"]
     assert "generateContent" not in captured["url"]
 
 

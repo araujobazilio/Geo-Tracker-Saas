@@ -109,6 +109,7 @@ class AnthropicProviderAdapter:
                     "type": self._settings.anthropic_web_search_tool_version,
                     "name": "web_search",
                     "max_uses": self._settings.anthropic_web_search_max_uses,
+                    "allowed_callers": ["direct"],
                 }
             ]
             # Force the model to use the web_search tool.

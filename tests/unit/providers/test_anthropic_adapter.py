@@ -750,9 +750,45 @@ async def test_web_grounded_tool_config() -> None:
     tools = body["tools"]
     assert isinstance(tools, list)
     assert len(tools) == 1
-    assert tools[0]["type"] == "web_search_20260318"
-    assert tools[0]["name"] == "web_search"
-    assert tools[0]["max_uses"] == 5
+    assert tools[0] == {
+        "type": "web_search_20260318",
+        "name": "web_search",
+        "max_uses": 5,
+        "allowed_callers": ["direct"],
+    }
+    assert body["tool_choice"] == {"type": "tool", "name": "web_search"}
+
+
+@pytest.mark.asyncio
+async def test_alternative_web_search_version_uses_direct_call() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = _json.loads(request.content.decode("utf-8"))
+        return _ok_response(
+            content=[
+                {"type": "server_tool_use", "name": "web_search", "input": {"query": "q"}},
+                {"type": "web_search_tool_result", "content": []},
+                {"type": "text", "text": "ok"},
+            ]
+        )
+
+    settings = make_settings(anthropic_web_search_tool_version="web_search_20250305")
+    await execute_with_transport(
+        httpx.MockTransport(handler),
+        settings,
+        mode=ProviderExecutionMode.WEB_GROUNDED,
+    )
+
+    assert captured["body"]["tools"] == [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,
+            "allowed_callers": ["direct"],
+        }
+    ]
+    assert captured["body"]["tool_choice"] == {"type": "tool", "name": "web_search"}
 
 
 # ---------------------------------------------------------------------------

@@ -225,7 +225,8 @@ API keys are server-side secrets and are treated accordingly:
 - **Endpoint:** `POST /responses` (current Responses API).
 - **`MODEL_ONLY`:** no tools supplied.
 - **`WEB_GROUNDED`:** `tools=[{"type": "web_search"}]` and
-  `tool_choice={"type": "web_search"}` to force web search.
+  `tool_choice="required"`. Because web search is the only configured tool,
+  required tool execution means `web_search` must execute.
 - **`include`:** `["web_search_call.action.sources"]` is requested so that
   source metadata is returned alongside the response.
 - **`store=false`** is set on every request for privacy and reproducibility
@@ -248,8 +249,10 @@ API keys are server-side secrets and are treated accordingly:
 - **Headers:** `x-api-key` and `anthropic-version: 2023-06-01`.
 - **`MODEL_ONLY`:** no tools supplied.
 - **`WEB_GROUNDED`:**
-  `tools=[{"type": "<version>", "name": "web_search", "max_uses": 5}]` and
-  `tool_choice={"type": "tool", "name": "web_search"}` to force web search.
+  `tools=[{"type": "<version>", "name": "web_search", "max_uses": 5,
+  "allowed_callers": ["direct"]}]` and
+  `tool_choice={"type": "tool", "name": "web_search"}` to force direct web
+  search without automatic programmatic `code_execution` routing.
 - **Default tool version:** `web_search_20260318` (configurable). Available
   versions: `web_search_20250305`, `web_search_20260209`, `web_search_20260318`.
 - **Configurable via settings:**
@@ -274,8 +277,8 @@ API keys are server-side secrets and are treated accordingly:
 
 ### Google (`GOOGLE_INTERACTIONS_API`)
 
-- **Endpoint:** `POST {base_url}/v1beta/interactions` (current Interactions
-  API — **not** `generateContent`).
+- **Endpoint:** `POST {base_url}/v1/interactions` (stable v1 Interactions API —
+  **not** `generateContent`).
 - **Request body:**
   `{"model": model, "input": prompt, "store": false, "generation_config": {"max_output_tokens": N}}`.
 - **`store=false`** for stateless one-shot measurements (no server-side

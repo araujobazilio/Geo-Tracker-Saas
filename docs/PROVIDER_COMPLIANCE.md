@@ -26,9 +26,9 @@ This is **NOT** the same as Google AI Overviews measurement.
   reviewed compliant path**; it must not be enabled by default or behind a flag
   without that review.
 
-### Adapter surface (Phase 5.1)
+### Adapter surface (Phase 5.2)
 
-- The adapter now uses the **Interactions API** (`POST /v1beta/interactions`),
+- The adapter uses the stable **Interactions API** (`POST /v1/interactions`),
   **NOT** `generateContent`.
 - `store=false` for stateless one-shot measurements (no server-side session
   persistence).
@@ -203,11 +203,13 @@ A missing answer is a measurement failure, not a measurement result.
 A `WEB_GROUNDED` success **ALWAYS** implies `search_used == True`. This is a
 critical methodological invariant for GEO measurement.
 
-- **OpenAI:** `tool_choice` forces `web_search`; if no `web_search_call` is
-  present in the response → raise `ProviderSearchError`.
-- **Anthropic:** `tool_choice` forces `web_search`; if no `server_tool_use` /
-  `web_search_tool_result` is present in the response → raise
+- **OpenAI:** `tool_choice="required"` with `web_search` as the only tool forces
+  tool execution; if no `web_search_call` is present in the response → raise
   `ProviderSearchError`.
+- **Anthropic:** `tool_choice={"type": "tool", "name": "web_search"}` and
+  `allowed_callers=["direct"]` force direct web search without automatic
+  `code_execution` routing; if no `server_tool_use` / `web_search_tool_result`
+  is present in the response → raise `ProviderSearchError`.
 - A `WEB_GROUNDED` result with `search_used=False` would be a **false
   measurement** — it must never be recorded as a successful grounded result.
 

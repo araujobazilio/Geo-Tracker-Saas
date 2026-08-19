@@ -149,8 +149,8 @@ Key design decisions:
   Missing credentials do NOT crash application startup.
   `capabilities()` works WITHOUT credentials (static adapter facts).
 - **Google Interactions API**: The Google adapter uses the current
-  recommended Interactions API (`POST /v1beta/interactions`), not the
-  legacy `generateContent`. `store=false` for stateless one-shot
+  stable Interactions API (`POST /v1/interactions`), not the legacy
+  `generateContent`. `store=false` for stateless one-shot
   measurements. Thought/reasoning steps are discarded.
 
 See `docs/PROVIDER_INTEGRATIONS.md` and `docs/PROVIDER_COMPLIANCE.md`.
