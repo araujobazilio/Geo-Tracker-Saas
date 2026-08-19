@@ -22,7 +22,7 @@ an action was implemented.
 | 2 | Authentication, Workspaces and authorization | IMPLEMENTED |
 | 3 | Entitlements, plans, usage and quotas | IMPLEMENTED |
 | 4 | Project onboarding and prompt system | IMPLEMENTED |
-| 5 | AI provider abstraction and integrations | PLANNED |
+| 5 | AI provider abstraction and integrations | IMPLEMENTED |
 | 6 | Scan Engine | PLANNED |
 | 7 | Brand / citation detection and metrics | PLANNED |
 | 8 | Confidence Scans | PLANNED |
@@ -64,6 +64,13 @@ See `docs/` for detailed architecture and roadmap documentation.
   with versioned PromptSets that are never overwritten. Historical
   prompt sets are preserved for auditability. EN/PT language support.
   See `docs/PROMPT_SYSTEM.md`.
+- **AI provider abstraction:** provider adapters for OpenAI, Anthropic,
+  Google, and Perplexity with normalized request/result objects. Provider
+  vs surface distinction (API results measure the surface, not the
+  consumer UI). MODEL_ONLY and WEB_GROUNDED execution modes. No automatic
+  retries, no quota calls, no hidden system prompts. Google WEB_GROUNDED
+  disabled for compliance. httpx.AsyncClient with MockTransport tests.
+  See `docs/PROVIDER_INTEGRATIONS.md` and `docs/PROVIDER_COMPLIANCE.md`.
 
 ---
 
@@ -192,7 +199,7 @@ geo-tracker/
 │   ├── schemas/           # Pydantic schemas
 │   ├── repositories/      # persistence layer
 │   ├── services/          # domain / application services
-│   ├── providers/llm/     # LLM provider abstraction
+│   ├── providers/         # AI provider adapters and registry
 │   ├── routers/           # HTTP routers
 │   ├── workers/           # Celery workers
 │   ├── integrations/      # AppSumo / Stripe integrations

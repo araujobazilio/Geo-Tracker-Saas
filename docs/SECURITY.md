@@ -80,6 +80,26 @@ Phase 2. Security hardening is Phase 17.
   overwritten. Historical prompt sets are preserved with `ON DELETE
   RESTRICT` on the `prompts → prompt_sets` foreign key, ensuring audit
   history cannot be silently destroyed. See `docs/PROMPT_SYSTEM.md`.
+- **Provider API key security (Phase 5):** provider API keys are
+  `SecretStr` in `Settings`, loaded from server environment only. They
+  are NEVER persisted in the database, sent to the browser, or exposed
+  in `repr(adapter)`, structured logs, or sanitized exceptions.
+  Authorization headers are never logged. Raw provider response bodies
+  are not dumped into error messages. BYOK is deferred. No provider-key
+  API endpoints exist. See `docs/PROVIDER_INTEGRATIONS.md`.
+- **Provider compliance boundary (Phase 5):** Google Search grounding
+  is disabled in the Gemini adapter due to terms that conflict with
+  automated storage/analysis. `WEB_GROUNDED` requests fail with
+  `ProviderModeNotAllowedError` BEFORE any network call. The Google
+  adapter measures `GOOGLE_GEMINI_API` MODEL_ONLY, NOT Google AI
+  Overviews. See `docs/PROVIDER_COMPLIANCE.md`.
+- **No public provider execution endpoint (Phase 5):** there is no
+  `POST /api/provider/execute` or similar endpoint that allows
+  arbitrary provider credit spending. Provider adapters are internal
+  only. Phase 6 Scan Engine owns user-triggered execution under quota.
+- **No automatic provider retries (Phase 5):** each `execute()` call
+  performs at most ONE billable provider request. This prevents
+  accidental double-spending. Scan Engine (Phase 6) owns retry policy.
   (not 403) to avoid revealing resource existence, consistent with all
   other workspace-scoped endpoints. These endpoints expose only product
   capabilities and quota state — never billing internals (customer IDs,

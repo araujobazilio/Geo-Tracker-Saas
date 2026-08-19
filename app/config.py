@@ -76,15 +76,26 @@ class Settings(BaseSettings):
     # --- Quota ---
     quota_reservation_ttl_seconds: int = 1800  # 30 minutes default
 
-    # --- AI providers (placeholders, not validated in Phase 0/1) ---
+    # --- AI providers ---
     openai_api_key: SecretStr = SecretStr("")
     openai_scan_model: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
     anthropic_api_key: SecretStr = SecretStr("")
     anthropic_scan_model: str = ""
+    anthropic_base_url: str = "https://api.anthropic.com"
+    anthropic_web_search_tool_version: str = "web_search_20250305"
+    anthropic_web_search_max_uses: int = 5
     google_api_key: SecretStr = SecretStr("")
     google_scan_model: str = ""
+    google_base_url: str = "https://generativelanguage.googleapis.com"
     perplexity_api_key: SecretStr = SecretStr("")
     perplexity_scan_model: str = ""
+    perplexity_base_url: str = "https://api.perplexity.ai"
+
+    # --- Provider HTTP settings ---
+    provider_connect_timeout_seconds: float = 10.0
+    provider_read_timeout_seconds: float = 120.0
+    provider_max_output_tokens: int = 4096
 
     # --- Billing integrations (placeholders) ---
     appsumo_client_id: str = ""
@@ -100,6 +111,27 @@ class Settings(BaseSettings):
     def _normalize_log_level(cls, v: str) -> str:
         if isinstance(v, str):
             return v.upper()
+        return v
+
+    @field_validator("provider_connect_timeout_seconds", "provider_read_timeout_seconds")
+    @classmethod
+    def _validate_positive_timeout(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("Provider timeout must be positive.")
+        return v
+
+    @field_validator("provider_max_output_tokens")
+    @classmethod
+    def _validate_positive_max_tokens(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Provider max output tokens must be positive.")
+        return v
+
+    @field_validator("anthropic_web_search_max_uses")
+    @classmethod
+    def _validate_positive_search_uses(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Anthropic web search max uses must be positive.")
         return v
 
     @model_validator(mode="after")

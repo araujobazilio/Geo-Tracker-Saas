@@ -136,3 +136,34 @@ class PromptSetStatus(str, Enum):
 
     ACTIVE = "ACTIVE"
     SUPERSEDED = "SUPERSEDED"
+
+
+class ProviderSurface(str, Enum):
+    """Identifies the specific API surface that produced a provider result.
+
+    This is distinct from LLMProvider (which identifies the company).
+    A provider surface is the specific API endpoint/protocol used.
+
+    API results are measurements of their named provider surfaces, NOT
+    necessarily identical to consumer-facing products (ChatGPT, Claude.ai,
+    Gemini UI, Perplexity UI).
+    """
+
+    OPENAI_RESPONSES_API = "OPENAI_RESPONSES_API"
+    ANTHROPIC_MESSAGES_API = "ANTHROPIC_MESSAGES_API"
+    GOOGLE_GEMINI_API = "GOOGLE_GEMINI_API"
+    PERPLEXITY_SONAR_API = "PERPLEXITY_SONAR_API"
+
+
+class ProviderExecutionMode(str, Enum):
+    """Execution mode for a provider request.
+
+    MODEL_ONLY: Send the prompt to the model without web search grounding.
+    WEB_GROUNDED: Use the provider's web search tool to ground the response.
+
+    Not all providers support all modes. Requesting an unsupported mode
+    raises ProviderModeNotAllowedError BEFORE any network call.
+    """
+
+    MODEL_ONLY = "MODEL_ONLY"
+    WEB_GROUNDED = "WEB_GROUNDED"

@@ -26,7 +26,7 @@ External AI APIs
 - HTTP layer (`app/routers`)
 - domain / application logic (`app/services`)
 - persistence (`app/repositories`, `app/db`)
-- external providers (`app/providers/llm`)
+- external providers (`app/providers`)
 - billing / entitlements (`app/services/entitlements`, `app/integrations`)
 - background jobs (`app/workers`)
 - integrations (`app/integrations`)
@@ -107,6 +107,36 @@ period is the UTC calendar month. Reservations are idempotent via
 `idempotency_key` and retained after completion for history.
 
 See `docs/USAGE_AND_QUOTAS.md`.
+
+## Provider abstraction (Phase 5)
+
+AI provider adapters live in `app/providers`. They translate
+`ProviderRequest` into provider-specific HTTP calls and normalize
+responses into `ProviderResult`.
+
+```
+ProviderRequest → ProviderAdapter.execute() → ProviderResult
+```
+
+Key design decisions:
+
+- **Provider vs surface**: `LLMProvider` identifies the company;
+  `ProviderSurface` identifies the specific API endpoint. API results
+  measure the surface, not the consumer UI.
+- **Execution modes**: `MODEL_ONLY` (no web search) and `WEB_GROUNDED`
+  (web search tool). Not all providers support all modes.
+- **No automatic retries**: One `execute()` = at most ONE billable
+  request. Scan Engine (Phase 6) owns retry policy.
+- **No quota/usage in adapters**: Adapters do NOT call `QuotaService`
+  or create `UsageEvent`. Scan Engine owns accounting.
+- **No hidden system prompts**: The prompt text is the experimental
+  input. Adapters add only the minimum API envelope.
+- **httpx.AsyncClient**: Unified transport for all providers;
+  `MockTransport` for deterministic tests.
+- **Lazy registry**: `ProviderRegistry` constructs adapters on demand.
+  Missing credentials do NOT crash application startup.
+
+See `docs/PROVIDER_INTEGRATIONS.md` and `docs/PROVIDER_COMPLIANCE.md`.
 
 ## Technology stack
 
