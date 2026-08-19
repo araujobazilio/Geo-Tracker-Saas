@@ -69,7 +69,7 @@ single responsibility boundary consumed by routers and other services.
 | `ScanCreationService` | STANDARD preflight, immutable plan creation, full quota reservation, dispatch |
 | `ScanExecutionService` | Duplicate-safe row claims and bounded no-retry PromptRun execution |
 | `PromptRunResultRecorder` | Atomic evidence, source, cost, UsageEvent, and one-check commit |
-| `ScanFinalizationService` / `ScanRecoveryService` | Terminal classification, unused release, stale failure without provider replay |
+| `ScanFinalizationService` / `ScanRecoveryService` | Atomic terminal classification + unused quota release (single commit), idempotent reconciliation, run-count invariant, stale PENDING/RUNNING recovery without provider replay |
 | `PricingService` / `ProviderCostCalculator` | Exact effective price resolution and Decimal/null-safe cost calculation |
 
 ### Entitlement resolution

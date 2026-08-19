@@ -93,11 +93,29 @@ Provider, malformed-response, accounting, and internal execution failures mark t
 
 Every successful run has already committed one check. Finalization releases all remaining uncommitted reservation balance, so failures consume zero. Failed runs are execution failures, not measurements, and Phase 7 must exclude them from future metric denominators. Conversely, a non-empty, valid answer with no brand mention is `SUCCEEDED` and belongs in those denominators.
 
+#### Atomic finalization (Phase 6.1)
+
+`ScanFinalizationService.finalize()` commits the Scan's terminal state, `Project.last_scan_at`, and the unused quota release in **one** transaction. If quota release fails, the Scan does not become terminal — the entire finalization rolls back, leaving the Scan `RUNNING` for retry. This guarantees a terminal Scan never strands an active reservation with unused reserved checks.
+
+`QuotaService.release_reservation()` accepts a `commit_transaction` parameter. The finalizer calls it with `commit_transaction=False` so the caller owns the single atomic commit. When all reserved checks were committed (no remaining balance), the reservation is marked `COMMITTED` rather than `RELEASED` to preserve its fully-consumed history.
+
+#### Idempotent reconciliation
+
+Calling `finalize()` on an already-terminal Scan is safe. The finalizer detects the terminal state and reconciles any stranded `ACTIVE` reservation idempotently — no provider calls, no new `UsageEvent`s. This self-heals legacy or inconsistent terminal scans that predate atomic finalization.
+
+#### Run-count invariant
+
+Before classifying a Scan, the finalizer verifies that the `PromptRun` row count matches the immutable Scan plan (`planned_ai_checks`) and that `succeeded + failed == planned_ai_checks`. A mismatch indicates internal data corruption and causes finalization to roll back with `InfrastructureError`, leaving the Scan non-terminal for operator investigation.
+
+#### Pre-execution rejection
+
+When `_claim_scan` finds the reservation missing or not `ACTIVE`/`COMMITTED` before any provider call, it marks every `PromptRun` `FAILED` with `ACCOUNTING_ERROR`, records the rejection reason on the Scan, and then finalizes atomically. No provider is invoked. This guarantees the invariant **terminal Scan → zero unresolved PromptRuns** even on rejection.
+
 ## Worker loss and stale recovery
 
-`ScanRecoveryService` finds `RUNNING` scans older than `SCAN_STALE_AFTER_SECONDS` (default **7,200 seconds / 2 hours**). It marks unresolved `PENDING`/`RUNNING` runs `FAILED` with an internal-error explanation, then uses normal finalization to classify the scan and release unused reservation quota.
+`ScanRecoveryService` finds both `RUNNING` and `PENDING` scans older than `SCAN_STALE_AFTER_SECONDS` (default **7,200 seconds / 2 hours**). It marks unresolved `PENDING`/`RUNNING` runs `FAILED` with an internal-error explanation, then uses normal finalization to classify the scan and release unused reservation quota.
 
-**Recovery never calls or retries a provider.** This is deliberate: stale `RUNNING` may mean a response was lost after the provider charged GEO Tracker. Avoiding a duplicate paid request takes precedence over attempting to recover the measurement.
+**Recovery never calls or retries a provider.** This is deliberate: stale `RUNNING` may mean a response was lost after the provider charged GEO Tracker. Avoiding a duplicate paid request takes precedence over attempting to recover the measurement. Stale `PENDING` scans were either never dispatched (broker/task lost under early acknowledgement) or dispatched but never claimed by a worker — there is no provider request to replay.
 
 The scan reservation TTL is intentionally longer than the stale threshold by default. Operators must run stale-scan recovery before reservation expiry cleanup can make an in-flight scan's reservation invalid.
 

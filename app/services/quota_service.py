@@ -580,7 +580,9 @@ class QuotaService:
             self._session.rollback()
             raise
 
-    def release_reservation(self, reservation_id: uuid.UUID) -> None:
+    def release_reservation(
+        self, reservation_id: uuid.UUID, *, commit_transaction: bool = True
+    ) -> None:
         """Release remaining uncommitted reserved checks from a reservation.
 
         Lock ordering: QuotaReservation → WorkspaceUsagePeriod (original).
@@ -594,9 +596,19 @@ class QuotaService:
         its current terminal state — COMMITTED is never changed to
         RELEASED.
 
-        Transaction lifecycle: all locks are always released (commit or
-        rollback) before this method returns, including on idempotent
-        early returns.
+        Transaction lifecycle:
+            - ``commit_transaction=True`` (default): all locks are always
+              released (commit or rollback) before this method returns,
+              including on idempotent early returns. Audit is recorded
+              after the commit in a separate session.
+            - ``commit_transaction=False``: the caller owns the surrounding
+              transaction. The method locks the reservation and the
+              original usage period, mutates counters/status, and flushes,
+              but does NOT commit and does NOT rollback on success. The
+              caller is responsible for immediate commit/rollback. Audit
+              is NOT recorded in this mode (the caller records its own
+              audit after committing). Terminal reservation no-ops also
+              respect ``commit_transaction`` — no internal commit occurs.
         """
         try:
             # Lock the reservation first.
@@ -614,7 +626,10 @@ class QuotaService:
                 QuotaReservationStatus.EXPIRED,
             ):
                 # Release the reservation lock before returning.
-                self._session.commit()
+                if commit_transaction:
+                    self._session.commit()
+                # In caller-owned mode, do not commit; the caller owns the
+                # transaction and will commit or rollback as needed.
                 return
 
             remaining = reservation.ai_checks_reserved - reservation.ai_checks_committed
@@ -624,19 +639,24 @@ class QuotaService:
                 if period is None:
                     raise ConflictError("Original usage period not found.")
                 period.ai_checks_reserved -= remaining
-
-            reservation.status = QuotaReservationStatus.RELEASED
+                reservation.status = QuotaReservationStatus.RELEASED
+            else:
+                # All reserved checks were committed; preserve the COMMITTED
+                # status rather than marking it RELEASED.
+                reservation.status = QuotaReservationStatus.COMMITTED
             self._session.flush()
-            self._session.commit()
-
-            self._audit_record(
-                action="QUOTA_RELEASED",
-                workspace_id=reservation.workspace_id,
-                user_id=reservation.user_id,
-                entity_type="quota_reservation",
-                entity_id=reservation.id,
-                metadata={"released": remaining},
-            )
+            if commit_transaction:
+                self._session.commit()
+                self._audit_record(
+                    action="QUOTA_RELEASED",
+                    workspace_id=reservation.workspace_id,
+                    user_id=reservation.user_id,
+                    entity_type="quota_reservation",
+                    entity_id=reservation.id,
+                    metadata={"released": remaining},
+                )
+            # In caller-owned mode, leave the transaction open for the
+            # caller to commit atomically with its own state changes.
 
         except ConflictError:
             self._session.rollback()

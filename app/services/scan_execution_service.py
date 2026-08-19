@@ -19,7 +19,7 @@ from app.core.enums import (
 )
 from app.core.logging import get_logger
 from app.models.quota_reservation import QuotaReservation
-from app.models.scan import PromptRun
+from app.models.scan import PromptRun, Scan
 from app.models.tracking import Prompt
 from app.providers.base import ProviderRequest
 from app.providers.errors import ProviderError, ProviderResponseError
@@ -67,6 +67,7 @@ class ScanExecutionService:
     def _claim_scan(self, scan_id: uuid.UUID) -> bool:
         with self._factory() as session:
             scans = ScanRepository(session)
+            runs = PromptRunRepository(session)
             scan = scans.get_for_update(scan_id)
             if scan is None:
                 session.rollback()
@@ -75,22 +76,26 @@ class ScanExecutionService:
                 session.commit()
                 return False
             if scan.quota_reservation_id is None:
-                scan.status = ScanStatus.FAILED
-                scan.failure_code = "MISSING_QUOTA_RESERVATION"
-                scan.failure_message = "Scan cannot execute without quota reservation."
-                scan.completed_at = datetime.now(UTC)
-                session.commit()
+                self._reject_scan_before_execution(
+                    session,
+                    scan,
+                    runs,
+                    failure_code="MISSING_QUOTA_RESERVATION",
+                    failure_message="Scan cannot execute without quota reservation.",
+                )
                 return False
             reservation = session.get(QuotaReservation, scan.quota_reservation_id)
             if reservation is None or reservation.status not in (
                 QuotaReservationStatus.ACTIVE,
                 QuotaReservationStatus.COMMITTED,
             ):
-                scan.status = ScanStatus.FAILED
-                scan.failure_code = "INVALID_QUOTA_RESERVATION"
-                scan.failure_message = "Scan quota reservation is not active."
-                scan.completed_at = datetime.now(UTC)
-                session.commit()
+                self._reject_scan_before_execution(
+                    session,
+                    scan,
+                    runs,
+                    failure_code="INVALID_QUOTA_RESERVATION",
+                    failure_message="Scan quota reservation is not active.",
+                )
                 return False
             scan.status = ScanStatus.RUNNING
             scan.started_at = datetime.now(UTC)
@@ -104,6 +109,40 @@ class ScanExecutionService:
                 entity_id=scan_id,
             )
         return True
+
+    def _reject_scan_before_execution(
+        self,
+        session: Session,
+        scan: Scan,
+        runs: PromptRunRepository,
+        *,
+        failure_code: str,
+        failure_message: str,
+    ) -> None:
+        """Terminalize a Scan rejected before any provider call.
+
+        Marks every unresolved PromptRun FAILED with an internal/accounting
+        error code, records the failure reason on the Scan, and then
+        atomically finalizes (classifying counts, setting terminal status,
+        and releasing unused quota) so the invariant ``terminal Scan →
+        zero unresolved PromptRuns`` always holds. No provider is invoked.
+        """
+        completed_at = datetime.now(UTC)
+        runs.mark_unresolved_failed(
+            scan.id,
+            completed_at=completed_at,
+            error_message=failure_message,
+            error_code=ProviderErrorCode.ACCOUNTING_ERROR,
+        )
+        # Record the rejection reason; finalize() will set status/counts/
+        # completed_at atomically with quota release.
+        scan.failure_code = failure_code
+        scan.failure_message = failure_message
+        session.commit()
+        # Finalize in a fresh session to atomically classify counts and
+        # release any remaining reserved quota.
+        with self._factory() as finalize_session:
+            ScanFinalizationService(finalize_session, self._audit).finalize(scan.id)
 
     def _list_run_ids(self, scan_id: uuid.UUID) -> list[uuid.UUID]:
         with self._factory() as session:

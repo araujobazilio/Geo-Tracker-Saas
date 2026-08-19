@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.enums import PromptRunStatus, ScanStatus
+from app.core.enums import PromptRunStatus, ProviderErrorCode, ScanStatus
 from app.models.scan import PromptRun, ResponseSource, Scan
 
 
@@ -71,6 +71,23 @@ class ScanRepository:
                     Scan.status == ScanStatus.RUNNING,
                     Scan.started_at.is_not(None),
                     Scan.started_at < before,
+                )
+            ).scalars()
+        )
+
+    def list_stale_pending(self, before: datetime) -> list[Scan]:
+        """Return PENDING scans whose ``created_at`` predates ``before``.
+
+        A PENDING scan older than the stale threshold was either never
+        dispatched (broker/task lost under early acknowledgement) or
+        dispatched but never claimed by a worker. Recovery may safely
+        fail it without replaying providers.
+        """
+        return list(
+            self._session.execute(
+                select(Scan).where(
+                    Scan.status == ScanStatus.PENDING,
+                    Scan.created_at < before,
                 )
             ).scalars()
         )
@@ -149,8 +166,19 @@ class PromptRunRepository:
         pending = counts.get(PromptRunStatus.PENDING, 0) + counts.get(PromptRunStatus.RUNNING, 0)
         return succeeded, failed, pending
 
+    def count_by_scan(self, scan_id: uuid.UUID) -> int:
+        return int(
+            self._session.execute(
+                select(func.count(PromptRun.id)).where(PromptRun.scan_id == scan_id)
+            ).scalar_one()
+        )
+
     def mark_unresolved_failed(
-        self, scan_id: uuid.UUID, completed_at: datetime, error_message: str
+        self,
+        scan_id: uuid.UUID,
+        completed_at: datetime,
+        error_message: str,
+        error_code: ProviderErrorCode | None = None,
     ) -> int:
         runs = list(
             self._session.execute(
@@ -164,6 +192,8 @@ class PromptRunRepository:
         )
         for run in runs:
             run.status = PromptRunStatus.FAILED
+            if error_code is not None:
+                run.error_code = error_code
             run.error_message = error_message
             run.completed_at = completed_at
         return len(runs)

@@ -229,14 +229,32 @@ parameters (different `reservation_id` or `quantity`), if the quantity
 exceeds the remaining uncommitted balance, or the reservation is not
 in an active/committed state.
 
-### `release_reservation(reservation_id)`
+### `release_reservation(reservation_id, *, commit_transaction=True)`
 
 Release remaining uncommitted reserved checks back to the pool (e.g.
 scan canceled or failed). Locks the reservation row with
 `get_by_id_for_update()` before mutation, then locks the originating
 usage period (via `reservation.usage_period_id`). Credits the
-**ORIGINAL** period, never the current month. Sets the reservation to
-`RELEASED`. Idempotent: calling twice does not subtract twice.
+**ORIGINAL** period, never the current month. Idempotent: calling twice
+does not subtract twice.
+
+When `remaining > 0`, the reservation is set to `RELEASED` and the
+period's `ai_checks_reserved` is decremented. When `remaining == 0`
+(all reserved checks were committed), the reservation is set to
+`COMMITTED` to preserve its fully-consumed history rather than marking
+it `RELEASED`.
+
+The `commit_transaction` parameter (Phase 6.1) controls transaction
+ownership:
+
+- `commit_transaction=True` (default): the method commits internally
+  and records a `QUOTA_RELEASED` audit event in a separate session.
+  Terminal reservation no-ops also commit to release locks.
+- `commit_transaction=False`: the caller owns the surrounding
+  transaction. The method locks, mutates, and flushes but does not
+  commit or record audit. `ScanFinalizationService` uses this mode so
+  the Scan terminal state, `Project.last_scan_at`, and quota release
+  commit atomically in one transaction.
 
 ### `expire_stale_reservations()`
 
