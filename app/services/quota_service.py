@@ -29,10 +29,10 @@ current month's period. This ensures correct accounting across UTC
 month boundaries.
 
 Transaction lifecycle: QuotaService owns its transaction boundaries.
-Every code path that acquires a FOR UPDATE lock MUST explicitly finish
-the transaction (commit or rollback) before returning. No method may
-return while holding row locks — that would leave locks dependent on
-some outer caller eventually closing the Session.
+Public operations finish their transactions before returning by default.
+The Scan Engine's explicit commit_transaction=False path is the sole
+exception: it composes quota accounting into a larger evidence transaction,
+and that caller must commit or roll back immediately.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.core.entitlements import UsageSnapshot
-from app.core.enums import QuotaReservationStatus, UsageEventType
+from app.core.enums import CostSource, QuotaReservationStatus, UsageEventType
 from app.core.exceptions import ConflictError, QuotaExceededError
 from app.core.logging import get_logger
 from app.models.quota_reservation import QuotaReservation
@@ -90,9 +90,9 @@ class QuotaService:
     ConflictError, IntegrityError), the session is rolled back so it
     is left in a usable state with no held locks or partial mutations.
 
-    Transaction lifecycle invariant: no method returns while holding
-    a FOR UPDATE lock. Every path that acquires a lock explicitly
-    commits or rolls back before returning.
+    Transaction lifecycle defaults to service-owned commit/rollback. The
+    Scan Engine may explicitly compose usage into its evidence transaction;
+    that caller then owns immediate commit/rollback.
     """
 
     def __init__(
@@ -220,7 +220,16 @@ class QuotaService:
         input_tokens: int | None,
         output_tokens: int | None,
         total_tokens: int | None,
-        cost_usd: Decimal,
+        cached_input_tokens: int | None,
+        cache_write_input_tokens: int | None,
+        reasoning_tokens: int | None,
+        citation_tokens: int | None,
+        search_requests: int | None,
+        cost_usd: Decimal | None,
+        provider_reported_cost_usd: Decimal | None,
+        cost_source: CostSource | None,
+        pricing_rule_id: uuid.UUID | None,
+        prompt_run_id: uuid.UUID | None,
     ) -> None:
         """Validate that an existing UsageEvent matches the request's material fields.
 
@@ -240,7 +249,16 @@ class QuotaService:
             or existing.input_tokens != input_tokens
             or existing.output_tokens != output_tokens
             or existing.total_tokens != total_tokens
+            or existing.cached_input_tokens != cached_input_tokens
+            or existing.cache_write_input_tokens != cache_write_input_tokens
+            or existing.reasoning_tokens != reasoning_tokens
+            or existing.citation_tokens != citation_tokens
+            or existing.search_requests != search_requests
             or existing.cost_usd != cost_usd
+            or existing.provider_reported_cost_usd != provider_reported_cost_usd
+            or existing.cost_source != cost_source
+            or existing.pricing_rule_id != pricing_rule_id
+            or existing.prompt_run_id != prompt_run_id
         ):
             raise ConflictError("Usage idempotency key reused with conflicting parameters.")
 
@@ -251,6 +269,7 @@ class QuotaService:
         idempotency_key: str,
         user_id: uuid.UUID | None = None,
         project_id: uuid.UUID | None = None,
+        ttl_seconds: int | None = None,
     ) -> QuotaReservation:
         """Atomically reserve AI Checks for a workspace.
 
@@ -274,6 +293,8 @@ class QuotaService:
         """
         if requested_checks <= 0:
             raise ValueError("requested_checks must be positive")
+        if ttl_seconds is not None and ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
 
         # Validate project belongs to workspace before any locking.
         self._validate_project_workspace(workspace_id, project_id)
@@ -324,7 +345,8 @@ class QuotaService:
 
             # Create reservation record, bound to this exact period.
             settings = get_settings()
-            expires_at = self._now + timedelta(seconds=settings.quota_reservation_ttl_seconds)
+            reservation_ttl = ttl_seconds or settings.quota_reservation_ttl_seconds
+            expires_at = self._now + timedelta(seconds=reservation_ttl)
             reservation = QuotaReservation(
                 workspace_id=workspace_id,
                 project_id=project_id,
@@ -381,7 +403,17 @@ class QuotaService:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         total_tokens: int | None = None,
-        cost_usd: Decimal = Decimal("0"),
+        cached_input_tokens: int | None = None,
+        cache_write_input_tokens: int | None = None,
+        reasoning_tokens: int | None = None,
+        citation_tokens: int | None = None,
+        search_requests: int | None = None,
+        cost_usd: Decimal | None = Decimal("0"),
+        provider_reported_cost_usd: Decimal | None = None,
+        cost_source: CostSource | None = None,
+        pricing_rule_id: uuid.UUID | None = None,
+        prompt_run_id: uuid.UUID | None = None,
+        commit_transaction: bool = True,
     ) -> UsageEvent:
         """Commit N AI Checks against a reservation.
 
@@ -397,9 +429,9 @@ class QuotaService:
         material accounting fields (reservation, quantity, provider,
         model, tokens, cost).
 
-        Transaction lifecycle: all locks (reservation + period) are
-        always released (commit or rollback) before this method
-        returns, including on idempotent early returns.
+        By default all locks are released before return. The Scan Engine may
+        pass commit_transaction=False to atomically commit evidence and usage;
+        in that mode the caller owns the surrounding transaction.
 
         Raises:
             ValueError: if quantity is invalid.
@@ -430,10 +462,19 @@ class QuotaService:
                     input_tokens,
                     output_tokens,
                     total_tokens,
+                    cached_input_tokens,
+                    cache_write_input_tokens,
+                    reasoning_tokens,
+                    citation_tokens,
+                    search_requests,
                     cost_usd,
+                    provider_reported_cost_usd,
+                    cost_source,
+                    pricing_rule_id,
+                    prompt_run_id,
                 )
-                # Release the reservation lock before returning.
-                self._session.commit()
+                if commit_transaction:
+                    self._session.commit()
                 return existing_event
 
             if reservation.status not in (
@@ -477,7 +518,16 @@ class QuotaService:
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
+                cached_input_tokens=cached_input_tokens,
+                cache_write_input_tokens=cache_write_input_tokens,
+                reasoning_tokens=reasoning_tokens,
+                citation_tokens=citation_tokens,
+                search_requests=search_requests,
                 cost_usd=cost_usd,
+                provider_reported_cost_usd=provider_reported_cost_usd,
+                cost_source=cost_source,
+                pricing_rule_id=pricing_rule_id,
+                prompt_run_id=prompt_run_id,
                 idempotency_key=usage_idempotency_key,
                 quota_reservation_id=reservation.id,
             )
@@ -499,21 +549,30 @@ class QuotaService:
                         input_tokens,
                         output_tokens,
                         total_tokens,
+                        cached_input_tokens,
+                        cache_write_input_tokens,
+                        reasoning_tokens,
+                        citation_tokens,
+                        search_requests,
                         cost_usd,
+                        provider_reported_cost_usd,
+                        cost_source,
+                        pricing_rule_id,
+                        prompt_run_id,
                     )
                     return existing_event
                 raise ConflictError("Usage idempotency conflict.") from None
             self._session.flush()
-            self._session.commit()
-
-            self._audit_record(
-                action="QUOTA_COMMITTED",
-                workspace_id=reservation.workspace_id,
-                user_id=reservation.user_id,
-                entity_type="quota_reservation",
-                entity_id=reservation.id,
-                metadata={"ai_checks": quantity},
-            )
+            if commit_transaction:
+                self._session.commit()
+                self._audit_record(
+                    action="QUOTA_COMMITTED",
+                    workspace_id=reservation.workspace_id,
+                    user_id=reservation.user_id,
+                    entity_type="quota_reservation",
+                    entity_id=reservation.id,
+                    metadata={"ai_checks": quantity},
+                )
 
             return event
 

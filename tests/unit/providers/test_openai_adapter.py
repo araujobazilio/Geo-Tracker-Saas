@@ -217,13 +217,14 @@ async def test_web_grounded_forces_tool_choice() -> None:
 
     await execute_with_transport(
         make_transport(handler),
-        make_settings(),
+        make_settings(openai_web_search_max_tool_calls=7),
         mode=ProviderExecutionMode.WEB_GROUNDED,
     )
 
     assert captured["body"]["tool_choice"] == "required"
     assert captured["body"]["include"] == ["web_search_call.action.sources"]
     assert captured["body"]["tools"] == [{"type": "web_search"}]
+    assert captured["body"]["max_tool_calls"] == 7
 
 
 async def test_max_output_tokens_sent() -> None:
@@ -473,6 +474,28 @@ async def test_cached_tokens_parsed() -> None:
     result = await execute_with_transport(make_transport(handler), make_settings())
 
     assert result.usage.cached_input_tokens == 500
+
+
+async def test_cache_write_tokens_parsed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_cache_write",
+                "model": "gpt-5.5",
+                "output_text": "Hello",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 50,
+                    "total_tokens": 1050,
+                    "input_tokens_details": {"cache_write_tokens": 250},
+                },
+            },
+        )
+
+    result = await execute_with_transport(make_transport(handler), make_settings())
+
+    assert result.usage.cache_write_input_tokens == 250
 
 
 async def test_reasoning_tokens_parsed() -> None:

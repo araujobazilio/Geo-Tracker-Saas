@@ -124,6 +124,7 @@ class OpenAIProviderAdapter:
             body["tools"] = [{"type": "web_search"}]
             # Force execution of the only configured tool: web_search.
             body["tool_choice"] = "required"
+            body["max_tool_calls"] = self._settings.openai_web_search_max_tool_calls
             # Request broader source metadata.
             body["include"] = ["web_search_call.action.sources"]
 
@@ -239,10 +240,12 @@ class OpenAIProviderAdapter:
         output_tokens = _safe_int(usage_data.get("output_tokens"))
         total_tokens = _safe_int(usage_data.get("total_tokens"))
         cached_input_tokens = None
+        cache_write_input_tokens = None
         reasoning_tokens = None
         input_details = usage_data.get("input_tokens_details")
         if isinstance(input_details, dict):
             cached_input_tokens = _safe_int(input_details.get("cached_tokens"))
+            cache_write_input_tokens = _safe_int(input_details.get("cache_write_tokens"))
         output_details = usage_data.get("output_tokens_details")
         if isinstance(output_details, dict):
             reasoning_tokens = _safe_int(output_details.get("reasoning_tokens"))
@@ -260,6 +263,7 @@ class OpenAIProviderAdapter:
             output_tokens=output_tokens,
             total_tokens=total_tokens,
             cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
             reasoning_tokens=reasoning_tokens,
             search_requests=search_requests,
         )

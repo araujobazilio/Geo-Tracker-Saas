@@ -23,7 +23,7 @@ an action was implemented.
 | 3 | Entitlements, plans, usage and quotas | IMPLEMENTED |
 | 4 | Project onboarding and prompt system | IMPLEMENTED |
 | 5 | AI provider abstraction and integrations | IMPLEMENTED |
-| 6 | Scan Engine | PLANNED |
+| 6 | Scan Engine | IMPLEMENTED |
 | 7 | Brand / citation detection and metrics | PLANNED |
 | 8 | Confidence Scans | PLANNED |
 | 9 | Action Center / opportunity engine | PLANNED |
@@ -71,6 +71,17 @@ See `docs/` for detailed architecture and roadmap documentation.
   retries, no quota calls, no hidden system prompts. Google WEB_GROUNDED
   disabled for compliance. httpx.AsyncClient with MockTransport tests.
   See `docs/PROVIDER_INTEGRATIONS.md` and `docs/PROVIDER_COMPLIANCE.md`.
+- **STANDARD Scan Engine:** immutable PromptSet/PromptRun execution plans,
+  full-plan quota reservation, duplicate-delivery row claims, bounded
+  concurrency, no paid-call retries, stale recovery without provider replay,
+  and durable response/source evidence. A successful PromptRun is exactly one
+  customer AI Check even when provider web search performs internal calls;
+  failed runs consume zero. See `docs/SCAN_ENGINE.md`.
+- **Provider cost accounting:** exact append-only model/surface price rules,
+  Decimal arithmetic, explicit `CostSource`, provider-reported Perplexity cost
+  precedence, and null-as-unknown semantics. No production rules are seeded;
+  operators must add verified rules for environment-configured model IDs. See
+  `docs/COST_ACCOUNTING.md`.
 
 ---
 
@@ -140,6 +151,9 @@ uvicorn app.main:app --reload
 | PATCH | `/api/v1/workspaces/{id}` | Update workspace (OWNER/ADMIN) |
 | GET | `/api/v1/workspaces/{id}/entitlements` | Workspace entitlements (product capabilities) |
 | GET | `/api/v1/workspaces/{id}/usage` | Monthly AI Check quota state |
+| POST | `/api/v1/workspaces/{id}/projects/{project_id}/scans` | Create an idempotent STANDARD scan (ADMIN/OWNER) |
+| GET | `/api/v1/workspaces/{id}/projects/{project_id}/scans` | List tenant-scoped scans |
+| GET | `/api/v1/workspaces/{id}/projects/{project_id}/scans/{scan_id}` | Read scan and run evidence (cost fields hidden) |
 | GET | `/docs` | OpenAPI interactive docs (non-production) |
 
 ---

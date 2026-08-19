@@ -2,9 +2,9 @@
 
 ## Status
 
-Phase 0/1 establish foundational security primitives. Full authentication,
-session handling, tenant-access enforcement, and CSRF are added in
-Phase 2. Security hardening is Phase 17.
+Phases 0–6 establish the implemented application, tenant, quota, provider, and
+Scan Engine security boundaries described below. Additional launch hardening is
+Phase 17.
 
 ## Implemented
 
@@ -97,13 +97,28 @@ Phase 2. Security hardening is Phase 17.
   `POST /api/provider/execute` or similar endpoint that allows
   arbitrary provider credit spending. Provider adapters are internal
   only. Phase 6 Scan Engine owns user-triggered execution under quota.
-- **No automatic provider retries (Phase 5):** each `execute()` call
-  performs at most ONE billable provider request. This prevents
-  accidental double-spending. Scan Engine (Phase 6) owns retry policy.
+- **Economically safe Scan execution (Phase 6):** each adapter performs at
+  most one billable request and the Scan Engine does not retry it. Celery uses
+  early acknowledgement (`task_acks_late=False`); the task has no autoretry and
+  never calls `self.retry`. PostgreSQL row claims make duplicate delivery a
+  no-op. Stale recovery marks unresolved work failed and never repeats provider
+  calls, so worker-loss ambiguity is absorbed by GEO rather than risked as a
+  duplicate customer charge. See `docs/SCAN_ENGINE.md`.
   (not 403) to avoid revealing resource existence, consistent with all
   other workspace-scoped endpoints. These endpoints expose only product
   capabilities and quota state — never billing internals (customer IDs,
   license IDs).
+- **Phase 6 evidence/accounting boundary:** the full STANDARD plan is reserved
+  before dispatch. A successful PromptRun atomically stores evidence and commits
+  exactly one AI Check; failures roll back and consume zero, then unused quota is
+  released. Customer Scan schemas expose final evidence and provider-returned
+  sources but hide tokens, costs, CostSource, pricing rules, usage-event IDs,
+  and reservation IDs. Source URLs are retained without server-side fetching,
+  avoiding Phase 6 SSRF exposure.
+- **Exact internal pricing:** cost uses Decimal and append-only exact
+  provider/surface/model/effective-time rules; unknown cost remains NULL rather
+  than a misleading zero. No production prices are seeded for environment-driven
+  model IDs. See `docs/COST_ACCOUNTING.md`.
 - **Plan limit integrity:** `plan_definitions` limits are typed columns
   with database-level CHECK constraints (non-negative), not JSON blobs.
   `quota_reservations` enforces `reserved > 0` and

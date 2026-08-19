@@ -9,7 +9,7 @@ from sqlalchemy import DECIMAL as SQL_DECIMAL
 from sqlalchemy import CheckConstraint, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.enums import UsageEventType
+from app.core.enums import CostSource, UsageEventType
 from app.db.base import Base, TimestampMixin
 from app.db.mixins import UUIDPrimaryKey
 from app.db.types import UUIDType
@@ -52,9 +52,35 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
             "total_tokens IS NULL OR total_tokens >= 0",
             name="ck_usage_events_total_tokens_non_negative",
         ),
-        CheckConstraint("cost_usd >= 0", name="ck_usage_events_cost_usd_non_negative"),
-        # Partial uniqueness on idempotency_key: only enforced when not NULL.
+        CheckConstraint(
+            "cached_input_tokens IS NULL OR cached_input_tokens >= 0",
+            name="ck_usage_events_cached_input_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0",
+            name="ck_usage_events_cache_write_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "reasoning_tokens IS NULL OR reasoning_tokens >= 0",
+            name="ck_usage_events_reasoning_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "citation_tokens IS NULL OR citation_tokens >= 0",
+            name="ck_usage_events_citation_tokens_non_negative",
+        ),
+        CheckConstraint(
+            "search_requests IS NULL OR search_requests >= 0",
+            name="ck_usage_events_search_requests_non_negative",
+        ),
+        CheckConstraint(
+            "cost_usd IS NULL OR cost_usd >= 0", name="ck_usage_events_cost_usd_non_negative"
+        ),
+        CheckConstraint(
+            "provider_reported_cost_usd IS NULL OR provider_reported_cost_usd >= 0",
+            name="ck_usage_events_provider_cost_non_negative",
+        ),
         UniqueConstraint("idempotency_key", name="uq_usage_events_idempotency_key"),
+        UniqueConstraint("prompt_run_id", name="uq_usage_events_prompt_run"),
     )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -73,7 +99,28 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    cost_usd: Mapped[Decimal] = mapped_column(SQL_DECIMAL(12, 6), nullable=False, default=0)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    citation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    search_requests: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[Decimal | None] = mapped_column(SQL_DECIMAL(18, 10), nullable=True)
+    provider_reported_cost_usd: Mapped[Decimal | None] = mapped_column(
+        SQL_DECIMAL(18, 10), nullable=True
+    )
+    cost_source: Mapped[CostSource | None] = mapped_column(String(30), nullable=True)
+    pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType,
+        ForeignKey("provider_price_rules.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    prompt_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType,
+        ForeignKey("prompt_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
     idempotency_key: Mapped[str | None] = mapped_column(
         String(255), nullable=True, unique=False, index=True
     )

@@ -66,6 +66,14 @@ Each measurement runs in exactly one execution mode:
 Modes that a provider does not support are rejected **before** any network call
 with `ProviderModeNotAllowedError` (see [Error Taxonomy](#error-taxonomy)).
 
+### Phase 6 STANDARD policy
+
+The Scan Engine fixes OpenAI, Anthropic, and Perplexity to `WEB_GROUNDED`, and
+Google to `MODEL_ONLY`. Public scan requests cannot override this methodology.
+The exact provider, surface, mode, and environment-configured requested model are
+snapshotted onto each PromptRun before dispatch; later plan, project-provider, or
+configuration changes do not mutate created plans. See `docs/SCAN_ENGINE.md`.
+
 ---
 
 ## Provider Abstraction
@@ -175,8 +183,9 @@ the provider surface, not to adapter-induced prompt distortion.
 - **One `execute()` call = at most ONE billable provider request.**
 - Adapters never retry on their own. Transient failures surface as the
   appropriate `Provider*Error`.
-- The **Phase 6 Scan Engine owns retry policy** (backoff, jitter, attempt
-  budget, idempotency).
+- The implemented **Phase 6 Scan Engine performs no provider retries**. Celery
+  uses early acknowledgement with no autoretry/`self.retry`; stale recovery
+  fails unresolved work without replaying providers.
 - Tests verify that the **transport call count is exactly 1** per `execute()`,
   including on error paths.
 
@@ -186,8 +195,13 @@ the provider surface, not to adapter-induced prompt distortion.
 
 - Provider adapters do **NOT** call `QuotaService`.
 - Provider adapters do **NOT** create `UsageEvent` records.
-- The **Phase 6 Scan Engine owns quota reservation and accounting**. The
-  adapter's only job is to execute the request and return a normalized
+- The **Phase 6 Scan Engine owns quota reservation and accounting**. It reserves
+  the full STANDARD plan before calls. One successful PromptRun commits exactly
+  one customer AI Check; provider-internal searches can add provider cost but do
+  not multiply customer checks. Failed executions consume zero and are excluded
+  from future Phase 7 metric denominators. A valid answer with no brand mention
+  is a successful measurement, not an adapter failure.
+- The adapter's only job is to execute the request and return a normalized
   `ProviderResult` (or raise).
 
 ---
@@ -195,10 +209,15 @@ the provider surface, not to adapter-induced prompt distortion.
 ## Pricing Boundary
 
 - There is **no hardcoded provider token/search pricing** in the adapter layer.
-- **Phase 6 will implement a versioned pricing snapshot** that maps provider,
-  model, and surface to costs at a point in time.
-- Adapters never emit **fake `cost_usd` values**. If a cost is not derivable
-  from a real pricing snapshot, it is simply absent.
+- Phase 6 resolves append-only `ProviderPriceRule` rows by exact provider,
+  surface, requested model, and execution time. It uses Decimal arithmetic and
+  keeps unknown cost NULL rather than inventing zero.
+- A valid provider-reported cost wins over local calculation (notably
+  Perplexity); otherwise a complete exact-rule calculation is used.
+- No production rules are seeded because model IDs are environment-driven and
+  default empty. Operators must add verified exact rules before non-Perplexity
+  execution when `PRICING_REQUIRE_RULE_FOR_EXECUTION=true`.
+- See `docs/COST_ACCOUNTING.md` for semantics and official pricing sources.
 
 ---
 
@@ -226,7 +245,9 @@ API keys are server-side secrets and are treated accordingly:
 - **`MODEL_ONLY`:** no tools supplied.
 - **`WEB_GROUNDED`:** `tools=[{"type": "web_search"}]` and
   `tool_choice="required"`. Because web search is the only configured tool,
-  required tool execution means `web_search` must execute.
+  required tool execution means `web_search` must execute. The request also
+  sends `max_tool_calls=OPENAI_WEB_SEARCH_MAX_TOOL_CALLS` (default `3`) to bound
+  internal search calls and provider cost.
 - **`include`:** `["web_search_call.action.sources"]` is requested so that
   source metadata is returned alongside the response.
 - **`store=false`** is set on every request for privacy and reproducibility
@@ -289,9 +310,8 @@ API keys are server-side secrets and are treated accordingly:
   and a `usage` object.
   - Only `model_output` steps are parsed for text; `thought` steps are
     **discarded**.
-  - **Status values:** `completed`, `failed`, `cancelled`, `requires_action`,
-    `incomplete`, `budget_exceeded`. Any **non-`completed`** status →
-    `ProviderResponseError`.
+  - Known incomplete statuses `failed`, `cancelled`, `requires_action`,
+    `incomplete`, and `budget_exceeded` → `ProviderResponseError`.
 - **Usage fields:** `total_input_tokens`, `total_output_tokens`,
   `total_tokens`, `total_cached_tokens`, `total_thought_tokens`.
 - **IDs:** `provider_response_id` = the interaction `id`;
@@ -453,3 +473,21 @@ provider where the protocol supports it:
 | Perplexity | `max_tokens` in the request body                        |
 
 This keeps the measurement budget explicit and reproducible across runs.
+
+---
+
+## Phase 6 Evidence Retention
+
+The Scan Engine stores final response text, normalized usage and IDs, and each
+provider-returned citation as an ordered `ResponseSource`. It preserves source
+URLs as evidence but does **not** fetch them, resolve redirects, or invent
+citations. Evidence, one UsageEvent, cost accounting, and `SUCCEEDED` status are
+committed atomically. Customer Scan API contracts return evidence and sources
+but deliberately omit internal token/cost/pricing and reservation fields.
+
+## Official References
+
+Official provider documentation was last verified **2026-08-19**. Pricing,
+prompt-caching, search/tool, thinking, model, and API links are maintained in
+`docs/COST_ACCOUNTING.md`; operators must verify them again before appending an
+exact production price rule.

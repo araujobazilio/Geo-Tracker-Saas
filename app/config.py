@@ -76,10 +76,18 @@ class Settings(BaseSettings):
     # --- Quota ---
     quota_reservation_ttl_seconds: int = 1800  # 30 minutes default
 
+    # --- Scan engine ---
+    scan_max_concurrency: int = 4
+    scan_reservation_ttl_seconds: int = 21600
+    scan_stale_after_seconds: int = 7200
+    pricing_require_rule_for_execution: bool = True
+    celery_broker_url: str = ""
+
     # --- AI providers ---
     openai_api_key: SecretStr = SecretStr("")
     openai_scan_model: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
+    openai_web_search_max_tool_calls: int = 3
     anthropic_api_key: SecretStr = SecretStr("")
     anthropic_scan_model: str = ""
     anthropic_base_url: str = "https://api.anthropic.com"
@@ -127,11 +135,18 @@ class Settings(BaseSettings):
             raise ValueError("Provider max output tokens must be positive.")
         return v
 
-    @field_validator("anthropic_web_search_max_uses")
+    @field_validator(
+        "anthropic_web_search_max_uses",
+        "openai_web_search_max_tool_calls",
+        "quota_reservation_ttl_seconds",
+        "scan_max_concurrency",
+        "scan_reservation_ttl_seconds",
+        "scan_stale_after_seconds",
+    )
     @classmethod
-    def _validate_positive_search_uses(cls, v: int) -> int:
+    def _validate_positive_integer_setting(cls, v: int) -> int:
         if v <= 0:
-            raise ValueError("Anthropic web search max uses must be positive.")
+            raise ValueError("Configuration value must be positive.")
         return v
 
     @model_validator(mode="after")

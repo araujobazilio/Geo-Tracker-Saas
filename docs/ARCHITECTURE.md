@@ -66,6 +66,11 @@ single responsibility boundary consumed by routers and other services.
 | `ProjectProviderService` | Provider configuration (PUT replace), entitlement enforcement |
 | `PromptGenerationService` | Deterministic prompt generation (5 variants/keyword, EN/PT) |
 | `PromptSetService` | PromptSet versioning, regeneration, staleness detection |
+| `ScanCreationService` | STANDARD preflight, immutable plan creation, full quota reservation, dispatch |
+| `ScanExecutionService` | Duplicate-safe row claims and bounded no-retry PromptRun execution |
+| `PromptRunResultRecorder` | Atomic evidence, source, cost, UsageEvent, and one-check commit |
+| `ScanFinalizationService` / `ScanRecoveryService` | Terminal classification, unused release, stale failure without provider replay |
+| `PricingService` / `ProviderCostCalculator` | Exact effective price resolution and Decimal/null-safe cost calculation |
 
 ### Entitlement resolution
 
@@ -129,7 +134,8 @@ Key design decisions:
   `search_used == True`. If no search is observed, `ProviderSearchError`
   is raised. This is a critical methodological invariant.
 - **No automatic retries**: One `execute()` = at most ONE billable
-  request. Scan Engine (Phase 6) owns retry policy.
+  request. The Phase 6 Scan Engine, Celery task, and stale recovery also never
+  replay provider calls.
 - **No quota/usage in adapters**: Adapters do NOT call `QuotaService`
   or create `UsageEvent`. Scan Engine owns accounting.
 - **No hidden system prompts**: The prompt text is the experimental
@@ -154,6 +160,29 @@ Key design decisions:
   measurements. Thought/reasoning steps are discarded.
 
 See `docs/PROVIDER_INTEGRATIONS.md` and `docs/PROVIDER_COMPLIANCE.md`.
+
+## Scan Engine (Phase 6)
+
+A STANDARD scan snapshots one exact active PromptSet and creates one PromptRun
+for every active-prompt × eligible-provider pair before any provider request.
+The fixed policy is OpenAI/Anthropic/Perplexity `WEB_GROUNDED` and Google
+`MODEL_ONLY`; project, entitlement, model, or PromptSet changes after creation
+do not mutate the stored plan.
+
+The complete `planned_ai_checks` amount is reserved before dispatch. Celery
+carries only the Scan UUID; PostgreSQL row claims guard duplicate deliveries.
+Workers use early acknowledgement, bounded async concurrency with a separate
+session per run, and no autoretry or `self.retry`. A successful result atomically
+stores PromptRun evidence, ordered ResponseSource rows, cost, one UsageEvent,
+and exactly one customer AI Check. Provider-internal searches may increase
+provider cost but do not increase customer checks. Failed runs consume zero;
+valid answers without a brand mention are successful measurements. Phase 7 must
+exclude failed runs from metric denominators.
+
+Stale recovery marks unresolved work failed and releases unused reservation; it
+never repeats provider requests, absorbing worker-loss ambiguity as GEO cost.
+Customer Scan APIs expose evidence but deliberately hide internal cost fields.
+See `docs/SCAN_ENGINE.md` and `docs/COST_ACCOUNTING.md`.
 
 ## Technology stack
 
@@ -202,8 +231,8 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Authentication, workspaces, authorization | IMPLEMENTED (Phase 2) |
 | Entitlements / quotas | IMPLEMENTED (Phase 3) |
 | Project onboarding / prompts | IMPLEMENTED (Phase 4) |
-| AI provider abstraction | PLANNED (Phase 5) |
-| Scan Engine | PLANNED (Phase 6) |
+| AI provider abstraction | IMPLEMENTED (Phase 5) |
+| Scan Engine | IMPLEMENTED (Phase 6) |
 | Brand / citation detection | PLANNED (Phase 7) |
 | Confidence Scans | PLANNED (Phase 8) |
 | Action Center | PLANNED (Phase 9) |

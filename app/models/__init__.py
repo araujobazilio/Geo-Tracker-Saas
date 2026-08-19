@@ -10,9 +10,11 @@ from app.models.audit import AuditLog
 from app.models.billing import AppSumoLicense, BillingAccount
 from app.models.plan_definition import PlanDefinition
 from app.models.plan_provider import PlanProvider
+from app.models.pricing import ProviderPriceRule
 from app.models.project import Project
 from app.models.prompt_set import PromptSet
 from app.models.quota_reservation import QuotaReservation
+from app.models.scan import PromptRun, ResponseSource, Scan
 from app.models.tracking import Competitor, ProjectKeyword, ProjectProvider, Prompt
 from app.models.usage import UsageEvent
 from app.models.user import User
@@ -31,9 +33,13 @@ __all__ = [
     "ProjectKeyword",
     "ProjectProvider",
     "Prompt",
+    "PromptRun",
     "PromptSet",
+    "ProviderPriceRule",
     "ProviderWebhookEvent",
     "QuotaReservation",
+    "ResponseSource",
+    "Scan",
     "UsageEvent",
     "User",
     "Workspace",

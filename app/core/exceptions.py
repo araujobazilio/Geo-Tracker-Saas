@@ -71,3 +71,15 @@ class RateLimitExceededError(AppError):
 class InfrastructureError(AppError):
     status_code = 503
     code = "infrastructure_unavailable"
+
+
+class PricingError(AppError):
+    code = "pricing_error"
+
+
+class PricingRuleNotFoundError(PricingError):
+    code = "pricing_rule_not_found"
+
+
+class PricingConfigurationError(PricingError):
+    code = "pricing_configuration_error"

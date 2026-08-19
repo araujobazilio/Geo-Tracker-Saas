@@ -66,6 +66,11 @@ Phase 4 also adds columns to `projects` (`prompt_input_revision`),
 (`prompt_set_id`, `variant_index`, `created_at`; removes
 `prompt_set_version`).
 
+Phase 6 adds `scans`, `prompt_runs`, `response_sources`, and
+`provider_price_rules`, and extends `usage_events` with detailed usage, cost
+source, pricing-rule, and PromptRun traceability. See "Scan Engine and provider
+cost accounting migration" below.
+
 Phase 3 adds four new tables and modifies two existing ones (see
 "Entitlements, usage and quota migration" below):
 
@@ -88,8 +93,12 @@ Domain logic never relies on server local time.
 
 ## Money
 
-Currency is stored as **NUMERIC(12,6)** (`Decimal` in Python), never
-binary floating point. `usage_events.cost_usd` is the canonical example.
+Phase 6 provider currency is stored as **NUMERIC(18,10)** (`Decimal` in
+Python), never binary floating point. `usage_events.cost_usd` is nullable:
+`NULL` means unknown, while decimal zero means a known zero charge. PromptRun
+and UsageEvent rows retain provider-reported cost, canonical cost, `CostSource`,
+and the exact pricing-rule reference when applicable. See
+`docs/COST_ACCOUNTING.md`.
 
 ## JSON columns
 
@@ -126,6 +135,10 @@ entity deletion.
 | `plan_providers` | CASCADE (plan_definition) | Owned by plan |
 | `workspace_usage_periods` | **RESTRICT** (workspace) | Usage history must survive |
 | `quota_reservations` | **RESTRICT** (workspace, usage_period), SET NULL (project/user) | Reservation history retention; permanently bound to originating period |
+| `scans` | **RESTRICT** (workspace, project, prompt_set, quota reservation), SET NULL (requesting user) | Reproducible execution-plan history survives configuration changes |
+| `prompt_runs` | **RESTRICT** (scan, prompt, price rule, usage event) | Provider evidence and one-to-one accounting traceability survive |
+| `response_sources` | **RESTRICT** (prompt run) | Provider-returned source evidence is retained; Phase 6 does not fetch URLs |
+| `provider_price_rules` | Referenced with **RESTRICT** | Append-only exact model/surface pricing evidence cannot be deleted while used |
 
 `audit_logs.user_id` and `audit_logs.workspace_id` are plain UUID
 columns (no foreign key) so historical audit records remain valid even
@@ -160,6 +173,13 @@ can never be orphaned from its originating reservation.
 - `billing_accounts` partial unique index `uq_billing_accounts_primary_per_workspace`
   on `workspace_id` where `is_primary = true` — at most one primary billing account
   per workspace at any time
+- `scans (workspace_id, idempotency_key)` and `scans.quota_reservation_id` — unique
+- `prompt_runs (scan_id, prompt_id, provider, attempt_number)` and
+  `prompt_runs.usage_event_id` — unique
+- `response_sources (prompt_run_id, ordinal)` — unique ordered evidence
+- `provider_price_rules.pricing_key` and
+  `(provider, provider_surface, model, effective_from)` — unique exact rules
+- `usage_events.prompt_run_id` — unique, enforcing one ledger event per successful run
 
 ## CHECK constraints
 
@@ -320,6 +340,34 @@ Removes:
 - `prompts.prompt_set_version` column (replaced by `prompt_set_id` FK)
 - Old `project_keywords (project_id, text)` unique constraint (replaced by
   `normalized_text`)
+
+## Scan Engine and provider cost accounting migration
+
+**Name:** `add scan engine and provider cost accounting`
+
+**Revision ID:** `91df07641aaf`
+
+**Revises:** `d5e6f7a8b9c0`
+
+Creates:
+
+| Table | Purpose |
+|---|---|
+| `scans` | Immutable STANDARD plan header and terminal counts/status |
+| `prompt_runs` | Snapshotted prompt/provider/surface/mode/model attempt plus evidence and cost |
+| `response_sources` | Ordered provider-returned citations; no source fetching |
+| `provider_price_rules` | Append-only exact-model, effective-dated pricing evidence |
+
+The migration seeds **no real price rows** because scan models are
+operator-selected environment settings and default empty. Operators must insert
+verified, exact, non-overlapping rules for configured models; generic or guessed
+rules are unsafe. It also changes `usage_events.cost_usd` to nullable
+`NUMERIC(18,10)` and adds cache/reasoning/citation/search usage,
+provider-reported cost, `CostSource`, pricing-rule, and PromptRun links.
+
+The Scan/PromptRun snapshot means later project provider, PromptSet, plan, or
+environment model changes do not mutate created plans. See
+`docs/SCAN_ENGINE.md` and `docs/COST_ACCOUNTING.md`.
 
 ## Indexes
 

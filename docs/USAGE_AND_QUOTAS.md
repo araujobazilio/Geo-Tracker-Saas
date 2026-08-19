@@ -2,8 +2,9 @@
 
 ## Status
 
-**IMPLEMENTED** (Phase 3). Quota enforcement for AI Checks is
-implemented via `QuotaService`, backed by PostgreSQL row-level locking.
+**IMPLEMENTED** (Phase 3, integrated with the Phase 6 Scan Engine). Quota
+enforcement for AI Checks is implemented via `QuotaService`, backed by
+PostgreSQL row-level locking.
 
 ## Overview
 
@@ -21,6 +22,15 @@ Available AI Checks = limit - used - reserved
 - `used` and `reserved` are aggregate counters on
   `WorkspaceUsagePeriod`.
 - The immutable `usage_events` table remains the detailed ledger.
+
+For a STANDARD scan, Phase 6 reserves the **entire** Cartesian plan
+(`active prompts × eligible providers`) before any provider call. One
+successfully and durably recorded PromptRun commits exactly one customer AI
+Check. Provider-internal web searches/tool calls may increase provider cost but
+do not create additional customer checks. Failed executions commit no event,
+consume zero, and release their reserved balance at finalization. A valid answer
+with no brand mention is still `SUCCEEDED`; execution failures are excluded from
+future Phase 7 metric denominators. See `docs/SCAN_ENGINE.md`.
 
 ## Monthly quota period
 
@@ -187,7 +197,9 @@ Atomically reserve AI Checks before a scan/provider call executes.
   belongs to `workspace_id` via `ProjectRepository.get_in_workspace()`.
   Rejects with `ConflictError` if the project is not in the workspace.
 - Raises `QuotaExceededError` (429) if not enough quota remaining.
-- Sets `expires_at = now + quota_reservation_ttl_seconds`.
+- Sets `expires_at = now + ttl_seconds` when explicitly supplied, otherwise
+  `quota_reservation_ttl_seconds`. STANDARD scans supply
+  `scan_reservation_ttl_seconds` (default 6 hours), reserving the whole plan.
 
 ### `commit_ai_checks(reservation_id, quantity, usage_idempotency_key, ...)`
 
@@ -202,6 +214,10 @@ succeeds. Atomically:
 - Increments `ai_checks_committed` on the reservation.
 - If `committed == reserved`, marks the reservation `COMMITTED`.
 - Creates an immutable `UsageEvent` linked via `quota_reservation_id`.
+- The Scan Engine uses `quantity=1` and
+  `prompt-run:{prompt_run_id}:usage`, composing this mutation into the same
+  transaction as PromptRun evidence and ResponseSource retention. A rollback
+  therefore commits neither evidence nor customer usage.
 
 Idempotent on `usage_idempotency_key`: retrying returns the existing
 `UsageEvent` without double-counting. **Re-check under lock:**
@@ -281,7 +297,9 @@ without encountering stale transaction state.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `quota_reservation_ttl_seconds` | `1800` (30 minutes) | TTL after which an ACTIVE reservation is considered stale and eligible for expiration |
+| `quota_reservation_ttl_seconds` | `1800` (30 minutes) | Generic TTL after which an ACTIVE reservation is eligible for expiration |
+| `scan_reservation_ttl_seconds` | `21600` (6 hours) | Explicit TTL used for the full STANDARD scan reservation |
+| `scan_stale_after_seconds` | `7200` (2 hours) | Age after which RUNNING unresolved scan work is failed without provider retry |
 
 ## API endpoints
 
@@ -325,3 +343,8 @@ authentication and workspace membership; cross-tenant access returns
 12. **Transaction error handling** rolls back the session on
     `QuotaExceededError`, `ConflictError`, or `IntegrityError`, leaving
     it usable with no held locks or partial mutations.
+13. **Full-plan reservation precedes dispatch** for STANDARD scans; success
+    commits one check per PromptRun and finalization releases every failed or
+    otherwise unused check.
+14. **Stale recovery never retries a provider.** Celery worker-loss ambiguity is
+    absorbed by GEO; unresolved work is failed and its customer quota released.
