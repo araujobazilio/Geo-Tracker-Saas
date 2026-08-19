@@ -420,5 +420,129 @@ class TestDeterministicGeneration:
             assert s1.prompt_type == s2.prompt_type
             assert s1.variant_index == s2.variant_index
 
-    def test_generator_key_is_deterministic_v1(self) -> None:
-        assert GENERATOR_KEY == "deterministic-template-v1"
+    def test_generator_key_is_deterministic_v2(self) -> None:
+        assert GENERATOR_KEY == "deterministic-template-v2"
+
+
+@pytest.mark.unit
+class TestPromptDistinctness:
+    """All 5 prompts per keyword must have distinct text after normalization."""
+
+    def test_all_5_distinct_with_competitor(self) -> None:
+        svc = PromptGenerationService()
+        project = _make_project()
+        keywords = [_make_keyword()]
+        competitors = [_make_competitor()]
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        assert len(specs) == 5
+
+        normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized_texts)) == 5, f"Duplicate prompts found: {normalized_texts}"
+
+    def test_all_5_distinct_without_competitor(self) -> None:
+        svc = PromptGenerationService()
+        project = _make_project()
+        keywords = [_make_keyword()]
+        competitors: list[Competitor] = []
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        assert len(specs) == 5
+
+        normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized_texts)) == 5, f"Duplicate prompts found: {normalized_texts}"
+
+    def test_all_5_distinct_english(self) -> None:
+        svc = PromptGenerationService()
+        project = _make_project(target_language="en", target_country="US")
+        keywords = [_make_keyword()]
+        competitors = [_make_competitor()]
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized_texts)) == 5
+
+    def test_all_5_distinct_portuguese(self) -> None:
+        svc = PromptGenerationService()
+        project = _make_project(target_language="pt", target_country="BR")
+        keywords = [_make_keyword()]
+        competitors = [_make_competitor()]
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized_texts)) == 5
+
+    def test_all_5_distinct_portuguese_without_competitor(self) -> None:
+        svc = PromptGenerationService()
+        project = _make_project(target_language="pt", target_country="BR")
+        keywords = [_make_keyword()]
+        competitors: list[Competitor] = []
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized_texts)) == 5
+
+    def test_distinct_across_multiple_keywords(self) -> None:
+        """Each keyword's 5 prompts must be distinct within that keyword."""
+        svc = PromptGenerationService()
+        project = _make_project()
+        keywords = [_make_keyword("best crm"), _make_keyword("email marketing")]
+        competitors = [_make_competitor()]
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        assert len(specs) == 10
+
+        # Group by keyword and check distinctness within each group.
+        for kw in keywords:
+            kw_specs = [s for s in specs if s.keyword_id == kw.id]
+            assert len(kw_specs) == 5
+            normalized = [normalize_text_for_comparison(s.text) for s in kw_specs]
+            assert len(set(normalized)) == 5
+
+    def test_non_branded_variants_use_different_templates(self) -> None:
+        """Verify that NON_BRANDED variants 1, 2, 3 produce different text."""
+        svc = PromptGenerationService()
+        project = _make_project()
+        keywords = [_make_keyword()]
+        competitors: list[Competitor] = []
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        non_branded = [s for s in specs if s.prompt_type == PromptType.NON_BRANDED]
+        assert len(non_branded) == 4  # 3 + 1 (variant 5 without competitor)
+
+        # All 4 NON_BRANDED texts must be distinct.
+        normalized = [normalize_text_for_comparison(s.text) for s in non_branded]
+        assert len(set(normalized)) == 4
+
+    def test_non_branded_safety_all_distinct_variants(self) -> None:
+        """All distinct NON_BRANDED variants still exclude brand/aliases/competitors."""
+        svc = PromptGenerationService()
+        project = _make_project(brand_name="Acme", brand_aliases=["Acme Inc"])
+        keywords = [_make_keyword()]
+        competitors = [_make_competitor(name="Mailchimp", domain="mailchimp.com")]
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        non_branded = [s for s in specs if s.prompt_type == PromptType.NON_BRANDED]
+        assert len(non_branded) == 3
+
+        for spec in non_branded:
+            text_lower = normalize_text_for_comparison(spec.text)
+            assert "acme" not in text_lower
+            assert "acme inc" not in text_lower
+            assert "mailchimp" not in text_lower
+
+    def test_non_branded_safety_all_distinct_variants_without_competitor(self) -> None:
+        """All 4 NON_BRANDED variants (no competitor) still exclude brand/aliases."""
+        svc = PromptGenerationService()
+        project = _make_project(brand_name="Acme", brand_aliases=["Acme Inc"])
+        keywords = [_make_keyword()]
+        competitors: list[Competitor] = []
+
+        specs = svc.generate_prompts(project, keywords, competitors)
+        non_branded = [s for s in specs if s.prompt_type == PromptType.NON_BRANDED]
+        assert len(non_branded) == 4
+
+        for spec in non_branded:
+            text_lower = normalize_text_for_comparison(spec.text)
+            assert "acme" not in text_lower
+            assert "acme inc" not in text_lower

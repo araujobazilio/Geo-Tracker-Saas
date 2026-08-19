@@ -3,14 +3,15 @@
 This service does NOT call external AI APIs. It uses deterministic
 templates to generate stable prompts from project configuration.
 
-Generator key: deterministic-template-v1
+Generator key: deterministic-template-v2
 
-For each active keyword, exactly 5 prompt variants are generated:
-  Variant 1: NON_BRANDED
-  Variant 2: NON_BRANDED
-  Variant 3: NON_BRANDED
+For each active keyword, exactly 5 prompt variants are generated,
+each with a DISTINCT prompt text (no duplicates):
+  Variant 1: NON_BRANDED — recommendations
+  Variant 2: NON_BRANDED — comparison / shortlist
+  Variant 3: NON_BRANDED — decision criteria
   Variant 4: BRANDED
-  Variant 5: COMPETITOR (if active competitors exist) or NON_BRANDED
+  Variant 5: COMPETITOR (if active competitors exist) or NON_BRANDED — buyer-oriented
 
 NON_BRANDED prompts MUST NOT contain the brand name, brand aliases,
 competitor names, or competitor domains. This is critical for
@@ -40,7 +41,7 @@ from app.models.tracking import Competitor, ProjectKeyword, Prompt
 
 logger = get_logger("app.prompt_generation")
 
-GENERATOR_KEY = "deterministic-template-v1"
+GENERATOR_KEY = "deterministic-template-v2"
 MAX_PROMPT_LENGTH = 1000
 PROMPTS_PER_KEYWORD = 5
 
@@ -87,25 +88,66 @@ def _market_context(project: Project, family: str) -> str:
     return "in the market"
 
 
-def _build_non_branded_prompt(
+def _build_non_branded_prompt_variant(
+    variant: int,
     keyword_text: str,
     project: Project,
     family: str,
     market: str,
 ) -> str:
-    """Build a NON_BRANDED prompt.
+    """Build a NON_BRANDED prompt for a specific variant index.
+
+    Each variant represents a different natural search behavior:
+      1 — recommendations
+      2 — comparison / shortlist
+      3 — decision criteria
+      5 — buyer-oriented alternative (used when no competitor for variant 5)
 
     MUST NOT contain brand name, brand aliases, competitor names, or
     competitor domains.
     """
     if family == "pt":
+        if variant == 1:
+            return (
+                f"Quais são as melhores opções de {keyword_text} {market}? "
+                f"Por favor, liste e compare as principais alternativas."
+            )
+        if variant == 2:
+            return (
+                f"Quais soluções de {keyword_text} devo comparar {market}? "
+                f"Quais são as principais diferenças entre elas?"
+            )
+        if variant == 3:
+            return (
+                f"O que devo considerar ao escolher {keyword_text} {market}? "
+                f"Quais opções se destacam e por quê?"
+            )
+        # variant == 5 (buyer-oriented, no competitor available)
         return (
-            f"Quais são as melhores opções de {keyword_text} {market}? "
-            f"Por favor, liste e compare as principais alternativas."
+            f"Se eu fosse escolher {keyword_text} {market} hoje, "
+            f"quais opções você listaria e por quê?"
         )
+
+    # English templates
+    if variant == 1:
+        return (
+            f"What are the best options for {keyword_text} {market}? "
+            f"Please list and compare the top alternatives."
+        )
+    if variant == 2:
+        return (
+            f"Which {keyword_text} solutions should I compare {market}, "
+            f"and what are the main differences between them?"
+        )
+    if variant == 3:
+        return (
+            f"What should I look for when choosing {keyword_text} {market}, "
+            f"and which options stand out?"
+        )
+    # variant == 5 (buyer-oriented, no competitor available)
     return (
-        f"What are the best options for {keyword_text} {market}? "
-        f"Please list and compare the top alternatives."
+        f"If I were choosing {keyword_text} {market} today, "
+        f"which options would you shortlist and why?"
     )
 
 
@@ -290,9 +332,9 @@ class PromptGenerationService:
 
         specs: list[GeneratedPromptSpec] = []
 
-        # Variants 1-3: NON_BRANDED
+        # Variants 1-3: NON_BRANDED (distinct templates)
         for i in range(1, 4):
-            text = _build_non_branded_prompt(keyword.text, project, family, market)
+            text = _build_non_branded_prompt_variant(i, keyword.text, project, family, market)
             _validate_non_branded_safety(text, brand_name, brand_aliases, competitors)
             self._check_length(text)
             specs.append(
@@ -328,7 +370,7 @@ class PromptGenerationService:
             )
         )
 
-        # Variant 5: COMPETITOR (if competitors exist) or NON_BRANDED
+        # Variant 5: COMPETITOR (if competitors exist) or NON_BRANDED (buyer-oriented)
         if competitors:
             comp_text = _build_competitor_prompt(
                 keyword.text, brand_name, competitors, project, family, market
@@ -349,7 +391,7 @@ class PromptGenerationService:
                 )
             )
         else:
-            nb5_text = _build_non_branded_prompt(keyword.text, project, family, market)
+            nb5_text = _build_non_branded_prompt_variant(5, keyword.text, project, family, market)
             _validate_non_branded_safety(nb5_text, brand_name, brand_aliases, competitors)
             self._check_length(nb5_text)
             specs.append(
@@ -368,6 +410,18 @@ class PromptGenerationService:
             )
 
         assert len(specs) == PROMPTS_PER_KEYWORD
+
+        # Distinctness validation: all 5 prompt texts must be unique
+        # after normalized comparison.
+        normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+        unique_texts = set(normalized_texts)
+        if len(unique_texts) != PROMPTS_PER_KEYWORD:
+            duplicates = [t for t in normalized_texts if normalized_texts.count(t) > 1]
+            raise ValidationError(
+                f"Generated prompts are not distinct for keyword '{keyword.text}'. "
+                f"Duplicate texts: {set(duplicates)}"
+            )
+
         return specs
 
     def _check_length(self, text: str) -> None:

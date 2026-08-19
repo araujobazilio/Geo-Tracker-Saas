@@ -161,7 +161,7 @@ class TestProjectOnboarding:
         assert active_set.version == 1
         assert active_set.input_revision == 1
         assert active_set.status == "ACTIVE"
-        assert active_set.generator_key == "deterministic-template-v1"
+        assert active_set.generator_key == "deterministic-template-v2"
 
         # Verify prompts were created (5 per keyword).
         from app.repositories.tracking_repository import PromptRepository
@@ -327,6 +327,120 @@ class TestProjectOnboarding:
         prompt_repo = PromptRepository(db_session)
         prompts = prompt_repo.list_by_prompt_set(active_set.id)
         assert any("melhores" in p.text.lower() for p in prompts)
+
+
+@pytest.mark.integration
+class TestOnboardingExactLimits:
+    """Exact resource-limit boundary tests for onboarding.
+
+    Rule: final_count == limit is ALLOWED; final_count > limit is REJECTED.
+    """
+
+    def test_keyword_exact_limit_succeeds(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_keywords=5, request has 5 unique keywords → SUCCESS."""
+        ws, user = _setup_workspace_with_plan(db_session, max_keywords=5)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(
+            keywords=[KeywordInput(text=f"keyword {i}") for i in range(5)],
+        )
+        project = svc.onboard_project(ws.id, request, created_by_user_id=user.id)
+        assert project.id is not None
+
+        from app.repositories.keyword_repository import ProjectKeywordRepository
+
+        kw_repo = ProjectKeywordRepository(db_session)
+        assert len(kw_repo.list_by_project(project.id)) == 5
+
+    def test_keyword_over_limit_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_keywords=5, request has 6 keywords → QuotaExceededError, no project."""
+        ws, user = _setup_workspace_with_plan(db_session, max_keywords=5)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(
+            keywords=[KeywordInput(text=f"keyword {i}") for i in range(6)],
+        )
+
+        ws_id = ws.id
+        with pytest.raises(QuotaExceededError, match="Keyword limit"):
+            svc.onboard_project(ws_id, request, created_by_user_id=user.id)
+
+        # Verify no project was created. Use a fresh session because
+        # rollback may have expired objects in the original session.
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from app.config import get_settings
+
+        settings = get_settings()
+        engine = create_engine(str(settings.database_url), pool_pre_ping=True)
+        factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+        verify = factory()
+        try:
+            from app.repositories.project_repository import ProjectRepository
+
+            proj_repo = ProjectRepository(verify)
+            assert len(proj_repo.list_by_workspace(ws_id)) == 0
+        finally:
+            verify.close()
+            engine.dispose()
+
+    def test_keyword_single_succeeds(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_keywords=1, request has 1 keyword → SUCCESS."""
+        ws, user = _setup_workspace_with_plan(db_session, max_keywords=1)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(
+            keywords=[KeywordInput(text="only keyword")],
+        )
+        project = svc.onboard_project(ws.id, request, created_by_user_id=user.id)
+        assert project.id is not None
+
+    def test_competitor_exact_limit_succeeds(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_competitors=3, request has exactly 3 → SUCCESS."""
+        ws, user = _setup_workspace_with_plan(db_session, max_competitors=3)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(
+            competitors=[
+                CompetitorInput(name=f"Comp {i}", domain=f"comp{i}.com") for i in range(3)
+            ],
+        )
+        project = svc.onboard_project(ws.id, request, created_by_user_id=user.id)
+        assert project.id is not None
+
+        from app.repositories.competitor_repository import CompetitorRepository
+
+        comp_repo = CompetitorRepository(db_session)
+        assert len(comp_repo.list_by_project(project.id)) == 3
+
+    def test_competitor_over_limit_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_competitors=3, request has 4 → REJECTED."""
+        ws, user = _setup_workspace_with_plan(db_session, max_competitors=3)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(
+            competitors=[
+                CompetitorInput(name=f"Comp {i}", domain=f"comp{i}.com") for i in range(4)
+            ],
+        )
+
+        with pytest.raises(QuotaExceededError, match="Competitor limit"):
+            svc.onboard_project(ws.id, request, created_by_user_id=user.id)
+
+    def test_competitor_zero_limit_no_competitors_succeeds(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_competitors=0, no competitors → SUCCESS."""
+        ws, user = _setup_workspace_with_plan(db_session, max_competitors=0)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(competitors=[])
+        project = svc.onboard_project(ws.id, request, created_by_user_id=user.id)
+        assert project.id is not None
+
+    def test_competitor_zero_limit_with_competitor_rejected(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """max_competitors=0, one competitor → REJECTED."""
+        ws, user = _setup_workspace_with_plan(db_session, max_competitors=0)
+        svc = ProjectOnboardingService(db_session)
+        request = _make_onboarding_request(
+            competitors=[CompetitorInput(name="Comp", domain="comp.com")],
+        )
+
+        with pytest.raises(QuotaExceededError, match="Competitor limit"):
+            svc.onboard_project(ws.id, request, created_by_user_id=user.id)
 
 
 @pytest.mark.integration

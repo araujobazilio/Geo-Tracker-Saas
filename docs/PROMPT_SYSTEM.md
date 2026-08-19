@@ -24,7 +24,7 @@ measurement:
   that version (and all of its prompts) is permanently retrievable.
 
 Prompt generation is **deterministic and template-based** — it does *not* call
-external AI APIs. The generator key `deterministic-template-v1` identifies the
+external AI APIs. The generator key `deterministic-template-v2` identifies the
 current template algorithm; recording it on each `PromptSet` makes it possible
 to know exactly how a set was produced.
 
@@ -44,7 +44,7 @@ Model: `app/models/prompt_set.py` (`prompt_sets` table)
 | `version`            | int              | Monotonically increasing per project, starting at `1`. `version > 0`.      |
 | `input_revision`     | int              | The `Project.prompt_input_revision` captured at generation time. `> 0`.    |
 | `status`             | `PromptSetStatus`| `ACTIVE` or `SUPERSEDED`.                                                   |
-| `generator_key`      | str              | Algorithm that produced the prompts (currently `deterministic-template-v1`). |
+| `generator_key`      | str              | Algorithm that produced the prompts (currently `deterministic-template-v2`). |
 | `created_by_user_id` | UUID (FK, nullable) | User who triggered generation. `ON DELETE SET NULL`.                    |
 | `created_at`         | datetime (tz)    | Row creation timestamp.                                                     |
 | `activated_at`       | datetime (tz, nullable) | When the set became `ACTIVE`.                                       |
@@ -97,11 +97,10 @@ A `SUPERSEDED` set is never deleted and never returns to `ACTIVE`.
 
 ## Generator key
 
-Each `PromptSet` records the `generator_key` that produced it. The current and
-only key is:
+Each `PromptSet` records the `generator_key` that produced it. The current key is:
 
 ```
-deterministic-template-v1
+deterministic-template-v2
 ```
 
 This key identifies the deterministic template algorithm in
@@ -109,6 +108,35 @@ This key identifies the deterministic template algorithm in
 external AI APIs — it produces stable prompt text purely from project
 configuration. Recording the key on every set ensures reproducibility: the same
 inputs plus this key always yield the same prompt text.
+
+### Generator version history
+
+| Key                       | Description                                                                 |
+| ------------------------- | --------------------------------------------------------------------------- |
+| `deterministic-template-v1` | Initial generator. NON_BRANDED variants 1–3 used the same template, producing duplicate text. |
+| `deterministic-template-v2` | Current generator. Each of the 5 variants uses a distinct template with a different search intent. |
+
+### Generator-version regeneration semantics
+
+Regeneration checks both `input_revision` **and** `generator_key`. If the
+current `ACTIVE` set's `generator_key` does not match the current
+`GENERATOR_KEY`, the set is considered stale — even if `input_revision` matches
+— and regeneration will create a new version.
+
+This means that when the generator is upgraded (e.g. v1 → v2), existing
+projects with v1 prompt sets become **eligible for regeneration** even if
+`prompt_input_revision` has not changed. Calling `regenerate_prompt_set` on
+such a project will:
+
+1. Create a new `PromptSet` with `generator_key = deterministic-template-v2`.
+2. Supersede the old v1 set (`SUPERSEDED`).
+3. **Not** change `Project.prompt_input_revision` (generator changes are
+   separate from input changes).
+
+**Historical v1 preservation**: existing `PromptSet` records with
+`generator_key = deterministic-template-v1` are never modified or deleted.
+Their `Prompt` rows remain unchanged forever, ensuring that historical scans
+can always be tied back to the exact prompts used at the time.
 
 Regeneration also checks the generator key: if the current `ACTIVE` set is fresh
 *and* its `generator_key` matches the current key, regeneration is a no-op (see
@@ -119,18 +147,35 @@ Regeneration also checks the generator key: if the current `ACTIVE` set is fresh
 ## Prompt generation
 
 For each **active** keyword, the generator produces exactly **5 prompt
-variants** (`PROMPTS_PER_KEYWORD = 5`):
+variants** (`PROMPTS_PER_KEYWORD = 5`), each with a **distinct prompt text**:
 
-| Variant (`variant_index`) | `prompt_type` | Content                                                |
-| ------------------------- | ------------- | ----------------------------------------------------- |
-| 1                         | `NON_BRANDED` | No brand or competitor references.                    |
-| 2                         | `NON_BRANDED` | No brand or competitor references.                    |
-| 3                         | `NON_BRANDED` | No brand or competitor references.                    |
-| 4                         | `BRANDED`     | Includes the project's primary brand name.            |
-| 5                         | `COMPETITOR`  | Includes brand + up to 3 competitors. If the project has **no active competitors**, variant 5 falls back to `NON_BRANDED`. |
+| Variant (`variant_index`) | `prompt_type` | Intent                          | Content                                                |
+| ------------------------- | ------------- | ------------------------------- | ----------------------------------------------------- |
+| 1                         | `NON_BRANDED` | Recommendations                 | "What are the best options for {keyword} {market}?"                    |
+| 2                         | `NON_BRANDED` | Comparison / shortlist          | "Which {keyword} solutions should I compare {market}?"                |
+| 3                         | `NON_BRANDED` | Decision criteria               | "What should I look for when choosing {keyword} {market}?"            |
+| 4                         | `BRANDED`     | Brand evaluation                | Includes the project's primary brand name.            |
+| 5                         | `COMPETITOR`  | Competitive comparison          | Includes brand + up to 3 competitors. If the project has **no active competitors**, variant 5 falls back to `NON_BRANDED` with a buyer-oriented intent. |
 
 The competitor subset is chosen deterministically: the first 3 active
 competitors ordered by `(name, id)`.
+
+### Distinctness guarantee
+
+All 5 prompts for a single keyword **must** have distinct text after
+normalized comparison. This is validated immediately after generation:
+
+```python
+normalized_texts = [normalize_text_for_comparison(s.text) for s in specs]
+unique_texts = set(normalized_texts)
+if len(unique_texts) != PROMPTS_PER_KEYWORD:
+    raise ValidationError("Generated prompts are not distinct...")
+```
+
+If deterministic generation somehow produces duplicate prompts, a
+`ValidationError` is raised and the prompt set is **not** persisted. This
+ensures that future scans never spend multiple AI checks asking the same
+question.
 
 ### Commercial intent
 
@@ -152,14 +197,34 @@ def _commercial_intent_from_funnel(funnel_stage: FunnelStage | None) -> bool:
 ### Example generated prompts (English)
 
 ```
-NON_BRANDED:  What are the best options for email marketing software in the US?
-              Please list and compare the top alternatives.
+NON_BRANDED 1 (recommendations):
+  What are the best options for email marketing software in the US?
+  Please list and compare the top alternatives.
 
-BRANDED:      Is Acme a good option for email marketing software in the US?
-              What strengths and alternatives should I consider?
+NON_BRANDED 2 (comparison / shortlist):
+  Which email marketing software solutions should I compare in the US,
+  and what are the main differences between them?
 
-COMPETITOR:   Compare Acme, Mailchimp and Brevo for email marketing software in the US.
-              What are the main differences and which would you recommend?
+NON_BRANDED 3 (decision criteria):
+  What should I look for when choosing email marketing software in the US,
+  and which options stand out?
+
+BRANDED:
+  Is Acme a good option for email marketing software in the US?
+  What strengths and alternatives should I consider?
+
+COMPETITOR:
+  Compare Acme, Mailchimp and Brevo for email marketing software in the US.
+  What are the main differences and which would you recommend?
+```
+
+When there are **no active competitors**, variant 5 becomes a buyer-oriented
+NON_BRANDED prompt:
+
+```
+NON_BRANDED 5 (buyer-oriented, no competitor):
+  If I were choosing email marketing software in the US today,
+  which options would you shortlist and why?
 ```
 
 ### Determinism
@@ -252,7 +317,7 @@ Flow:
 7. Mark the current `ACTIVE` set as `SUPERSEDED`.
 8. Create the new `PromptSet` (version `next_version`, status `ACTIVE`,
    `input_revision` = current project revision, `generator_key` =
-   `deterministic-template-v1`) and generate its prompts.
+   `deterministic-template-v2`) and generate its prompts.
 9. Commit.
 
 ```python
@@ -356,7 +421,7 @@ All endpoints are scoped under the projects router
   "version": 2,
   "input_revision": 4,
   "status": "ACTIVE",
-  "generator_key": "deterministic-template-v1",
+  "generator_key": "deterministic-template-v2",
   "created_at": "2025-01-01T00:00:00Z",
   "activated_at": "2025-01-01T00:00:00Z",
   "prompt_count": 25,

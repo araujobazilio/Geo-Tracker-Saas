@@ -166,9 +166,22 @@ Maximum keyword length is 500 characters.
 ### Capacity limits
 
 Keyword capacity is plan-based: `max_keywords_per_project` from
-`EffectiveEntitlements`. The check is performed via
-`EntitlementService.require_keyword_capacity()`, which raises
-`QuotaExceededError` (HTTP 429) if the limit is reached.
+`EffectiveEntitlements`.
+
+**Onboarding** uses `EntitlementService.require_keyword_total_within_limit()`,
+which checks the **final total** count. The rule is:
+
+- `final_count == max` → **allowed** (exact limit is OK)
+- `final_count > max` → **rejected** (`QuotaExceededError`, HTTP 429)
+
+This check is performed **before** any keyword rows are inserted, so no
+over-limit rows are temporarily created and rolled back.
+
+**Individual add/reactivation** uses `EntitlementService.require_keyword_capacity()`,
+which checks whether **one more** can be added:
+
+- `current_count < max` → **allowed**
+- `current_count >= max` → **rejected**
 
 ### Uniqueness
 
@@ -203,8 +216,24 @@ project domains (strip scheme, `www`, path, port; lowercase; validate).
 ### Capacity limits
 
 Competitor capacity is plan-based: `max_competitors_per_project` from
-`EffectiveEntitlements`. Checked via
-`EntitlementService.require_competitor_capacity()`.
+`EffectiveEntitlements`.
+
+**Onboarding** uses `EntitlementService.require_competitor_total_within_limit()`,
+which checks the **final total** count. The rule is:
+
+- `final_count == max` → **allowed** (exact limit is OK)
+- `final_count > max` → **rejected** (`QuotaExceededError`, HTTP 429)
+
+This check is performed **before** any competitor rows are inserted.
+
+**Individual add/reactivation** uses `EntitlementService.require_competitor_capacity()`,
+which checks whether **one more** can be added:
+
+- `current_count < max` → **allowed**
+- `current_count >= max` → **rejected**
+
+A plan with `max_competitors_per_project = 0` allows onboarding with no
+competitors but rejects any competitor in the request.
 
 ### Revision impact
 

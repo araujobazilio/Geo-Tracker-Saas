@@ -72,7 +72,7 @@ class PromptSetService:
           - version = 1
           - input_revision = project.prompt_input_revision
           - status = ACTIVE
-          - generator_key = deterministic-template-v1
+          - generator_key = deterministic-template-v2
         """
         return self._create_prompt_set(
             project=project,

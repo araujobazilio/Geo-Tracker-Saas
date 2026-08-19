@@ -302,6 +302,64 @@ class TestPromptSetVersioning:
         ps_none = ps_svc.get_prompt_set_by_version(ws.id, project.id, 99)
         assert ps_none is None
 
+    def test_generator_upgrade_v1_to_v2(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        """A v1 PromptSet should be regenerated to v2 even if input_revision matches.
+
+        Because the generator_key changed from v1 to v2, the existing set
+        is considered stale (generator mismatch). Regeneration creates a
+        new version with v2, and the old v1 set becomes SUPERSEDED.
+        """
+
+        from app.core.enums import PromptSetStatus
+        from app.repositories.tracking_repository import PromptRepository, PromptSetRepository
+        from app.services.prompt_generation_service import GENERATOR_KEY
+
+        ws, user = _setup_workspace_with_plan(db_session)
+        project = _onboard_project(db_session, ws.id, user.id)
+
+        # Manually downgrade the active prompt set to v1 generator key.
+        ps_repo = PromptSetRepository(db_session)
+        prompt_repo = PromptRepository(db_session)
+        active_set = ps_repo.get_active_by_project(project.id)
+        assert active_set is not None
+        active_set.generator_key = "deterministic-template-v1"
+        db_session.flush()
+        db_session.commit()
+
+        # Record v1 prompts.
+        v1_prompts = prompt_repo.list_by_prompt_set(active_set.id)
+        v1_texts = [p.text for p in v1_prompts]
+
+        # Regenerate — should detect generator mismatch and create v2.
+        ps_svc = PromptSetService(db_session)
+        new_set = ps_svc.regenerate_prompt_set(ws.id, project.id, created_by_user_id=user.id)
+
+        # New set should be v2 generator, version 2, ACTIVE.
+        assert new_set.version == 2
+        assert new_set.status == PromptSetStatus.ACTIVE
+        assert new_set.generator_key == GENERATOR_KEY
+        assert new_set.generator_key == "deterministic-template-v2"
+
+        # input_revision should remain the same (generator change doesn't
+        # affect prompt_input_revision).
+        assert new_set.input_revision == active_set.input_revision
+
+        # Old set should be SUPERSEDED.
+        db_session.refresh(active_set)
+        assert active_set.status == PromptSetStatus.SUPERSEDED
+
+        # V1 prompts should be unchanged.
+        v1_prompts_after = prompt_repo.list_by_prompt_set(active_set.id)
+        v1_texts_after = [p.text for p in v1_prompts_after]
+        assert v1_texts == v1_texts_after
+
+        # V2 prompts should be distinct from each other.
+        v2_prompts = prompt_repo.list_by_prompt_set(new_set.id)
+        from app.core.normalization import normalize_text_for_comparison
+
+        v2_normalized = [normalize_text_for_comparison(p.text) for p in v2_prompts]
+        assert len(set(v2_normalized)) == len(v2_prompts)
+
 
 @pytest.fixture()
 def engine_factory():

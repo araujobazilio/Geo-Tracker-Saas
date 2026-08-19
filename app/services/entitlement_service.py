@@ -162,7 +162,11 @@ class EntitlementService:
     def require_keyword_capacity(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID, current_count: int
     ) -> None:
-        """Raise QuotaExceededError if project cannot add another keyword."""
+        """Raise QuotaExceededError if project cannot add another keyword.
+
+        This is the add-one-more check: current_count is the active count
+        BEFORE adding. If current_count >= max, adding one more would exceed.
+        """
         from app.core.exceptions import QuotaExceededError
 
         ent = self.get_effective_entitlements(workspace_id)
@@ -171,16 +175,56 @@ class EntitlementService:
                 f"Keyword limit reached ({ent.max_keywords_per_project}) " f"for this project."
             )
 
+    def require_keyword_total_within_limit(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID, total_count: int
+    ) -> None:
+        """Raise QuotaExceededError if total_count exceeds the keyword limit.
+
+        This is the total check: total_count is the FINAL active count
+        (e.g. after onboarding inserts). total_count == max is allowed;
+        only total_count > max is rejected.
+        """
+        from app.core.exceptions import QuotaExceededError
+
+        ent = self.get_effective_entitlements(workspace_id)
+        if total_count > ent.max_keywords_per_project:
+            raise QuotaExceededError(
+                f"Keyword limit exceeded ({total_count} > {ent.max_keywords_per_project}) "
+                f"for this project."
+            )
+
     def require_competitor_capacity(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID, current_count: int
     ) -> None:
-        """Raise QuotaExceededError if project cannot add another competitor."""
+        """Raise QuotaExceededError if project cannot add another competitor.
+
+        This is the add-one-more check: current_count is the active count
+        BEFORE adding. If current_count >= max, adding one more would exceed.
+        """
         from app.core.exceptions import QuotaExceededError
 
         ent = self.get_effective_entitlements(workspace_id)
         if current_count >= ent.max_competitors_per_project:
             raise QuotaExceededError(
                 f"Competitor limit reached ({ent.max_competitors_per_project}) "
+                f"for this project."
+            )
+
+    def require_competitor_total_within_limit(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID, total_count: int
+    ) -> None:
+        """Raise QuotaExceededError if total_count exceeds the competitor limit.
+
+        This is the total check: total_count is the FINAL active count
+        (e.g. after onboarding inserts). total_count == max is allowed;
+        only total_count > max is rejected.
+        """
+        from app.core.exceptions import QuotaExceededError
+
+        ent = self.get_effective_entitlements(workspace_id)
+        if total_count > ent.max_competitors_per_project:
+            raise QuotaExceededError(
+                f"Competitor limit exceeded ({total_count} > {ent.max_competitors_per_project}) "
                 f"for this project."
             )
 

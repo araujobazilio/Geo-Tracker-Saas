@@ -365,8 +365,52 @@ class TestPromptGeneration:
             assert s1.prompt_type == s2.prompt_type
             assert s1.variant_index == s2.variant_index
 
-    def test_generator_key_is_v1(self) -> None:
-        assert GENERATOR_KEY == "deterministic-template-v1"
+    def test_generator_key_is_v2(self) -> None:
+        assert GENERATOR_KEY == "deterministic-template-v2"
+
+    def test_all_5_distinct_with_competitor(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        from app.core.normalization import normalize_text_for_comparison
+
+        project = _make_project(db_session)
+        kw = _make_keyword(project, "best crm")
+        comp = _make_competitor(project, "Salesforce", "salesforce.com")
+        db_session.add_all([kw, comp])
+        db_session.flush()
+
+        svc = PromptGenerationService()
+        specs = svc.generate_prompts(project, [kw], [comp])
+
+        normalized = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized)) == 5
+
+    def test_all_5_distinct_without_competitor(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        from app.core.normalization import normalize_text_for_comparison
+
+        project = _make_project(db_session)
+        kw = _make_keyword(project, "best crm")
+        db_session.add(kw)
+        db_session.flush()
+
+        svc = PromptGenerationService()
+        specs = svc.generate_prompts(project, [kw], [])
+
+        normalized = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized)) == 5
+
+    def test_all_5_distinct_portuguese(self, db_session) -> None:  # type: ignore[no-untyped-def]
+        from app.core.normalization import normalize_text_for_comparison
+
+        project = _make_project(db_session, target_language="pt-br", target_country="BR")
+        kw = _make_keyword(project, "melhor crm")
+        comp = _make_competitor(project, "Salesforce", "salesforce.com")
+        db_session.add_all([kw, comp])
+        db_session.flush()
+
+        svc = PromptGenerationService()
+        specs = svc.generate_prompts(project, [kw], [comp])
+
+        normalized = [normalize_text_for_comparison(s.text) for s in specs]
+        assert len(set(normalized)) == 5
 
     def test_no_active_keywords_raises(self, db_session) -> None:  # type: ignore[no-untyped-def]
         project = _make_project(db_session)

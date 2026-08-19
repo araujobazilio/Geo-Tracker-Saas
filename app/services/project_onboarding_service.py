@@ -146,6 +146,13 @@ class ProjectOnboardingService:
             if not normalized.keywords:
                 raise ValidationError("At least one keyword is required.")
 
+            # Validate keyword capacity BEFORE inserts.
+            # For a new project, current active count is 0, so the final
+            # total is len(normalized.keywords). Exact limit is allowed.
+            self._entitlement_service.require_keyword_total_within_limit(
+                workspace_id, project.id, len(normalized.keywords)
+            )
+
             seen_normalized: set[str] = set()
             for kw_input in normalized.keywords:
                 if kw_input.normalized_text in seen_normalized:
@@ -162,13 +169,14 @@ class ProjectOnboardingService:
                 )
                 self._keyword_repo.create(keyword)
 
-            # Check keyword capacity.
-            keyword_count = self._keyword_repo.count_active_by_project(project.id)
-            self._entitlement_service.require_keyword_capacity(
-                workspace_id, project.id, keyword_count
+            # 5. Add Competitors.
+            # Validate competitor capacity BEFORE inserts.
+            # For a new project, current active count is 0, so the final
+            # total is len(normalized.competitors). Exact limit is allowed.
+            self._entitlement_service.require_competitor_total_within_limit(
+                workspace_id, project.id, len(normalized.competitors)
             )
 
-            # 5. Add Competitors.
             seen_domains: set[str] = set()
             for comp_input in normalized.competitors:
                 if comp_input.domain == normalized.domain:
@@ -188,12 +196,6 @@ class ProjectOnboardingService:
                     active=True,
                 )
                 self._competitor_repo.create(competitor)
-
-            # Check competitor capacity.
-            competitor_count = self._competitor_repo.count_active_by_project(project.id)
-            self._entitlement_service.require_competitor_capacity(
-                workspace_id, project.id, competitor_count
-            )
 
             # 6. Add Providers.
             if not normalized.providers:
