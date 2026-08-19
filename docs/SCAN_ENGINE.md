@@ -131,4 +131,42 @@ Foreign keys use `RESTRICT` for scans, prompt runs, sources, usage, pricing evid
 
 Tenant-scoped read endpoints expose scan status, run result/evidence, and sources. Customer schemas deliberately omit token counts, `cost_usd`, provider-reported/calculated costs, `CostSource`, pricing-rule IDs, usage-event IDs, and quota-reservation IDs. Cost accounting is an internal operator/financial concern; it is not returned by the customer Scan API.
 
+## Post-finalization analysis (Phase 7)
+
+After a scan reaches a terminal state, the `ScanFinalizationService` auto-triggers deterministic analysis via `ScanAnalysisService.analyze()`. Phase 7 added brand/competitor detection, citation attribution, and visibility metrics over the finalized evidence.
+
+### Auto-trigger
+
+`finalize()` accepts a `trigger_analysis: bool = True` parameter. When the scan is classified `COMPLETED` or `PARTIAL`, finalization calls `ScanAnalysisService.analyze()` **after** the terminal-state transaction commits. `FAILED` scans are not analyzed.
+
+### Separate session
+
+Analysis runs in a **fresh database session**, separate from the finalization transaction. The finalization commit is already durable before analysis begins, so analysis never holds a lock on or rolls back the scan's terminal state.
+
+### Failure isolation
+
+Analysis failure does **not**:
+
+- roll back scan completion;
+- change the workspace quota (no reservation release or AI Check adjustment);
+- repeat any provider call.
+
+The scan remains terminal regardless of the analysis outcome. A failed analysis is logged but leaves the `COMPLETED`/`PARTIAL` scan and its evidence intact for later re-analysis.
+
+### Zero cost footprint
+
+Analysis is purely deterministic and operates on already-stored evidence. It consumes **0 AI Checks**, makes **0 provider calls**, and creates **0 UsageEvents**. It does not touch quota accounting.
+
+### Worker-context opt-out
+
+`ScanExecutionService` and `ScanRecoveryService` call `finalize()` with `trigger_analysis=False`. Both finalize inside a Celery worker where an auto-triggered analysis would bind to the global session factory rather than the caller's session. They instead let the normal API-path finalization, or an explicit operator-triggered analysis, perform the work in a controlled session.
+
+### Idempotency
+
+Analysis is idempotent. Re-running `ScanAnalysisService.analyze()` on a scan that already has a `COMPLETED` analysis returns the existing result without recomputing or duplicating rows.
+
+### Related documentation
+
+See [Detection Engine](DETECTION_ENGINE.md) for the deterministic brand/competitor detection rules and [Metrics](METRICS.md) for the visibility metric formulas.
+
 See also [Cost Accounting](COST_ACCOUNTING.md), [Usage and Quotas](USAGE_AND_QUOTAS.md), and [Provider Integrations](PROVIDER_INTEGRATIONS.md).

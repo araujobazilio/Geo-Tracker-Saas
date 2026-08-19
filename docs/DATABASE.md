@@ -71,6 +71,10 @@ Phase 6 adds `scans`, `prompt_runs`, `response_sources`, and
 source, pricing-rule, and PromptRun traceability. See "Scan Engine and provider
 cost accounting migration" below.
 
+Phase 7 adds `scan_entity_snapshots`, `scan_analyses`, `entity_mentions`, and
+`source_attributions` for deterministic brand/competitor visibility analysis.
+See "Analysis tables (Phase 7)" below.
+
 Phase 3 adds four new tables and modifies two existing ones (see
 "Entitlements, usage and quota migration" below):
 
@@ -139,6 +143,10 @@ entity deletion.
 | `prompt_runs` | **RESTRICT** (scan, prompt, price rule, usage event) | Provider evidence and one-to-one accounting traceability survive |
 | `response_sources` | **RESTRICT** (prompt run) | Provider-returned source evidence is retained; Phase 6 does not fetch URLs |
 | `provider_price_rules` | Referenced with **RESTRICT** | Append-only exact model/surface pricing evidence cannot be deleted while used |
+| `scan_entity_snapshots` | **RESTRICT** (scan), SET NULL (source competitor) | Immutable entity configuration snapshot survives scan deletion; competitor link is optional |
+| `scan_analyses` | **RESTRICT** (scan) | Analysis history is permanently bound to its scan |
+| `entity_mentions` | **RESTRICT** (scan_analysis, prompt_run, entity_snapshot) | Detection evidence survives analysis/run/snapshot deletion |
+| `source_attributions` | **RESTRICT** (scan_analysis, response_source, entity_snapshot) | Attribution evidence survives analysis/source/snapshot deletion |
 
 `audit_logs.user_id` and `audit_logs.workspace_id` are plain UUID
 columns (no foreign key) so historical audit records remain valid even
@@ -180,6 +188,10 @@ can never be orphaned from its originating reservation.
 - `provider_price_rules.pricing_key` and
   `(provider, provider_surface, model, effective_from)` — unique exact rules
 - `usage_events.prompt_run_id` — unique, enforcing one ledger event per successful run
+- `scan_entity_snapshots (scan_id, entity_key)` — unique (one snapshot per entity per scan)
+- `scan_analyses (scan_id, analysis_version)` — unique (one analysis per version per scan)
+- `entity_mentions (scan_analysis_id, prompt_run_id, entity_snapshot_id, occurrence_index)` — unique (no duplicate occurrence per run + entity)
+- `source_attributions (scan_analysis_id, response_source_id, entity_snapshot_id)` — unique (no duplicate attribution per source + entity)
 
 ## CHECK constraints
 
@@ -226,6 +238,29 @@ invariants:
 `usage_period_id` (added in the quota period and concurrency integrity
 hardening migration), permanently binding each reservation to its
 originating `WorkspaceUsagePeriod`.
+
+`scan_entity_snapshots` has CHECK constraints for snapshot integrity:
+
+| Constraint | Rule |
+|-----------|------|
+| `ck_scan_entity_snapshots_ordinal_positive` | `ordinal > 0` |
+| `ck_scan_entity_snapshots_name_non_empty` | `name <> ''` |
+| `ck_scan_entity_snapshots_domain_non_empty` | `domain <> ''` |
+
+`scan_analyses` has a non-negative CHECK constraint:
+
+| Constraint | Rule |
+|-----------|------|
+| `ck_scan_analyses_warning_count_non_negative` | `warning_count >= 0` |
+
+`entity_mentions` has CHECK constraints enforcing occurrence and
+position invariants:
+
+| Constraint | Rule |
+|-----------|------|
+| `ck_entity_mentions_occurrence_positive` | `occurrence_index > 0` |
+| `ck_entity_mentions_start_non_negative` | `start_index >= 0` |
+| `ck_entity_mentions_end_gt_start` | `end_index > start_index` |
 
 ## Hardening migration
 
@@ -369,6 +404,116 @@ The Scan/PromptRun snapshot means later project provider, PromptSet, plan, or
 environment model changes do not mutate created plans. See
 `docs/SCAN_ENGINE.md` and `docs/COST_ACCOUNTING.md`.
 
+## Analysis tables (Phase 7)
+
+**Name:** `add deterministic visibility analysis`
+**Revision ID:** `d677b6e44e9b`
+**Revises:** `91df07641aaf`
+
+Creates four new tables for Phase 7 deterministic brand/competitor
+detection, citation attribution, and visibility metrics:
+
+| Table | Purpose |
+|-------|---------|
+| `scan_entity_snapshots` | Immutable per-scan copies of tracked entities (brand + competitors) at scan creation time |
+| `scan_analyses` | Versioned analysis run metadata per scan (PENDING → RUNNING → COMPLETED/FAILED) |
+| `entity_mentions` | Detected entity mentions in PromptRun response text |
+| `source_attributions` | ResponseSource URLs attributed to entities via domain matching |
+
+No automatic legacy backfill is performed. Existing scans without
+snapshots remain identifiable as not analyzable with historical fidelity.
+
+### `scan_entity_snapshots`
+
+Immutable snapshot of a tracked entity (brand or competitor) at Scan
+creation time. Historical metrics use ONLY these snapshots, never the
+mutable Project/Competitor rows, so that post-scan configuration changes
+cannot rewrite historical analysis.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | UUID | PK |
+| `scan_id` | UUID | NOT NULL, FK → `scans.id` `ON DELETE RESTRICT`, indexed |
+| `entity_key` | VARCHAR(255) | NOT NULL |
+| `entity_type` | VARCHAR(20) | NOT NULL — values: `BRAND`, `COMPETITOR`; indexed |
+| `name` | VARCHAR(255) | NOT NULL, CHECK `name <> ''` |
+| `domain` | VARCHAR(255) | NOT NULL, CHECK `domain <> ''` |
+| `aliases` | JSONB | NOT NULL, default `[]` (stored via `StringList` custom type) |
+| `source_competitor_id` | UUID | NULLABLE, FK → `competitors.id` `ON DELETE SET NULL` |
+| `ordinal` | INTEGER | NOT NULL, CHECK `ordinal > 0` (1-based position; brand = 1) |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
+| `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
+
+Unique constraint: `(scan_id, entity_key)` —
+`uq_scan_entity_snapshots_scan_entity_key`.
+
+### `scan_analyses`
+
+One deterministic analysis run for a Scan at a specific algorithm
+version. Unique on `(scan_id, analysis_version)`. A COMPLETED analysis
+is immutable — future algorithm versions create a new `ScanAnalysis` row.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | UUID | PK |
+| `scan_id` | UUID | NOT NULL, FK → `scans.id` `ON DELETE RESTRICT`, indexed |
+| `analysis_version` | VARCHAR(50) | NOT NULL |
+| `status` | VARCHAR(20) | NOT NULL, default `PENDING` — values: `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`; indexed |
+| `started_at` | TIMESTAMPTZ | NULLABLE |
+| `completed_at` | TIMESTAMPTZ | NULLABLE |
+| `failure_code` | VARCHAR(50) | NULLABLE |
+| `failure_message` | VARCHAR(1000) | NULLABLE |
+| `warning_count` | INTEGER | NOT NULL, default `0`, CHECK `warning_count >= 0` |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
+| `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
+
+Unique constraint: `(scan_id, analysis_version)` —
+`uq_scan_analyses_scan_version`.
+
+### `entity_mentions`
+
+One occurrence of a tracked entity term in a SUCCEEDED PromptRun
+response text. Occurrences are ordered by their position in the original
+response. Overlapping terms for the same entity are deduplicated to the
+longest match. Ambiguous terms shared by multiple entities are excluded.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | UUID | PK |
+| `scan_analysis_id` | UUID | NOT NULL, FK → `scan_analyses.id` `ON DELETE RESTRICT`, indexed |
+| `prompt_run_id` | UUID | NOT NULL, FK → `prompt_runs.id` `ON DELETE RESTRICT`, indexed |
+| `entity_snapshot_id` | UUID | NOT NULL, FK → `scan_entity_snapshots.id` `ON DELETE RESTRICT`, indexed |
+| `occurrence_index` | INTEGER | NOT NULL, CHECK `occurrence_index > 0` (1-based per run + entity) |
+| `match_type` | VARCHAR(20) | NOT NULL — values: `NAME`, `ALIAS`, `DOMAIN` |
+| `matched_text` | TEXT | NOT NULL |
+| `matched_term` | VARCHAR(255) | NOT NULL |
+| `start_index` | INTEGER | NOT NULL, CHECK `start_index >= 0` |
+| `end_index` | INTEGER | NOT NULL, CHECK `end_index > start_index` |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
+
+Unique constraint: `(scan_analysis_id, prompt_run_id, entity_snapshot_id, occurrence_index)` —
+`uq_entity_mentions_analysis_run_entity_occurrence`.
+
+### `source_attributions`
+
+Attribution of a ResponseSource to a tracked entity via domain matching.
+Only `OWNED_DOMAIN` attributions are created in Phase 7: the source
+hostname matches the entity's tracked domain exactly or as a subdomain.
+Most-specific domain wins when multiple tracked domains could match.
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | UUID | PK |
+| `scan_analysis_id` | UUID | NOT NULL, FK → `scan_analyses.id` `ON DELETE RESTRICT`, indexed |
+| `response_source_id` | UUID | NOT NULL, FK → `response_sources.id` `ON DELETE RESTRICT`, indexed |
+| `entity_snapshot_id` | UUID | NOT NULL, FK → `scan_entity_snapshots.id` `ON DELETE RESTRICT`, indexed |
+| `source_host` | VARCHAR(255) | NOT NULL |
+| `attribution_type` | VARCHAR(30) | NOT NULL — values: `OWNED_DOMAIN` |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` |
+
+Unique constraint: `(scan_analysis_id, response_source_id, entity_snapshot_id)` —
+`uq_source_attributions_analysis_source_entity`.
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
@@ -382,6 +527,14 @@ Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
 `workspace_usage_periods.period_start`, `quota_reservations.workspace_id`,
 `quota_reservations.project_id`, `quota_reservations.user_id`,
 `quota_reservations.status`, `quota_reservations.usage_period_id`.
+
+Phase 7 analysis indexes: `scan_entity_snapshots.scan_id`,
+`scan_entity_snapshots.entity_type`, `scan_analyses.scan_id`,
+`scan_analyses.status`, `entity_mentions.scan_analysis_id`,
+`entity_mentions.prompt_run_id`, `entity_mentions.entity_snapshot_id`,
+`source_attributions.scan_analysis_id`,
+`source_attributions.response_source_id`,
+`source_attributions.entity_snapshot_id`.
 
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`

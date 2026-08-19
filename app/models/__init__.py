@@ -6,6 +6,12 @@ Alembic autogenerate and `Base.metadata.create_all()` can see them.
 
 from __future__ import annotations
 
+from app.models.analysis import (
+    EntityMention,
+    ScanAnalysis,
+    ScanEntitySnapshot,
+    SourceAttribution,
+)
 from app.models.audit import AuditLog
 from app.models.billing import AppSumoLicense, BillingAccount
 from app.models.plan_definition import PlanDefinition
@@ -27,6 +33,7 @@ __all__ = [
     "AppSumoLicense",
     "BillingAccount",
     "Competitor",
+    "EntityMention",
     "PlanDefinition",
     "PlanProvider",
     "Project",
@@ -40,6 +47,9 @@ __all__ = [
     "QuotaReservation",
     "ResponseSource",
     "Scan",
+    "ScanAnalysis",
+    "ScanEntitySnapshot",
+    "SourceAttribution",
     "UsageEvent",
     "User",
     "Workspace",

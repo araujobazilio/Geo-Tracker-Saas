@@ -16,6 +16,8 @@ Finalization is atomic and self-healing:
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -23,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.core.enums import QuotaReservationStatus, ScanStatus
 from app.core.exceptions import ConflictError, InfrastructureError
+from app.core.logging import get_logger
 from app.models.project import Project
 from app.models.quota_reservation import QuotaReservation
 from app.models.scan import Scan
@@ -30,18 +33,27 @@ from app.repositories.scan_repository import PromptRunRepository, ScanRepository
 from app.services.audit_service import AuditService
 from app.services.quota_service import QuotaService
 
+logger = get_logger("app.scan_finalization")
+
 _TERMINAL_STATUSES = (ScanStatus.COMPLETED, ScanStatus.PARTIAL, ScanStatus.FAILED)
 
 
 class ScanFinalizationService:
-    def __init__(self, session: Session, audit_service: AuditService | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        audit_service: AuditService | None = None,
+        *,
+        analysis_session_factory: Callable[[], AbstractContextManager[Session]] | None = None,
+    ) -> None:
         self._session = session
         self._audit = audit_service
         self._scans = ScanRepository(session)
         self._runs = PromptRunRepository(session)
         self._quota = QuotaService(session, audit_service=audit_service)
+        self._analysis_session_factory = analysis_session_factory
 
-    def finalize(self, scan_id: uuid.UUID) -> ScanStatus:
+    def finalize(self, scan_id: uuid.UUID, *, trigger_analysis: bool = True) -> ScanStatus:
         try:
             scan = self._scans.get_for_update(scan_id)
             if scan is None:
@@ -50,6 +62,8 @@ class ScanFinalizationService:
             if scan.status in _TERMINAL_STATUSES:
                 self._reconcile_terminal_scan(scan)
                 self._session.commit()
+                if trigger_analysis:
+                    self._trigger_analysis_if_eligible(scan_id, scan.status)
                 return scan.status
 
             succeeded, failed, unresolved = self._runs.terminal_counts(scan.id)
@@ -85,8 +99,11 @@ class ScanFinalizationService:
 
             self._release_unused_reservation(scan, commit_transaction=False)
             status = scan.status
+            workspace_id = scan.workspace_id
             self._session.commit()
-            self._record_audit(scan.id, scan.workspace_id, status)
+            self._record_audit(scan.id, workspace_id, status)
+            if trigger_analysis:
+                self._trigger_analysis_if_eligible(scan_id, status)
             return status
         except Exception:
             self._session.rollback()
@@ -131,6 +148,35 @@ class ScanFinalizationService:
             entity_type="scan",
             entity_id=scan_id,
         )
+
+    def _trigger_analysis_if_eligible(self, scan_id: uuid.UUID, status: ScanStatus) -> None:
+        """Auto-trigger deterministic analysis after finalization.
+
+        Analysis runs in a fresh session. Analysis failure MUST NOT
+        rollback scan completion, change quota, or repeat providers.
+        The scan remains terminal regardless of analysis outcome.
+        """
+        if status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
+            return
+        try:
+            from app.services.scan_analysis_service import ScanAnalysisService
+
+            if self._analysis_session_factory is not None:
+                ctx = self._analysis_session_factory
+                with ctx() as analysis_session:
+                    ScanAnalysisService(analysis_session).analyze(scan_id)
+            else:
+                from app.db.session import get_session_factory
+
+                factory = get_session_factory()
+                with factory() as analysis_session:
+                    ScanAnalysisService(analysis_session).analyze(scan_id)
+        except Exception:
+            logger.error(
+                "auto_analysis_failed",
+                scan_id=str(scan_id),
+                exc_info=True,
+            )
 
 
 class ScanRecoveryService:
@@ -191,5 +237,5 @@ class ScanRecoveryService:
             error_message="Worker stopped before evidence was durably recorded.",
         )
         self._session.commit()
-        self._finalizer.finalize(scan.id)
+        self._finalizer.finalize(scan.id, trigger_analysis=False)
         return True

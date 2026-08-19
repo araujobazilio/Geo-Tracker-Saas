@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,7 @@ from app.core.enums import (
     ProviderExecutionMode,
     ScanStatus,
     ScanType,
+    TrackedEntityType,
 )
 from app.core.exceptions import (
     ConflictError,
@@ -26,10 +28,12 @@ from app.core.exceptions import (
     ValidationError,
 )
 from app.core.logging import get_logger
+from app.models.analysis import ScanEntitySnapshot
 from app.models.project import Project
 from app.models.scan import PromptRun, Scan
-from app.models.tracking import Prompt
+from app.models.tracking import Competitor, Prompt
 from app.providers.registry import ProviderRegistry
+from app.repositories.analysis_repository import ScanEntitySnapshotRepository
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.scan_repository import PromptRunRepository, ScanRepository
 from app.repositories.tracking_repository import (
@@ -82,6 +86,7 @@ class ScanCreationService:
         self._project_providers = ProjectProviderRepository(session)
         self._scans = ScanRepository(session)
         self._runs = PromptRunRepository(session)
+        self._snapshots = ScanEntitySnapshotRepository(session)
         self._entitlements = EntitlementService(session)
         self._pricing = PricingService(session)
         self._policy = ProviderExecutionPolicy()
@@ -139,6 +144,7 @@ class ScanCreationService:
                 for target in targets
             ]
             self._runs.create_batch(planned_runs)
+            self._create_entity_snapshots(scan, project)
             self._session.commit()
         except IntegrityError:
             self._session.rollback()
@@ -239,6 +245,59 @@ class ScanCreationService:
                     raise ConflictError(str(exc)) from exc
             targets.append(target)
         return prompts, targets
+
+    def _create_entity_snapshots(self, scan: Scan, project: Project) -> None:
+        """Create immutable BRAND + COMPETITOR snapshots for the scan.
+
+        Snapshots are created in the same transaction as the scan plan,
+        BEFORE the commit. They capture the entity configuration at the
+        moment of scan creation so historical metrics are immune to
+        later Project/Competitor mutations.
+
+        Ordering: BRAND first (ordinal=1), then competitors sorted by
+        normalized domain then UUID for determinism.
+        """
+        # Brand snapshot.
+        snapshots = [
+            ScanEntitySnapshot(
+                scan_id=scan.id,
+                entity_key="brand",
+                entity_type=TrackedEntityType.BRAND,
+                name=project.brand_name,
+                domain=project.domain,
+                aliases=list(project.brand_aliases),
+                source_competitor_id=None,
+                ordinal=1,
+            )
+        ]
+
+        # Competitor snapshots: only ACTIVE competitors, sorted deterministically.
+        competitors = list(
+            self._session.execute(
+                select(Competitor)
+                .where(
+                    Competitor.project_id == project.id,
+                    Competitor.active.is_(True),
+                )
+                .order_by(Competitor.domain, Competitor.id)
+            ).scalars()
+        )
+
+        for index, comp in enumerate(competitors, start=2):
+            snapshots.append(
+                ScanEntitySnapshot(
+                    scan_id=scan.id,
+                    entity_key=f"competitor:{comp.id}",
+                    entity_type=TrackedEntityType.COMPETITOR,
+                    name=comp.name,
+                    domain=comp.domain,
+                    aliases=list(comp.aliases),
+                    source_competitor_id=comp.id,
+                    ordinal=index,
+                )
+            )
+
+        self._snapshots.create_batch(snapshots)
 
     @staticmethod
     def _validate_existing(existing: Scan, project_id: uuid.UUID, scan_type: ScanType) -> None:

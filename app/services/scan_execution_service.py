@@ -61,7 +61,7 @@ class ScanExecutionService:
 
         await asyncio.gather(*(bounded(run_id) for run_id in run_ids))
         with self._factory() as session:
-            ScanFinalizationService(session, self._audit).finalize(scan_id)
+            ScanFinalizationService(session, self._audit).finalize(scan_id, trigger_analysis=False)
         return True
 
     def _claim_scan(self, scan_id: uuid.UUID) -> bool:
@@ -142,7 +142,9 @@ class ScanExecutionService:
         # Finalize in a fresh session to atomically classify counts and
         # release any remaining reserved quota.
         with self._factory() as finalize_session:
-            ScanFinalizationService(finalize_session, self._audit).finalize(scan.id)
+            ScanFinalizationService(finalize_session, self._audit).finalize(
+                scan.id, trigger_analysis=False
+            )
 
     def _list_run_ids(self, scan_id: uuid.UUID) -> list[uuid.UUID]:
         with self._factory() as session:

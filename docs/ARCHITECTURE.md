@@ -184,6 +184,62 @@ never repeats provider requests, absorbing worker-loss ambiguity as GEO cost.
 Customer Scan APIs expose evidence but deliberately hide internal cost fields.
 See `docs/SCAN_ENGINE.md` and `docs/COST_ACCOUNTING.md`.
 
+## Phase 7: Deterministic visibility analysis
+
+Phase 7 introduces a deterministic, AI-free analysis pipeline that runs
+after scan finalization. It produces persisted evidence (mentions and
+source attributions) and computes visibility metrics from that evidence.
+Zero AI Checks, zero provider calls.
+
+```
+Scan finalized
+   ↓
+ScanFinalizationService triggers analysis (separate session)
+   ↓
+ScanAnalysisService loads immutable ScanEntitySnapshots
+   ↓
+For each SUCCEEDED PromptRun:
+   mention_detector  →  EntityMention records
+   source_attributor →  SourceAttribution records (OWNED_DOMAIN only)
+   ↓
+Evidence persisted atomically (row-locked, idempotent)
+   ↓
+VisibilityMetricsService computes metrics from persisted evidence
+```
+
+### New components
+
+| Component | Responsibility |
+|-----------|----------------|
+| `mention_detector.py` | Deterministic text matching for brand/competitor mentions. Case-insensitive, token-boundary-aware (no substring false positives). Produces `EntityMention` records. |
+| `source_attributor.py` | URL host parsing and domain matching to attribute `ResponseSource` URLs to tracked entities. Produces `SourceAttribution` records. Phase 7 supports `OWNED_DOMAIN` attribution only. |
+| `scan_analysis_service.py` | Orchestrates analysis: loads immutable `ScanEntitySnapshot`s, runs mention detection + source attribution on each SUCCEEDED `PromptRun`, persists evidence atomically. Idempotent (re-running returns existing COMPLETED analysis). Concurrent-safe via row locking. Zero AI Checks, zero provider calls. |
+| `visibility_metrics_service.py` | Computes all visibility metrics from persisted evidence: visibility rate, mention counts, citation counts, share of voice, measurement coverage, provider breakdown, leaderboard. Distinguishes zero vs null semantics for `visibility_rate`. |
+| `analysis.py` (router) | Analysis API endpoints for running/getting analysis and metrics. Tenant-isolated, role-enforced (ADMIN for POST, MEMBER for GET). |
+| `analysis_repository.py` | Data access for `ScanAnalysis`, `EntityMention`, `SourceAttribution`, `ScanEntitySnapshot`. |
+
+### New models
+
+`app/models/analysis.py` introduces:
+
+- **`ScanEntitySnapshot`** — immutable copy of brand + competitors at
+  scan creation time.
+- **`ScanAnalysis`** — analysis run state for a scan (PENDING →
+  COMPLETED/FAILED).
+- **`EntityMention`** — a detected brand/competitor mention within a
+  `PromptRun` response.
+- **`SourceAttribution`** — a `ResponseSource` URL attributed to a
+  tracked entity.
+
+### Service extensions
+
+- **`ScanCreationService`** — now creates immutable
+  `ScanEntitySnapshot` rows during scan creation, copying brand +
+  competitors at that point in time.
+- **`ScanFinalizationService`** — auto-triggers analysis after
+  finalization in a separate session. Analysis failure does not affect
+  scan state.
+
 ## Technology stack
 
 | Layer | Technology |
@@ -233,7 +289,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Project onboarding / prompts | IMPLEMENTED (Phase 4) |
 | AI provider abstraction | IMPLEMENTED (Phase 5) |
 | Scan Engine | IMPLEMENTED (Phase 6) |
-| Brand / citation detection | PLANNED (Phase 7) |
+| Brand / citation detection | IMPLEMENTED (Phase 7) |
 | Confidence Scans | PLANNED (Phase 8) |
 | Action Center | PLANNED (Phase 9) |
 | Verification system | PLANNED (Phase 10) |

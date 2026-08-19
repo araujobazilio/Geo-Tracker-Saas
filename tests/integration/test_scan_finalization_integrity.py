@@ -875,6 +875,25 @@ def test_concurrent_finalizers_produce_one_effective_release(db_session: Session
             cleanup.execute(
                 text("DELETE FROM prompt_runs WHERE scan_id = :sid"), {"sid": str(scan_id)}
             )
+            cleanup.execute(
+                text(
+                    "DELETE FROM source_attributions WHERE scan_analysis_id IN (SELECT id FROM scan_analyses WHERE scan_id = :sid)"
+                ),
+                {"sid": str(scan_id)},
+            )
+            cleanup.execute(
+                text(
+                    "DELETE FROM entity_mentions WHERE scan_analysis_id IN (SELECT id FROM scan_analyses WHERE scan_id = :sid)"
+                ),
+                {"sid": str(scan_id)},
+            )
+            cleanup.execute(
+                text("DELETE FROM scan_analyses WHERE scan_id = :sid"), {"sid": str(scan_id)}
+            )
+            cleanup.execute(
+                text("DELETE FROM scan_entity_snapshots WHERE scan_id = :sid"),
+                {"sid": str(scan_id)},
+            )
             cleanup.execute(text("DELETE FROM scans WHERE id = :sid"), {"sid": str(scan_id)})
             cleanup.execute(
                 text("DELETE FROM quota_reservations WHERE workspace_id = :wid"),

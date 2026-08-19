@@ -129,6 +129,44 @@ Phase 17.
 - **Error handling:** application errors never expose stack traces to
   clients (see `app/core/exceptions.py`).
 
+## Phase 7: Analysis endpoint security
+
+Phase 7 adds deterministic analysis and visibility-metrics endpoints scoped to
+a scan resource. The endpoints are:
+
+- `POST /api/v1/workspaces/{wid}/projects/{pid}/scans/{sid}/analysis` —
+  ADMIN only (run or retry analysis).
+- `GET /api/v1/workspaces/{wid}/projects/{pid}/scans/{sid}/analysis` —
+  MEMBER+ (view analysis).
+- `GET /api/v1/workspaces/{wid}/projects/{pid}/scans/{sid}/metrics` —
+  MEMBER+ (view metrics).
+- `GET /api/v1/workspaces/{wid}/projects/{pid}/scans/{sid}/runs/{rid}/analysis`
+  — MEMBER+ (view per-run evidence).
+
+Security properties:
+
+- **Tenant isolation:** all four endpoints enforce workspace membership via
+  `WorkspaceAuthorizationService`. Cross-tenant access returns 404 (not 403)
+  to avoid revealing resource existence, consistent with all other
+  workspace-scoped endpoints.
+- **Role matrix:** write operations (`POST`) require ADMIN; read operations
+  (`GET`) require MEMBER or above.
+- **No cost-injection vector:** analysis consumes 0 AI Checks, 0 provider
+  calls, and 0 `UsageEvents`. There is no endpoint that lets a user trigger
+  billable provider spending via analysis.
+- **No user-controlled LLM input:** analysis operates only on persisted
+  evidence. No user-controlled input is sent to any LLM provider.
+- **POST idempotency:** re-running `POST .../analysis` returns the existing
+  `COMPLETED` analysis without duplicating evidence.
+- **Safe URL host parsing:** host extraction uses only stdlib
+  `urllib.parse` — no DNS resolution, no HTTP requests, no redirect
+  following.
+- **Safe mention detection:** mention detection uses only stdlib `re` and
+  `unicodedata` — no external services are contacted.
+- **Evidence immutability:** `ScanEntitySnapshots` are immutable. Users
+  cannot modify entity terms after scan creation to influence analysis
+  results.
+
 ## Planned (later phases)
 
 - Rate limiting (Phase 17).

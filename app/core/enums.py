@@ -185,3 +185,33 @@ class ProviderExecutionMode(str, Enum):
 
     MODEL_ONLY = "MODEL_ONLY"
     WEB_GROUNDED = "WEB_GROUNDED"
+
+
+class TrackedEntityType(str, Enum):
+    """Type of entity tracked in a ScanEntitySnapshot."""
+
+    BRAND = "BRAND"
+    COMPETITOR = "COMPETITOR"
+
+
+class ScanAnalysisStatus(str, Enum):
+    """Lifecycle states for a ScanAnalysis."""
+
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class EntityMatchType(str, Enum):
+    """How an entity term was matched in response text."""
+
+    NAME = "NAME"
+    ALIAS = "ALIAS"
+    DOMAIN = "DOMAIN"
+
+
+class AttributionType(str, Enum):
+    """How a ResponseSource was attributed to an entity."""
+
+    OWNED_DOMAIN = "OWNED_DOMAIN"
