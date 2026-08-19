@@ -10,9 +10,15 @@ Key design decisions:
 - No system prompt distortion — only the minimum API envelope.
 - Does NOT parse chain-of-thought/reasoning blocks.
 - API key never appears in repr, logs, or exceptions.
+- WEB_GROUNDED forces web_search via tool_choice and verifies search
+  actually occurred (ProviderSearchError if not).
+- provider_request_id = x-request-id HTTP header (support/tracking ID).
+- provider_response_id = response JSON `id` (generated object ID).
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import httpx
 
@@ -29,6 +35,7 @@ from app.providers.errors import (
     ProviderConfigurationError,
     ProviderModeNotAllowedError,
     ProviderResponseError,
+    ProviderSearchError,
 )
 from app.providers.http_utils import (
     LatencyTimer,
@@ -36,15 +43,14 @@ from app.providers.http_utils import (
     log_provider_result,
     map_http_error,
     map_transport_error,
+    parse_json_response,
 )
+
+_PROVIDER_NAME = "OpenAI"
 
 
 class OpenAIProviderAdapter:
-    """Provider adapter for the OpenAI Responses API.
-
-    Does NOT inherit from ProviderAdapter (it is a Protocol); it simply
-    implements the expected methods and attributes.
-    """
+    """Provider adapter for the OpenAI Responses API."""
 
     provider: LLMProvider = LLMProvider.OPENAI
     surface: ProviderSurface = ProviderSurface.OPENAI_RESPONSES_API
@@ -103,13 +109,23 @@ class OpenAIProviderAdapter:
             )
 
         # 2. Build request body — minimum API envelope, no system prompt.
-        body: dict[str, object] = {
+        max_output_tokens = (
+            request.max_output_tokens
+            if request.max_output_tokens is not None
+            else self._settings.provider_max_output_tokens
+        )
+        body: dict[str, Any] = {
             "model": model,
             "input": request.prompt,
             "store": False,
+            "max_output_tokens": max_output_tokens,
         }
         if request.mode == ProviderExecutionMode.WEB_GROUNDED:
             body["tools"] = [{"type": "web_search"}]
+            # Force the model to use the web_search tool.
+            body["tool_choice"] = {"type": "web_search"}
+            # Request broader source metadata.
+            body["include"] = ["web_search_call.action.sources"]
 
         base_url = self._settings.openai_base_url.rstrip("/")
         url = f"{base_url}/responses"
@@ -126,21 +142,22 @@ class OpenAIProviderAdapter:
             try:
                 response = await client.post(url, headers=headers, json=body)
             except Exception as exc:
-                raise map_transport_error(LLMProvider.OPENAI, "OpenAI", exc) from exc
+                raise map_transport_error(LLMProvider.OPENAI, _PROVIDER_NAME, exc) from exc
 
             # 4. Map HTTP errors.
             if response.status_code >= 400:
-                map_http_error(LLMProvider.OPENAI, "OpenAI", response)
+                map_http_error(LLMProvider.OPENAI, _PROVIDER_NAME, response)
 
-            data = response.json()
+            data = parse_json_response(LLMProvider.OPENAI, _PROVIDER_NAME, response)
         finally:
             await client.aclose()
 
-        # 5. Parse response.
-        provider_request_id = data.get("id") or response.headers.get("x-request-id")
+        # 5. Parse IDs: x-request-id header = request ID, JSON id = response ID.
+        provider_request_id = response.headers.get("x-request-id")
+        provider_response_id = data.get("id")
         returned_model = data.get("model")
 
-        # output_text convenience field, or extract from output array.
+        # 6. Parse output text.
         output_text = data.get("output_text")
         if not output_text:
             parts: list[str] = []
@@ -156,44 +173,58 @@ class OpenAIProviderAdapter:
                             parts.append(text)
             output_text = "".join(parts)
 
-        # 6. Validate response_text is not empty.
+        # 7. Validate response_text is not empty.
         if not output_text or not output_text.strip():
             raise ProviderResponseError(
                 "OpenAI returned an empty response text.",
                 provider=LLMProvider.OPENAI.value,
             )
 
-        # Citations: look through output items for type="message", then content
-        # array for type="output_text", then annotations for type="url_citation".
+        # 8. Parse citations from inline url_citation annotations AND
+        #    web_search_call.action.sources. Deduplicate by URL.
         raw_citations: list[ProviderCitation] = []
         for item in data.get("output", []) or []:
-            if not isinstance(item, dict) or item.get("type") != "message":
+            if not isinstance(item, dict):
                 continue
-            for content in item.get("content", []) or []:
-                if not isinstance(content, dict):
-                    continue
-                if content.get("type") != "output_text":
-                    continue
-                for ann in content.get("annotations", []) or []:
-                    if not isinstance(ann, dict):
+            # Inline url_citation annotations from message content.
+            if item.get("type") == "message":
+                for content in item.get("content", []) or []:
+                    if not isinstance(content, dict) or content.get("type") != "output_text":
                         continue
-                    if ann.get("type") != "url_citation":
-                        continue
-                    url_val: str | None = ann.get("url")
-                    if not url_val:
-                        continue
-                    url = url_val
-                    raw_citations.append(
-                        ProviderCitation(
-                            url=url,
-                            title=ann.get("title"),
-                            source_type="url_citation",
-                            start_index=ann.get("start_index"),
-                            end_index=ann.get("end_index"),
+                    for ann in content.get("annotations", []) or []:
+                        if not isinstance(ann, dict) or ann.get("type") != "url_citation":
+                            continue
+                        url_val: str | None = ann.get("url")
+                        if not url_val:
+                            continue
+                        raw_citations.append(
+                            ProviderCitation(
+                                url=url_val,
+                                title=ann.get("title"),
+                                source_type="url_citation",
+                                start_index=ann.get("start_index"),
+                                end_index=ann.get("end_index"),
+                            )
                         )
-                    )
+            # Source URLs from web_search_call.action.sources.
+            if item.get("type") == "web_search_call":
+                action = item.get("action")
+                if isinstance(action, dict):
+                    for src in action.get("sources", []) or []:
+                        if not isinstance(src, dict):
+                            continue
+                        src_url = src.get("url")
+                        if not isinstance(src_url, str) or not src_url:
+                            continue
+                        raw_citations.append(
+                            ProviderCitation(
+                                url=src_url,
+                                title=None,
+                                source_type="web_search_source",
+                            )
+                        )
 
-        # 7. Normalize citations: deduplicate URLs preserving deterministic order.
+        # Deduplicate by URL preserving deterministic first-seen order.
         seen_urls: set[str] = set()
         citations: list[ProviderCitation] = []
         for cite in raw_citations:
@@ -202,19 +233,45 @@ class OpenAIProviderAdapter:
             seen_urls.add(cite.url)
             citations.append(cite)
 
-        # Usage parsing.
+        # 9. Parse usage with all available fields.
         usage_data = data.get("usage") or {}
+        input_tokens = _safe_int(usage_data.get("input_tokens"))
+        output_tokens = _safe_int(usage_data.get("output_tokens"))
+        total_tokens = _safe_int(usage_data.get("total_tokens"))
+        cached_input_tokens = None
+        reasoning_tokens = None
+        input_details = usage_data.get("input_tokens_details")
+        if isinstance(input_details, dict):
+            cached_input_tokens = _safe_int(input_details.get("cached_tokens"))
+        output_details = usage_data.get("output_tokens_details")
+        if isinstance(output_details, dict):
+            reasoning_tokens = _safe_int(output_details.get("reasoning_tokens"))
+
+        # Count web_search_call items for search_requests.
+        web_search_calls = [
+            item
+            for item in (data.get("output", []) or [])
+            if isinstance(item, dict) and item.get("type") == "web_search_call"
+        ]
+        search_requests = len(web_search_calls) if web_search_calls else None
+
         usage = ProviderUsage(
-            input_tokens=usage_data.get("input_tokens"),
-            output_tokens=usage_data.get("output_tokens"),
-            total_tokens=usage_data.get("total_tokens"),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cached_input_tokens=cached_input_tokens,
+            reasoning_tokens=reasoning_tokens,
+            search_requests=search_requests,
         )
 
-        # search_used: check if any output item has type="web_search_call".
-        search_used = any(
-            isinstance(item, dict) and item.get("type") == "web_search_call"
-            for item in (data.get("output", []) or [])
-        )
+        # 10. Verify WEB_GROUNDED actually performed search.
+        search_used = bool(web_search_calls)
+        if request.mode == ProviderExecutionMode.WEB_GROUNDED and not search_used:
+            raise ProviderSearchError(
+                "OpenAI WEB_GROUNDED mode was requested but no web search call "
+                "was observed in the response.",
+                provider=LLMProvider.OPENAI.value,
+            )
 
         latency_ms = timer.elapsed_ms()
 
@@ -228,13 +285,14 @@ class OpenAIProviderAdapter:
             citations=tuple(citations),
             usage=usage,
             provider_request_id=provider_request_id,
+            provider_response_id=provider_response_id,
             finish_reason=None,
             latency_ms=latency_ms,
             search_used=search_used,
             metadata={},
         )
 
-        # 8. Log sanitized result.
+        # 11. Log sanitized result.
         log_provider_result(
             provider=LLMProvider.OPENAI,
             surface=ProviderSurface.OPENAI_RESPONSES_API.value,
@@ -246,9 +304,18 @@ class OpenAIProviderAdapter:
             latency_ms=latency_ms,
             usage_input_tokens=usage.input_tokens,
             usage_output_tokens=usage.output_tokens,
-            search_requests=None,
+            search_requests=usage.search_requests,
             correlation_id=request.correlation_id,
+            provider_response_id=provider_response_id,
         )
 
-        # 9. Return ProviderResult.
         return result
+
+
+def _safe_int(value: Any) -> int | None:
+    """Safely convert a value to int, returning None if not an int."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None

@@ -5,6 +5,9 @@ startup. A missing Anthropic key must not prevent the application from
 starting if Anthropic is not being used.
 
 Health endpoints remain healthy when provider credentials are missing.
+
+capabilities() is available WITHOUT credentials — it returns static
+adapter facts and makes ZERO network calls.
 """
 
 from __future__ import annotations
@@ -15,6 +18,34 @@ from app.providers.base import ProviderAdapter, ProviderCapabilities
 from app.providers.errors import ProviderConfigurationError
 
 logger = get_logger("app.providers.registry")
+
+# Static capabilities per provider — queryable without credentials.
+_STATIC_CAPABILITIES: dict[LLMProvider, ProviderCapabilities] = {
+    LLMProvider.OPENAI: ProviderCapabilities(
+        supports_model_only=True,
+        supports_web_grounded=True,
+        supports_citations=True,
+        supports_search_result_metadata=True,
+    ),
+    LLMProvider.ANTHROPIC: ProviderCapabilities(
+        supports_model_only=True,
+        supports_web_grounded=True,
+        supports_citations=True,
+        supports_search_result_metadata=True,
+    ),
+    LLMProvider.GOOGLE: ProviderCapabilities(
+        supports_model_only=True,
+        supports_web_grounded=False,
+        supports_citations=False,
+        supports_search_result_metadata=False,
+    ),
+    LLMProvider.PERPLEXITY: ProviderCapabilities(
+        supports_model_only=False,
+        supports_web_grounded=True,
+        supports_citations=True,
+        supports_search_result_metadata=True,
+    ),
+}
 
 
 class ProviderRegistry:
@@ -49,17 +80,23 @@ class ProviderRegistry:
         return adapter
 
     def capabilities(self, provider: LLMProvider) -> ProviderCapabilities:
-        """Return capabilities for a provider WITHOUT performing any API call.
+        """Return capabilities for a provider WITHOUT performing any API call
+        and WITHOUT requiring credentials.
 
-        This constructs the adapter (which does NOT make network calls)
-        and returns its declared capabilities.
+        Capabilities are static adapter facts (e.g. "Google supports
+        MODEL_ONLY but not WEB_GROUNDED"). They do not depend on whether
+        an API key is configured.
 
         Raises:
-            ProviderConfigurationError: if the provider cannot be
-                constructed because required configuration is missing.
+            ProviderConfigurationError: if the provider is unknown.
         """
-        adapter = self.get(provider)
-        return adapter.capabilities()
+        caps = _STATIC_CAPABILITIES.get(provider)
+        if caps is None:
+            raise ProviderConfigurationError(
+                f"Unknown provider: {provider}",
+                provider=provider.value,
+            )
+        return caps
 
     def is_configured(self, provider: LLMProvider) -> bool:
         """Check if a provider has the minimum required configuration.

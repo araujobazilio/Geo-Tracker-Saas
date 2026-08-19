@@ -91,7 +91,7 @@ Phase 2. Security hardening is Phase 17.
   is disabled in the Gemini adapter due to terms that conflict with
   automated storage/analysis. `WEB_GROUNDED` requests fail with
   `ProviderModeNotAllowedError` BEFORE any network call. The Google
-  adapter measures `GOOGLE_GEMINI_API` MODEL_ONLY, NOT Google AI
+  adapter measures `GOOGLE_INTERACTIONS_API` MODEL_ONLY, NOT Google AI
   Overviews. See `docs/PROVIDER_COMPLIANCE.md`.
 - **No public provider execution endpoint (Phase 5):** there is no
   `POST /api/provider/execute` or similar endpoint that allows

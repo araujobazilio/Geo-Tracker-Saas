@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")
     anthropic_scan_model: str = ""
     anthropic_base_url: str = "https://api.anthropic.com"
-    anthropic_web_search_tool_version: str = "web_search_20250305"
+    anthropic_web_search_tool_version: str = "web_search_20260318"
     anthropic_web_search_max_uses: int = 5
     google_api_key: SecretStr = SecretStr("")
     google_scan_model: str = ""

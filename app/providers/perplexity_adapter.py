@@ -9,10 +9,14 @@ Key invariants:
 - No quota calls, no UsageEvent creation, no pricing.
 - No system prompt distortion — only the minimum API envelope.
 - API key never appears in repr, logs, or exceptions.
+- provider_request_id = X-Request-ID HTTP header (support/tracking ID).
+- provider_response_id = response JSON `id` (completion ID).
+- Provider-reported cost is preserved as Decimal (not our own pricing).
 """
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -20,7 +24,6 @@ import httpx
 from app.config import Settings, get_settings
 from app.core.enums import LLMProvider, ProviderExecutionMode, ProviderSurface
 from app.providers.base import (
-    ProviderAdapter,
     ProviderCapabilities,
     ProviderCitation,
     ProviderRequest,
@@ -38,6 +41,7 @@ from app.providers.http_utils import (
     log_provider_result,
     map_http_error,
     map_transport_error,
+    parse_json_response,
 )
 
 _PROVIDER_NAME = "Perplexity Sonar"
@@ -49,6 +53,13 @@ class PerplexityProviderAdapter:
     provider: LLMProvider = LLMProvider.PERPLEXITY
     surface: ProviderSurface = ProviderSurface.PERPLEXITY_SONAR_API
 
+    _CAPABILITIES = ProviderCapabilities(
+        supports_model_only=False,
+        supports_web_grounded=True,
+        supports_citations=True,
+        supports_search_result_metadata=True,
+    )
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -58,12 +69,7 @@ class PerplexityProviderAdapter:
         self._transport = transport
 
     def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            supports_model_only=False,
-            supports_web_grounded=True,
-            supports_citations=True,
-            supports_search_result_metadata=True,
-        )
+        return self._CAPABILITIES
 
     def __repr__(self) -> str:
         return f"<PerplexityProviderAdapter model={self._settings.perplexity_scan_model!r}>"
@@ -73,7 +79,7 @@ class PerplexityProviderAdapter:
         if request.mode == ProviderExecutionMode.MODEL_ONLY:
             raise ProviderModeNotAllowedError(
                 "Perplexity Sonar supports WEB_GROUNDED only.",
-                provider="PERPLEXITY",
+                provider=LLMProvider.PERPLEXITY.value,
             )
 
         # 2. Validate configuration.
@@ -86,23 +92,30 @@ class PerplexityProviderAdapter:
         if not api_key:
             raise ProviderConfigurationError(
                 "Perplexity API key is not configured.",
-                provider="PERPLEXITY",
+                provider=LLMProvider.PERPLEXITY.value,
             )
         if not model:
             raise ProviderConfigurationError(
                 "Perplexity scan model is not configured.",
-                provider="PERPLEXITY",
+                provider=LLMProvider.PERPLEXITY.value,
             )
 
+        # 3. Build request body with max_tokens.
+        max_tokens = (
+            request.max_output_tokens
+            if request.max_output_tokens is not None
+            else self._settings.provider_max_output_tokens
+        )
         base_url = self._settings.perplexity_base_url.rstrip("/")
         url = f"{base_url}/v1/sonar"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        body = {
+        body: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": request.prompt}],
+            "max_tokens": max_tokens,
         }
 
         timer = LatencyTimer()
@@ -122,43 +135,48 @@ class PerplexityProviderAdapter:
 
         latency_ms = timer.elapsed_ms()
 
-        # 6. Parse response.
-        try:
-            data = response.json()
-        except Exception as exc:
-            raise ProviderResponseError(
-                "Perplexity returned an unparseable response body.",
-                provider="PERPLEXITY",
-            ) from exc
+        # 6. Parse response safely.
+        data = parse_json_response(LLMProvider.PERPLEXITY, _PROVIDER_NAME, response)
 
+        # 7. Parse IDs: X-Request-ID header = request ID, JSON id = response ID.
+        provider_request_id = response.headers.get("X-Request-ID")
+        provider_response_id = data.get("id")
+
+        # 8. Parse choices.
         choices = data.get("choices") or []
         response_text = ""
         finish_reason: str | None = None
-        if choices:
+        if choices and isinstance(choices[0], dict):
             first = choices[0]
             message = first.get("message") or {}
             response_text = message.get("content") or ""
             finish_reason = first.get("finish_reason")
 
-        # 7. Validate response text.
+        # 9. Validate response text.
         if not response_text:
             raise ProviderResponseError(
                 "Perplexity returned an empty response text.",
-                provider="PERPLEXITY",
+                provider=LLMProvider.PERPLEXITY.value,
             )
 
+        # 10. Parse citations.
         citations = self._parse_citations(data)
 
+        # 11. Parse complete usage with all fields.
         usage_data = data.get("usage") or {}
         usage = ProviderUsage(
-            input_tokens=usage_data.get("prompt_tokens"),
-            output_tokens=usage_data.get("completion_tokens"),
-            total_tokens=usage_data.get("total_tokens"),
-            search_requests=usage_data.get("num_search_queries"),
+            input_tokens=_safe_int(usage_data.get("prompt_tokens")),
+            output_tokens=_safe_int(usage_data.get("completion_tokens")),
+            total_tokens=_safe_int(usage_data.get("total_tokens")),
+            reasoning_tokens=_safe_int(usage_data.get("reasoning_tokens")),
+            citation_tokens=_safe_int(usage_data.get("citation_tokens")),
+            search_requests=_safe_int(usage_data.get("num_search_queries")),
         )
 
+        # 12. Parse provider-reported cost (Decimal, not float for money).
+        provider_reported_cost_usd = self._parse_cost(usage_data)
+
         returned_model = data.get("model")
-        provider_request_id = data.get("id")
 
         result = ProviderResult(
             provider=LLMProvider.PERPLEXITY,
@@ -170,13 +188,15 @@ class PerplexityProviderAdapter:
             citations=citations,
             usage=usage,
             provider_request_id=provider_request_id,
+            provider_response_id=provider_response_id,
             finish_reason=finish_reason,
             latency_ms=latency_ms,
             search_used=True,
+            provider_reported_cost_usd=provider_reported_cost_usd,
             metadata={},
         )
 
-        # 8. Log sanitized result.
+        # 13. Log sanitized result.
         log_provider_result(
             provider=LLMProvider.PERPLEXITY,
             surface=ProviderSurface.PERPLEXITY_SONAR_API.value,
@@ -190,6 +210,7 @@ class PerplexityProviderAdapter:
             usage_output_tokens=usage.output_tokens,
             search_requests=usage.search_requests,
             correlation_id=request.correlation_id,
+            provider_response_id=provider_response_id,
         )
 
         return result
@@ -233,6 +254,53 @@ class PerplexityProviderAdapter:
 
         return tuple(out)
 
+    @staticmethod
+    def _parse_cost(usage_data: dict[str, Any]) -> Decimal | None:
+        """Parse the provider-reported cost object from usage.
 
-# Satisfy static type checkers for the ProviderAdapter Protocol.
-_: ProviderAdapter = PerplexityProviderAdapter  # type: ignore[assignment]
+        Uses the total_cost field if available, otherwise sums available
+        component costs. Returns Decimal for money safety.
+        Returns None if no cost data is present.
+        """
+        cost = usage_data.get("cost")
+        if not isinstance(cost, dict):
+            return None
+        total = cost.get("total_cost")
+        if total is not None:
+            return _safe_decimal(total)
+        # Fallback: sum available component costs.
+        components = [
+            cost.get("input_tokens_cost"),
+            cost.get("output_tokens_cost"),
+            cost.get("reasoning_tokens_cost"),
+            cost.get("citation_tokens_cost"),
+            cost.get("search_queries_cost"),
+            cost.get("request_cost"),
+        ]
+        total_dec = Decimal("0")
+        found_any = False
+        for c in components:
+            dec = _safe_decimal(c)
+            if dec is not None:
+                total_dec += dec
+                found_any = True
+        return total_dec if found_any else None
+
+
+def _safe_int(value: Any) -> int | None:
+    """Safely convert a value to int, returning None if not an int."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _safe_decimal(value: Any) -> Decimal | None:
+    """Safely convert a value to Decimal, returning None if invalid."""
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None

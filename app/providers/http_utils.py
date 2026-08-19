@@ -128,6 +128,35 @@ def map_transport_error(
     )
 
 
+def parse_json_response(
+    provider: LLMProvider,
+    provider_name: str,
+    response: httpx.Response,
+) -> dict[str, Any]:
+    """Safely parse an HTTP response body as JSON.
+
+    A nominal HTTP 2xx response with invalid JSON must result in
+    ProviderResponseError — never leak JSONDecodeError, ValueError,
+    or httpx internals.
+
+    Returns the parsed dict on success.
+    """
+    provider_str = provider.value
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise ProviderResponseError(
+            f"{provider_name} returned an unparseable response body.",
+            provider=provider_str,
+        ) from exc
+    if not isinstance(data, dict):
+        raise ProviderResponseError(
+            f"{provider_name} returned a non-object JSON response.",
+            provider=provider_str,
+        )
+    return data
+
+
 class LatencyTimer:
     """Monotonic latency measurement for provider requests.
 
@@ -154,6 +183,7 @@ def log_provider_result(
     usage_output_tokens: int | None,
     search_requests: int | None,
     correlation_id: str | None = None,
+    provider_response_id: str | None = None,
 ) -> None:
     """Log a sanitized structured provider result.
 
@@ -168,6 +198,7 @@ def log_provider_result(
         requested_model=requested_model,
         returned_model=returned_model,
         provider_request_id=provider_request_id,
+        provider_response_id=provider_response_id,
         status=status,
         latency_ms=latency_ms,
         usage_input_tokens=usage_input_tokens,

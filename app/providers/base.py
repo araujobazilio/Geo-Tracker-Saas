@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from app.core.enums import LLMProvider, ProviderExecutionMode, ProviderSurface
@@ -70,6 +71,7 @@ class ProviderUsage:
     cached_input_tokens: int | None = None
     cache_write_input_tokens: int | None = None
     reasoning_tokens: int | None = None
+    citation_tokens: int | None = None
     search_requests: int | None = None
 
 
@@ -93,9 +95,14 @@ class ProviderResult:
     This is the evidence object. It must not be mutated after creation.
 
     IMPORTANT:
-    - provider_request_id is the ID assigned by the provider (e.g.
-      OpenAI response ID, Anthropic message ID). It is distinct from
-      our internal correlation_id.
+    - provider_request_id is the HTTP request/support identifier returned
+      by the provider (e.g. OpenAI x-request-id, Anthropic request-id header).
+      It is NOT the generated resource/object ID.
+    - provider_response_id is the generated resource/object identifier
+      (e.g. OpenAI response ID, Anthropic message ID, Google interaction ID,
+      Perplexity completion ID). Distinct from the HTTP request ID.
+    - provider_reported_cost_usd is the cost reported by the provider itself
+      (not our own pricing calculation). Uses Decimal for money safety.
     - metadata must NOT contain API keys, Authorization headers, or
       raw response bodies.
     - response_text must NOT be empty for a nominally successful
@@ -111,9 +118,11 @@ class ProviderResult:
     citations: tuple[ProviderCitation, ...]
     usage: ProviderUsage
     provider_request_id: str | None
+    provider_response_id: str | None
     finish_reason: str | None
     latency_ms: int
     search_used: bool
+    provider_reported_cost_usd: Decimal | None = None
     metadata: Mapping[str, str | int | float | bool | None] = field(default_factory=dict)
 
 

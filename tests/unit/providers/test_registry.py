@@ -93,6 +93,34 @@ class TestProviderRegistry:
             assert caps.supports_model_only is True
             assert caps.supports_web_grounded is True
 
+    def test_capabilities_without_credentials(self) -> None:
+        """capabilities() must work WITHOUT any credentials configured.
+        Capabilities are static adapter facts, not runtime configuration.
+        """
+        # All keys and models empty.
+        empty_settings = _make_settings(
+            openai_api_key=SecretStr(""),
+            openai_scan_model="",
+            anthropic_api_key=SecretStr(""),
+            anthropic_scan_model="",
+            google_api_key=SecretStr(""),
+            google_scan_model="",
+            perplexity_api_key=SecretStr(""),
+            perplexity_scan_model="",
+        )
+        with patch_settings(empty_settings):
+            registry = ProviderRegistry()
+            # capabilities() should work even with no credentials.
+            caps = registry.capabilities(LLMProvider.OPENAI)
+            assert caps.supports_model_only is True
+            assert caps.supports_web_grounded is True
+
+            caps = registry.capabilities(LLMProvider.GOOGLE)
+            assert caps.supports_web_grounded is False
+
+            caps = registry.capabilities(LLMProvider.PERPLEXITY)
+            assert caps.supports_model_only is False
+
     def test_google_web_grounded_false(self) -> None:
         with patch_settings(_make_settings()):
             registry = ProviderRegistry()

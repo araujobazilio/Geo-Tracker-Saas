@@ -33,7 +33,7 @@ A **Provider Surface** is the specific API endpoint/protocol being measured:
 |-----------------------------|-----------------------------------|
 | `OPENAI_RESPONSES_API`      | OpenAI Responses API              |
 | `ANTHROPIC_MESSAGES_API`    | Anthropic Messages API            |
-| `GOOGLE_GEMINI_API`         | Google Gemini API                 |
+| `GOOGLE_INTERACTIONS_API`   | Google Interactions API           |
 | `PERPLEXITY_SONAR_API`      | Perplexity Sonar API              |
 
 API results are measurements of their **named provider surfaces**, NOT
@@ -101,7 +101,16 @@ Immutable normalized output from an adapter:
 - `requested_model` and `returned_model` (see
   [Model ID Reproducibility](#model-id-reproducibility)).
 - `latency_ms` (see [Latency](#latency)).
-- Provider request/response IDs where available.
+- `provider_request_id`: an HTTP request/support identifier surfaced by the
+  provider (e.g. the `x-request-id`, `request-id`, or `X-Request-ID` response
+  header). `None` when the provider does not supply one.
+- `provider_response_id`: a generated resource/object identifier returned in
+  the response body (e.g. response ID, message ID, interaction ID, completion
+  ID).
+- `provider_reported_cost_usd`: a `Decimal` cost as reported **by the
+  provider** in its own usage/cost payload. This is **not** GEO Tracker's own
+  pricing; it is the vendor's accounting of the request. `None` when the
+  provider does not report a cost.
 
 ### `ProviderUsage`
 
@@ -113,6 +122,10 @@ significant:
 
 Callers must not coerce `None` to `0`; doing so destroys the distinction
 between "unknown" and "measured zero".
+
+Fields include `citation_tokens: int | None` (reported by Perplexity; the
+token cost attributable to cited content). All other fields follow the same
+`None` vs `0` convention.
 
 ### `ProviderCitation`
 
@@ -132,6 +145,9 @@ without spending quota or tokens.
 - A **missing provider** (e.g. no API key configured) does **not** crash
   application startup. The provider is simply unavailable; requests for it
   fail at execution time with a configuration error.
+- **`capabilities()` works WITHOUT credentials.** It returns static adapter
+  facts (supported modes, surface name) and makes **zero network calls**, so
+  capability metadata is always available even when no API key is configured.
 
 ---
 
@@ -208,11 +224,23 @@ API keys are server-side secrets and are treated accordingly:
 
 - **Endpoint:** `POST /responses` (current Responses API).
 - **`MODEL_ONLY`:** no tools supplied.
-- **`WEB_GROUNDED`:** `tools=[{"type": "web_search"}]`.
+- **`WEB_GROUNDED`:** `tools=[{"type": "web_search"}]` and
+  `tool_choice={"type": "web_search"}` to force web search.
+- **`include`:** `["web_search_call.action.sources"]` is requested so that
+  source metadata is returned alongside the response.
 - **`store=false`** is set on every request for privacy and reproducibility
   (no server-side retention of inputs/outputs by the provider).
-- **Citations:** normalized from `url_citation` annotations in the response.
-- **Usage:** `input_tokens`, `output_tokens`, `total_tokens`.
+- **`max_output_tokens`** is sent in the request body.
+- **Citations:** normalized from **both** inline `url_citation` annotations
+  **and** `web_search_call.action.sources`, deduplicated.
+- **Usage:** `input_tokens`, `output_tokens`, `total_tokens`;
+  `input_tokens_details.cached_tokens` → `cached_input_tokens`;
+  `output_tokens_details.reasoning_tokens` → `reasoning_tokens`.
+- **Search count:** `search_requests` = the number of `web_search_call` items
+  in the response.
+- **`WEB_GROUNDED` without an observed search** → `ProviderSearchError`.
+- **IDs:** `provider_request_id` = the `x-request-id` HTTP response header;
+  `provider_response_id` = the `id` field in the response JSON.
 
 ### Anthropic (`ANTHROPIC_MESSAGES_API`)
 
@@ -220,40 +248,79 @@ API keys are server-side secrets and are treated accordingly:
 - **Headers:** `x-api-key` and `anthropic-version: 2023-06-01`.
 - **`MODEL_ONLY`:** no tools supplied.
 - **`WEB_GROUNDED`:**
-  `tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]`.
+  `tools=[{"type": "<version>", "name": "web_search", "max_uses": 5}]` and
+  `tool_choice={"type": "tool", "name": "web_search"}` to force web search.
+- **Default tool version:** `web_search_20260318` (configurable). Available
+  versions: `web_search_20250305`, `web_search_20260209`, `web_search_20260318`.
 - **Configurable via settings:**
-  - `ANTHROPIC_WEB_SEARCH_TOOL_VERSION` (the `type` suffix, e.g. `20250305`)
+  - `ANTHROPIC_WEB_SEARCH_TOOL_VERSION` (the `type` suffix, e.g. `20260318`)
   - `ANTHROPIC_WEB_SEARCH_MAX_USES` (the `max_uses` value)
+- **`max_tokens`** is sent in the request body.
 - **Body-level search error detection:** a `web_search_tool_result_error`
   field in the response body is mapped to `ProviderSearchError` rather than
   being treated as a successful empty answer.
+- **`stop_reason: "pause_turn"`** → `ProviderSearchError`. This indicates an
+  incomplete server-side search loop, **not** a final answer. There is **no
+  automatic continuation** on `pause_turn` (continuing would be another
+  billable request, violating the one-call-per-execute invariant).
+- **`WEB_GROUNDED` without an observed search** → `ProviderSearchError`.
 - **Citations:** normalized from `web_search_result_location` blocks.
 - **Usage:** `input_tokens`, `output_tokens`, and
-  `server_tool_use.web_search_requests`.
+  `server_tool_use.web_search_requests`;
+  `cache_read_input_tokens` → `cached_input_tokens`;
+  `cache_creation_input_tokens` → `cache_write_input_tokens`.
+- **IDs:** `provider_request_id` = the `request-id` HTTP response header;
+  `provider_response_id` = the `id` field in the message JSON.
 
-### Google (`GOOGLE_GEMINI_API`)
+### Google (`GOOGLE_INTERACTIONS_API`)
 
-- **Endpoint:** `POST /v1beta/models/{model}:generateContent` (current Gemini
-  API).
+- **Endpoint:** `POST {base_url}/v1beta/interactions` (current Interactions
+  API — **not** `generateContent`).
+- **Request body:**
+  `{"model": model, "input": prompt, "store": false, "generation_config": {"max_output_tokens": N}}`.
+- **`store=false`** for stateless one-shot measurements (no server-side
+  retention of the interaction).
 - **`MODEL_ONLY` only** — this is a compliance restriction.
 - **`WEB_GROUNDED` → `ProviderModeNotAllowedError` BEFORE any network call.**
-- **Usage:** `promptTokenCount`, `candidatesTokenCount`, `totalTokenCount`.
-- **Important:** This is a measurement of the **Gemini API surface**, **NOT**
-  a measurement of Google AI Overviews. AI Overviews is a separate consumer
-  product with its own retrieval and ranking pipeline that is not exposed via
-  this API.
+- **Response:** JSON with `id` (interaction ID), `status`, a `steps` array,
+  and a `usage` object.
+  - Only `model_output` steps are parsed for text; `thought` steps are
+    **discarded**.
+  - **Status values:** `completed`, `failed`, `cancelled`, `requires_action`,
+    `incomplete`, `budget_exceeded`. Any **non-`completed`** status →
+    `ProviderResponseError`.
+- **Usage fields:** `total_input_tokens`, `total_output_tokens`,
+  `total_tokens`, `total_cached_tokens`, `total_thought_tokens`.
+- **IDs:** `provider_response_id` = the interaction `id`;
+  `provider_request_id` = `None` (Google does not provide a standard HTTP
+  request ID).
+- **Important:** This is a measurement of the **Interactions API surface**,
+  **NOT** a measurement of Google AI Overviews. AI Overviews is a separate
+  consumer product with its own retrieval and ranking pipeline that is not
+  exposed via this API.
 
 ### Perplexity (`PERPLEXITY_SONAR_API`)
 
 - **Endpoint:** `POST /v1/sonar` (current Sonar API).
 - **`WEB_GROUNDED` only** — Sonar always searches.
 - **`MODEL_ONLY` → `ProviderModeNotAllowedError` BEFORE any network call.**
+- **`max_tokens`** is sent in the request body.
 - **Citations:**
   - `search_results` is the **primary** source for citations.
   - `citations` (legacy array) is a **fallback** when `search_results` is
     absent.
-- **Usage:** `prompt_tokens`, `completion_tokens`, `total_tokens`, and
-  `num_search_queries`.
+- **Usage:** `prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `num_search_queries`, plus `citation_tokens` and `reasoning_tokens` (now
+  parsed when reported).
+- **`provider_reported_cost_usd`:** a `Decimal` parsed from
+  `usage.cost.total_cost` — this is the **provider-reported** cost, **not**
+  GEO Tracker's own pricing. The cost object fields are:
+  `input_tokens_cost`, `output_tokens_cost`, `reasoning_tokens_cost`,
+  `request_cost`, `citation_tokens_cost`, `search_queries_cost`,
+  `total_cost`.
+- **IDs:** `provider_request_id` = the `X-Request-ID` HTTP response header;
+  `provider_response_id` = the `id` field in the response JSON (completion
+  ID).
 
 ---
 
@@ -272,7 +339,7 @@ embed API keys or raw request bodies.
 | `ProviderUnavailableError`     | HTTP 5xx — provider-side outage.                               |
 | `ProviderBadRequestError`      | HTTP 400 — malformed request to the provider.                  |
 | `ProviderResponseError`        | Response was malformed or empty (not an HTTP status error).    |
-| `ProviderSearchError`          | Body-level search tool failure (e.g. Anthropic's `web_search_tool_result_error`). |
+| `ProviderSearchError`          | Search-tool failure or missing search: body-level search tool failure (e.g. Anthropic's `web_search_tool_result_error`), `WEB_GROUNDED` with no observed search, or Anthropic `stop_reason: "pause_turn"` (incomplete server-side search loop). |
 | `ProviderModeNotAllowedError`  | The requested execution mode is not supported by the provider. |
 
 `ProviderModeNotAllowedError` is raised **before** any network call so that no
@@ -339,3 +406,47 @@ All provider settings are environment-driven (see `.env.example`).
 - This keeps the measurement focused on the observable answer and avoids
   storing intermediate reasoning that providers may consider sensitive or that
   may change without notice.
+
+---
+
+## WEB_GROUNDED Search Invariant
+
+A `WEB_GROUNDED` measurement is only valid if a web search actually occurred.
+
+- **`WEB_GROUNDED` success ALWAYS implies `search_used == True`.**
+- If a `WEB_GROUNDED` request completes without any observed search activity
+  (no search tool call, no search results, no citations traceable to a
+  search), the adapter raises `ProviderSearchError` rather than returning a
+  result with `search_used == False`.
+- This is a **critical integrity guarantee** for GEO measurement: a
+  "web-grounded" answer that was not actually grounded in fresh web content
+  would be indistinguishable from a `MODEL_ONLY` answer and would corrupt the
+  experiment.
+
+---
+
+## Malformed JSON Handling
+
+- All four adapters normalize invalid JSON responses to
+  `ProviderResponseError`.
+- `json.JSONDecodeError`, `ValueError`, and `httpx` internal decode errors
+  are caught and wrapped; they **never leak** to callers as raw stdlib/httpx
+  exceptions.
+- This keeps the adapter boundary clean: every failure a caller sees is a
+  typed `Provider*Error`, never an uncontrolled third-party exception.
+
+---
+
+## Output Token Limits
+
+All four adapters transmit the configured maximum output token limit to the
+provider where the protocol supports it:
+
+| Provider   | Field sent                                              |
+|------------|---------------------------------------------------------|
+| OpenAI     | `max_output_tokens` in the request body                 |
+| Anthropic  | `max_tokens` in the request body                        |
+| Google     | `generation_config.max_output_tokens`                   |
+| Perplexity | `max_tokens` in the request body                        |
+
+This keeps the measurement budget explicit and reproducible across runs.

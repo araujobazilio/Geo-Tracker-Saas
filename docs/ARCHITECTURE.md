@@ -108,7 +108,7 @@ period is the UTC calendar month. Reservations are idempotent via
 
 See `docs/USAGE_AND_QUOTAS.md`.
 
-## Provider abstraction (Phase 5)
+## Provider abstraction (Phase 5/5.1)
 
 AI provider adapters live in `app/providers`. They translate
 `ProviderRequest` into provider-specific HTTP calls and normalize
@@ -125,16 +125,33 @@ Key design decisions:
   measure the surface, not the consumer UI.
 - **Execution modes**: `MODEL_ONLY` (no web search) and `WEB_GROUNDED`
   (web search tool). Not all providers support all modes.
+- **WEB_GROUNDED integrity**: WEB_GROUNDED success ALWAYS implies
+  `search_used == True`. If no search is observed, `ProviderSearchError`
+  is raised. This is a critical methodological invariant.
 - **No automatic retries**: One `execute()` = at most ONE billable
   request. Scan Engine (Phase 6) owns retry policy.
 - **No quota/usage in adapters**: Adapters do NOT call `QuotaService`
   or create `UsageEvent`. Scan Engine owns accounting.
 - **No hidden system prompts**: The prompt text is the experimental
   input. Adapters add only the minimum API envelope.
+- **Request ID vs response ID**: `provider_request_id` is the HTTP
+  request/support identifier (e.g. `x-request-id` header);
+  `provider_response_id` is the generated resource/object identifier
+  (e.g. response ID, message ID, interaction ID). These are distinct.
+- **Provider-reported cost**: `provider_reported_cost_usd` (Decimal)
+  preserves the cost reported by the provider (e.g. Perplexity), not
+  our own pricing calculation.
+- **Malformed JSON normalization**: All adapters normalize invalid JSON
+  to `ProviderResponseError`. Parser exceptions never leak.
 - **httpx.AsyncClient**: Unified transport for all providers;
   `MockTransport` for deterministic tests.
 - **Lazy registry**: `ProviderRegistry` constructs adapters on demand.
   Missing credentials do NOT crash application startup.
+  `capabilities()` works WITHOUT credentials (static adapter facts).
+- **Google Interactions API**: The Google adapter uses the current
+  recommended Interactions API (`POST /v1beta/interactions`), not the
+  legacy `generateContent`. `store=false` for stateless one-shot
+  measurements. Thought/reasoning steps are discarded.
 
 See `docs/PROVIDER_INTEGRATIONS.md` and `docs/PROVIDER_COMPLIANCE.md`.
 

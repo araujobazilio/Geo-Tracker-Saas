@@ -10,11 +10,11 @@ Engine, and any reporting surface MUST conform to the constraints below.
 
 ## 1. Google Compliance Boundary (CRITICAL)
 
-The Google Gemini API surface available to GEO Tracker is **MODEL_ONLY**. This is
-**NOT** the same as Google AI Overviews measurement.
+The Google Interactions API surface available to GEO Tracker is **MODEL_ONLY**.
+This is **NOT** the same as Google AI Overviews measurement.
 
-- **Google Search grounding is disabled** in the Gemini adapter.
-- **Reason:** Current Gemini API / Google Search grounding terms impose
+- **Google Search grounding is disabled** in the Google adapter.
+- **Reason:** Current Google API / Google Search grounding terms impose
   restrictions that conflict with GEO Tracker's planned automated storage and
   analysis of grounded results.
 - **Phase 5:** `GoogleProviderAdapter` supports `MODEL_ONLY` only.
@@ -26,13 +26,22 @@ The Google Gemini API surface available to GEO Tracker is **MODEL_ONLY**. This i
   reviewed compliant path**; it must not be enabled by default or behind a flag
   without that review.
 
+### Adapter surface (Phase 5.1)
+
+- The adapter now uses the **Interactions API** (`POST /v1beta/interactions`),
+  **NOT** `generateContent`.
+- `store=false` for stateless one-shot measurements (no server-side session
+  persistence).
+- Thought/reasoning steps are **discarded** — only `model_output` text is
+  exposed.
+
 ### Labeling
 
-| Field   | Value                |
-|---------|----------------------|
-| Provider | `GOOGLE`            |
-| Surface  | `GOOGLE_GEMINI_API` |
-| Mode     | `MODEL_ONLY`        |
+| Field   | Value                    |
+|---------|--------------------------|
+| Provider | `GOOGLE`                |
+| Surface  | `GOOGLE_INTERACTIONS_API` |
+| Mode     | `MODEL_ONLY`            |
 
 > **This does NOT equal:** Google AI Overviews.
 
@@ -45,7 +54,7 @@ consumer product or UI. This distinction is essential for trustworthy reporting.
 
 - `OPENAI_RESPONSES_API` **!=** consumer ChatGPT UI
 - `ANTHROPIC_MESSAGES_API` **!=** Claude.ai UI
-- `GOOGLE_GEMINI_API` **!=** Google AI Overviews
+- `GOOGLE_INTERACTIONS_API` **!=** Google AI Overviews
 - `PERPLEXITY_SONAR_API` **!=** every Perplexity consumer product mode
 
 Reports and evidence records MUST label results by the provider surface actually
@@ -186,3 +195,81 @@ treated as an error.
   failure being silently recorded as a genuine negative result.
 
 A missing answer is a measurement failure, not a measurement result.
+
+---
+
+## 12. WEB_GROUNDED Implies Search Actually Occurred
+
+A `WEB_GROUNDED` success **ALWAYS** implies `search_used == True`. This is a
+critical methodological invariant for GEO measurement.
+
+- **OpenAI:** `tool_choice` forces `web_search`; if no `web_search_call` is
+  present in the response → raise `ProviderSearchError`.
+- **Anthropic:** `tool_choice` forces `web_search`; if no `server_tool_use` /
+  `web_search_tool_result` is present in the response → raise
+  `ProviderSearchError`.
+- A `WEB_GROUNDED` result with `search_used=False` would be a **false
+  measurement** — it must never be recorded as a successful grounded result.
+
+---
+
+## 13. Anthropic `pause_turn` Is Not a Final Answer
+
+When the Anthropic API returns `stop_reason == "pause_turn"`, the server-side
+search loop has reached its iteration limit.
+
+- This is **NOT** a final GEO answer.
+- The adapter raises `ProviderSearchError`, **NOT** a successful result.
+- **No automatic continuation** is performed by the adapter (a continuation
+  would be another billable request).
+- Phase 6 Scan Engine owns retry/continuation accounting.
+
+---
+
+## 14. Request ID vs Response ID
+
+`provider_request_id` and `provider_response_id` are **distinct concepts** and
+must not be conflated.
+
+- **`provider_request_id`** — HTTP request/support identifier for
+  troubleshooting:
+  - OpenAI: `x-request-id` header
+  - Anthropic: `request-id` header
+  - Perplexity: `X-Request-ID` header
+  - Google: None (no standard HTTP request ID)
+- **`provider_response_id`** — Generated resource/object identifier:
+  - OpenAI: response JSON `id` (`resp_...`)
+  - Anthropic: message JSON `id` (`msg_...`)
+  - Google: interaction JSON `id` (`v1_...`)
+  - Perplexity: completion JSON `id`
+
+---
+
+## 15. Provider-Reported Cost
+
+- Perplexity returns a structured **cost object** inside `usage`.
+- `provider_reported_cost_usd` preserves this as `Decimal` (not `float` — never
+  use floating point for money).
+- This is **NOT** our own pricing calculator.
+- Phase 6 will decide whether provider-reported cost or our versioned price
+  catalog is authoritative.
+
+---
+
+## 16. Malformed JSON Normalization
+
+All four adapters normalize invalid JSON to `ProviderResponseError`.
+
+- `JSONDecodeError`, `ValueError`, and `httpx` internals **never leak through**
+  the adapter boundary.
+- Tests verify this with genuinely invalid JSON bodies.
+
+---
+
+## 17. Output Token Limits
+
+All four adapters transmit `max_output_tokens` where supported.
+
+- This is a **consistency requirement for measurement reproducibility**.
+- Without bounded output, response length variance between providers would
+  confound cross-provider comparison.

@@ -8,6 +8,12 @@ Implements the ProviderAdapter protocol against the Anthropic Messages API
 - No system prompt distortion: only the minimum API envelope is sent.
 - Does not parse chain-of-thought/reasoning blocks.
 - API key never appears in repr, logs, or exceptions.
+- WEB_GROUNDED forces web_search via tool_choice and verifies search
+  actually occurred (ProviderSearchError if not).
+- pause_turn stop_reason is treated as an incomplete search loop, not
+  a successful final answer.
+- provider_request_id = request-id HTTP header (support/tracking ID).
+- provider_response_id = message JSON `id` (generated object ID).
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from app.providers.http_utils import (
     log_provider_result,
     map_http_error,
     map_transport_error,
+    parse_json_response,
 )
 
 _PROVIDER_NAME = "Anthropic"
@@ -104,6 +111,8 @@ class AnthropicProviderAdapter:
                     "max_uses": self._settings.anthropic_web_search_max_uses,
                 }
             ]
+            # Force the model to use the web_search tool.
+            body["tool_choice"] = {"type": "tool", "name": "web_search"}
 
         headers = {
             "x-api-key": api_key,
@@ -123,47 +132,55 @@ class AnthropicProviderAdapter:
             if response.status_code >= 400:
                 map_http_error(self.provider, _PROVIDER_NAME, response)
 
-            data = response.json()
+            data = parse_json_response(self.provider, _PROVIDER_NAME, response)
         finally:
             await client.aclose()
 
         latency_ms = timer.elapsed_ms()
 
-        # 5. Detect body-level web search errors.
-        content_blocks = data.get("content") or []
-        if isinstance(content_blocks, list):
-            for block in content_blocks:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") != "web_search_tool_result":
-                    continue
-                inner = block.get("content")
-                # Error case: content is a dict (not a list) with
-                # type="web_search_tool_result_error".
-                if isinstance(inner, dict) and inner.get("type") == "web_search_tool_result_error":
-                    error_code = inner.get("error_code", "unknown")
-                    raise ProviderSearchError(
-                        f"Anthropic web search tool failed: {error_code}.",
-                        provider=self.provider.value,
-                    )
+        # 3. Parse IDs: request-id header = request ID, JSON id = response ID.
+        provider_request_id = response.headers.get("request-id")
+        provider_response_id = data.get("id")
 
-        # 6. Parse response text, citations, usage, model, request ID.
+        content_blocks = data.get("content") or []
+        if not isinstance(content_blocks, list):
+            content_blocks = []
+
+        # 4. Detect body-level web search errors.
+        self._check_search_errors(content_blocks)
+
+        # 5. Check for pause_turn — incomplete server-side search loop.
+        stop_reason = data.get("stop_reason")
+        if stop_reason == "pause_turn":
+            raise ProviderSearchError(
+                "Anthropic returned pause_turn — the server-side search loop "
+                "reached its iteration limit. This is not a final answer.",
+                provider=self.provider.value,
+            )
+
+        # 6. Parse response text, citations, usage, model.
         response_text = self._extract_text(content_blocks)
         citations = self._extract_citations(content_blocks)
         usage = self._extract_usage(data)
         returned_model = data.get("model")
-        provider_request_id = data.get("id")
-        finish_reason = data.get("stop_reason")
         search_used = self._detect_search_used(content_blocks)
 
-        # 7. Validate response_text is not empty.
+        # 7. Verify WEB_GROUNDED actually performed search.
+        if request.mode == ProviderExecutionMode.WEB_GROUNDED and not search_used:
+            raise ProviderSearchError(
+                "Anthropic WEB_GROUNDED mode was requested but no web search "
+                "was observed in the response.",
+                provider=self.provider.value,
+            )
+
+        # 8. Validate response_text is not empty.
         if not response_text:
             raise ProviderResponseError(
                 "Anthropic returned an empty response text.",
                 provider=self.provider.value,
             )
 
-        # 8. Log sanitized result.
+        # 9. Log sanitized result.
         log_provider_result(
             provider=self.provider,
             surface=self.surface.value,
@@ -177,9 +194,10 @@ class AnthropicProviderAdapter:
             usage_output_tokens=usage.output_tokens,
             search_requests=usage.search_requests,
             correlation_id=request.correlation_id,
+            provider_response_id=provider_response_id,
         )
 
-        # 9. Return ProviderResult.
+        # 10. Return ProviderResult.
         return ProviderResult(
             provider=self.provider,
             surface=self.surface,
@@ -190,11 +208,28 @@ class AnthropicProviderAdapter:
             citations=citations,
             usage=usage,
             provider_request_id=provider_request_id,
-            finish_reason=finish_reason,
+            provider_response_id=provider_response_id,
+            finish_reason=stop_reason,
             latency_ms=latency_ms,
             search_used=search_used,
             metadata={},
         )
+
+    @staticmethod
+    def _check_search_errors(content_blocks: list[Any]) -> None:
+        """Detect body-level web search tool errors."""
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "web_search_tool_result":
+                continue
+            inner = block.get("content")
+            if isinstance(inner, dict) and inner.get("type") == "web_search_tool_result_error":
+                error_code = inner.get("error_code", "unknown")
+                raise ProviderSearchError(
+                    f"Anthropic web search tool failed: {error_code}.",
+                    provider=LLMProvider.ANTHROPIC.value,
+                )
 
     @staticmethod
     def _extract_text(content_blocks: list[Any]) -> str:
@@ -248,25 +283,27 @@ class AnthropicProviderAdapter:
     def _extract_usage(data: dict[str, Any]) -> ProviderUsage:
         """Extract normalized usage from the response.
 
-        input_tokens, output_tokens from usage. search_requests from
-        usage.server_tool_use.web_search_requests if present.
+        input_tokens, output_tokens from usage.
+        cache_read_input_tokens → cached_input_tokens.
+        cache_creation_input_tokens → cache_write_input_tokens.
+        search_requests from usage.server_tool_use.web_search_requests if present.
         """
         usage = data.get("usage")
         if not isinstance(usage, dict):
             return ProviderUsage()
-        raw_input = usage.get("input_tokens")
-        raw_output = usage.get("output_tokens")
-        input_tokens = raw_input if isinstance(raw_input, int) else None
-        output_tokens = raw_output if isinstance(raw_output, int) else None
+        input_tokens = _safe_int(usage.get("input_tokens"))
+        output_tokens = _safe_int(usage.get("output_tokens"))
+        cached_input_tokens = _safe_int(usage.get("cache_read_input_tokens"))
+        cache_write_input_tokens = _safe_int(usage.get("cache_creation_input_tokens"))
         search_requests: int | None = None
         server_tool_use = usage.get("server_tool_use")
         if isinstance(server_tool_use, dict):
-            web_search_requests = server_tool_use.get("web_search_requests")
-            if isinstance(web_search_requests, int):
-                search_requests = web_search_requests
+            search_requests = _safe_int(server_tool_use.get("web_search_requests"))
         return ProviderUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_input_tokens=cache_write_input_tokens,
             search_requests=search_requests,
         )
 
@@ -288,7 +325,13 @@ class AnthropicProviderAdapter:
         return False
 
 
-# Make the adapter structurally compatible with the ProviderAdapter protocol.
-# The protocol is runtime_checkable; the class already implements the required
-# attributes/methods, so no explicit inheritance is needed.
+def _safe_int(value: Any) -> int | None:
+    """Safely convert a value to int, returning None if not an int."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None
+
+
 __all__ = ["AnthropicProviderAdapter"]
