@@ -199,6 +199,8 @@ class ActionGenerationService:
             if not had_occurrence:
                 occurrences_created += 1
 
+        self._session.commit()
+
         return RefreshResult(
             action_engine_version=ACTION_ENGINE_VERSION,
             scan_id=scan_id,

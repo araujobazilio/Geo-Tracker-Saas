@@ -650,7 +650,7 @@ def test_api_competitor_explanation_tenant_isolation(api) -> None:  # type: igno
         f"/competitors/{comp_snap_id}/explanation",
         headers={"X-CSRF-Token": other_csrf},
     )
-    assert response.status_code == 403, response.text
+    assert response.status_code == 404, response.text
 
 
 def test_api_competitor_explanation_member_can_read(api) -> None:  # type: ignore[no-untyped-def]
@@ -755,7 +755,7 @@ def test_api_get_opportunity_tenant_isolation(api) -> None:  # type: ignore[no-u
         f"/api/v1/workspaces/{workspace_id}/projects/{project_id}/opportunities/{opp_id}",
         headers={"X-CSRF-Token": other_csrf},
     )
-    assert response.status_code == 403, response.text
+    assert response.status_code == 404, response.text
 
 
 def test_api_get_opportunity_cross_project_404(api) -> None:  # type: ignore[no-untyped-def]
@@ -851,7 +851,7 @@ def test_api_refresh_actions_tenant_isolation(api) -> None:  # type: ignore[no-u
         f"/api/v1/workspaces/{workspace_id}/projects/{project_id}/scans/{scan_id}/actions/refresh",
         headers={"X-CSRF-Token": other_csrf},
     )
-    assert response.status_code == 403, response.text
+    assert response.status_code == 404, response.text
 
 
 def test_api_refresh_actions_idempotent(api) -> None:  # type: ignore[no-untyped-def]
@@ -972,7 +972,7 @@ def test_api_update_status_tenant_isolation(api) -> None:  # type: ignore[no-unt
         headers={"X-CSRF-Token": other_csrf},
         json={"status": "IN_PROGRESS"},
     )
-    assert response.status_code == 403, response.text
+    assert response.status_code == 404, response.text
 
 
 def test_api_update_status_cross_project_404(api) -> None:  # type: ignore[no-untyped-def]

@@ -107,4 +107,5 @@ class OpportunityWorkflowService:
             opp.dismissed_at = None
             opp.dismissal_reason = None
 
+        self._session.commit()
         return new_status
