@@ -1177,7 +1177,7 @@ def test_confidence_round_by_round_execution_order(db_session: Session) -> None:
                 .scalars()
                 .all()
             )
-            obs_values = sorted({int(v) for v in rows})
+            obs_values = [int(v) for v in rows]
         batch_obs_indices.append(obs_values)
         await original_execute_run_ids(self, run_ids)
 
@@ -1532,7 +1532,7 @@ def test_provider_failed_round_isolation(db_session: Session) -> None:
 
     # Google: 0 successful, coverage=0%, INSUFFICIENT, brand_vis=NULL.
     assert google_pb.successful_observations == 0
-    assert google_pb.measurement_coverage is None
+    assert google_pb.measurement_coverage == Decimal("0.0000")
     assert google_pb.confidence_level == "INSUFFICIENT"
     assert google_pb.brand_visibility_rate is None
     # Google must NOT inherit OpenAI's range.
