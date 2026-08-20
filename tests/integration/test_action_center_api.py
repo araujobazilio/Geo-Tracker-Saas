@@ -514,6 +514,57 @@ def api(
         reset_redis()
         reset_engine()
         get_settings.cache_clear()
+        # Clean up all data committed by _seed_full_pipeline and API calls.
+        # These tests bypass the db_session transaction rollback, so we must
+        # truncate manually to avoid polluting subsequent integration tests.
+        _truncate_all_tables()
+
+
+def _truncate_all_tables() -> None:
+    """Truncate all application tables to clean up after API tests.
+
+    API tests commit data directly (via _db_session), bypassing the
+    db_session fixture's transaction rollback. This truncates all tables
+    in FK-safe order to prevent pollution of subsequent integration tests.
+    """
+    from sqlalchemy import text
+
+    # Order matters: child tables first, then parent tables.
+    # Using CASCADE to handle any remaining FK references.
+    tables = [
+        "opportunity_evidence",
+        "opportunity_occurrences",
+        "opportunities",
+        "source_attributions",
+        "entity_mentions",
+        "scan_analyses",
+        "scan_entity_snapshots",
+        "response_sources",
+        "prompt_runs",
+        "usage_events",
+        "quota_reservations",
+        "scans",
+        "prompts",
+        "prompt_sets",
+        "project_keywords",
+        "competitors",
+        "project_providers",
+        "projects",
+        "billing_accounts",
+        "plan_providers",
+        "plan_definitions",
+        "provider_price_rules",
+        "workspace_members",
+        "workspace_usage_periods",
+        "workspaces",
+        "users",
+        "audit_logs",
+        "sessions",
+    ]
+    with _db_session() as db:
+        for table in tables:
+            db.execute(text(f'DELETE FROM "{table}"'))
+        db.commit()
 
 
 def _register(client: TestClient, prefix: str) -> tuple[uuid.UUID, uuid.UUID, str]:
