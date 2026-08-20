@@ -554,12 +554,13 @@ def _truncate_all_tables() -> None:
         "plan_providers",
         "plan_definitions",
         "provider_price_rules",
+        "provider_webhook_events",
         "workspace_members",
         "workspace_usage_periods",
+        "appsumo_licenses",
         "workspaces",
         "users",
         "audit_logs",
-        "sessions",
     ]
     table_list = ", ".join(f'"{t}"' for t in tables)
     with _db_session() as db:
