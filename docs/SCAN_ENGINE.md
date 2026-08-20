@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-**IMPLEMENTED (Phase 6).** The Scan Engine executes reproducible `STANDARD` scans. A customer requests a scan; GEO Tracker fixes its plan before any provider call, reserves the entire customer AI Check budget, dispatches one Celery task, executes each planned `PromptRun` at most once, records evidence and accounting atomically, and classifies the scan from terminal run states.
+**IMPLEMENTED (Phase 6 + Phase 8).** The Scan Engine executes reproducible `STANDARD` scans and repeated `CONFIDENCE` scans. A customer requests a scan; GEO Tracker fixes its plan before any provider call, reserves the entire customer AI Check budget, dispatches one Celery task, executes each planned `PromptRun` at most once, records evidence and accounting atomically, and classifies the scan from terminal run states. Phase 8 adds `CONFIDENCE` scans that repeat the same cells to measure reliability (see "CONFIDENCE methodology" below).
 
 Phase 6 does not perform brand/mention detection. That is Phase 7. A valid provider answer containing no tracked-brand mention is a successful measurement (`SUCCEEDED`), not an execution failure.
 
@@ -20,6 +20,48 @@ The policy is fixed by `ProviderExecutionPolicy`; the public API cannot override
 Google grounding remains disabled for compliance. Google results measure the Interactions API, not Google AI Overviews.
 
 A scan uses the intersection of providers enabled on the project and providers allowed by the workspace's effective entitlements, in the stable order OpenAI, Anthropic, Google, Perplexity. Preflight also requires an ACTIVE project, a current ACTIVE `PromptSet` with the current generator key, at least one active prompt, configured model IDs, supported adapter capabilities, and—when `PRICING_REQUIRE_RULE_FOR_EXECUTION=true`—an effective exact price rule for every selected non-Perplexity target. Perplexity can execute without a local rule because it can report request cost.
+
+## CONFIDENCE methodology (Phase 8)
+
+**IMPLEMENTED (Phase 8).** A `CONFIDENCE` scan repeats the same Prompt × Provider cells `repeat_count` times to measure response reliability. It is always derived from an existing terminal `STANDARD` scan (the baseline); it does not define its own prompt set or provider targets.
+
+### Plan dimensions
+
+```text
+planned_ai_checks = prompt_count × provider_count × repeat_count
+```
+
+The baseline scan's snapshotted `prompt_count`, `provider_count`, and eligible provider targets are cloned. `repeat_count` multiplies the total plan. The default is 3 repeats; the maximum is 5.
+
+### Round-by-round execution
+
+`ScanExecutionService` executes CONFIDENCE scans in strict round order. All `PromptRun` rows with `observation_index = 1` finish before any `observation_index = 2` row begins, and so on through `repeat_count`. This ensures that round-to-round variation is observed sequentially, not interleaved.
+
+Within a single round, execution is identical to STANDARD: bounded async concurrency (`SCAN_MAX_CONCURRENCY`), one session per run, and no retries.
+
+### observation_index vs attempt_number
+
+| Column | Meaning |
+|--------|---------|
+| `observation_index` | Which repeated observation (1..`repeat_count`) this run represents. Always 1 for STANDARD scans. |
+| `attempt_number` | Which retry attempt within a single observation. Always 1 in Phase 8 — CONFIDENCE scans perform no retries. |
+
+One run = one provider call. There is no retry, no `autoretry_for`, and no `self.retry`. A failed observation is recorded as `FAILED` and excluded from reliability metrics; it is not re-executed.
+
+### New Scan columns
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `Scan.repeat_count` | Integer | NOT NULL, default 1, CHECK `> 0`. Number of repeated observations. 1 for STANDARD. |
+| `Scan.baseline_scan_id` | UUID | NULLABLE, self-FK → `scans.id` `ON DELETE RESTRICT`. Set only for CONFIDENCE scans; references the baseline STANDARD scan. |
+
+### ConfidenceScanCreationService
+
+`ConfidenceScanCreationService` clones the baseline STANDARD scan's methodology: it copies the snapshotted prompt set, provider targets, execution modes, and model IDs, then creates `prompt_count × provider_count × repeat_count` `PromptRun` rows with the appropriate `observation_index` values. The baseline scan must be terminal (`COMPLETED` or `PARTIAL`) and belong to the same workspace.
+
+### ScanExecutionService for CONFIDENCE
+
+`ScanExecutionService` is extended to handle the round-by-round execution model for `CONFIDENCE` scans. It groups `PromptRun` rows by `observation_index`, executes each round fully before advancing to the next, and uses the same atomic result recording, finalization, and stale-recovery machinery as STANDARD scans.
 
 ## Immutable execution snapshot
 

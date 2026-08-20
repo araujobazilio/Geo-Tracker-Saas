@@ -12,6 +12,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -57,6 +58,7 @@ class Scan(UUIDPrimaryKey, TimestampMixin, Base):
             "successful_runs + failed_runs <= planned_ai_checks",
             name="ck_scans_terminal_runs_within_plan",
         ),
+        CheckConstraint("repeat_count > 0", name="ck_scans_repeat_count_positive"),
     )
 
     workspace_id: Mapped[uuid.UUID] = mapped_column(
@@ -92,10 +94,24 @@ class Scan(UUIDPrimaryKey, TimestampMixin, Base):
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    repeat_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    baseline_scan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType,
+        ForeignKey("scans.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
 
     project: Mapped[Project] = relationship()
     prompt_set: Mapped[PromptSet] = relationship()
     runs: Mapped[list[PromptRun]] = relationship(back_populates="scan")
+    baseline_scan: Mapped[Scan | None] = relationship(
+        remote_side="Scan.id",
+        back_populates="confidence_scans",
+    )
+    confidence_scans: Mapped[list[Scan]] = relationship(
+        back_populates="baseline_scan",
+    )
 
 
 class PromptRun(UUIDPrimaryKey, Base):
@@ -107,11 +123,18 @@ class PromptRun(UUIDPrimaryKey, Base):
             "scan_id",
             "prompt_id",
             "provider",
+            "observation_index",
             "attempt_number",
-            name="uq_prompt_runs_scan_prompt_provider_attempt",
+            name="uq_prompt_runs_scan_prompt_provider_obs_attempt",
         ),
         UniqueConstraint("usage_event_id", name="uq_prompt_runs_usage_event"),
         CheckConstraint("attempt_number > 0", name="ck_prompt_runs_attempt_positive"),
+        CheckConstraint("observation_index > 0", name="ck_prompt_runs_observation_positive"),
+        Index(
+            "ix_prompt_runs_scan_observation",
+            "scan_id",
+            "observation_index",
+        ),
         CheckConstraint(
             "latency_ms IS NULL OR latency_ms >= 0", name="ck_prompt_runs_latency_non_negative"
         ),
@@ -175,6 +198,7 @@ class PromptRun(UUIDPrimaryKey, Base):
         String(20), nullable=False, default=PromptRunStatus.PENDING, index=True
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    observation_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
     response_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_request_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     provider_response_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

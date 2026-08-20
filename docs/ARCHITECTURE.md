@@ -67,9 +67,11 @@ single responsibility boundary consumed by routers and other services.
 | `PromptGenerationService` | Deterministic prompt generation (5 variants/keyword, EN/PT) |
 | `PromptSetService` | PromptSet versioning, regeneration, staleness detection |
 | `ScanCreationService` | STANDARD preflight, immutable plan creation, full quota reservation, dispatch |
-| `ScanExecutionService` | Duplicate-safe row claims and bounded no-retry PromptRun execution |
+| `ScanExecutionService` | Duplicate-safe row claims and bounded no-retry PromptRun execution; extended for CONFIDENCE round-by-round execution (Phase 8) |
 | `PromptRunResultRecorder` | Atomic evidence, source, cost, UsageEvent, and one-check commit |
 | `ScanFinalizationService` / `ScanRecoveryService` | Atomic terminal classification + unused quota release (single commit), idempotent reconciliation, run-count invariant, stale PENDING/RUNNING recovery without provider replay |
+| `ConfidenceScanCreationService` | Clones a baseline STANDARD scan's methodology to create a CONFIDENCE scan with repeated observations (Phase 8) |
+| `ConfidenceMetricsService` | Computes reliability metrics (measurement coverage, mention stability, confidence level) from repeated CONFIDENCE observations (Phase 8) |
 | `PricingService` / `ProviderCostCalculator` | Exact effective price resolution and Decimal/null-safe cost calculation |
 
 ### Entitlement resolution
@@ -240,6 +242,41 @@ VisibilityMetricsService computes metrics from persisted evidence
   finalization in a separate session. Analysis failure does not affect
   scan state.
 
+## Phase 8: Confidence Scans
+
+Phase 8 introduces `CONFIDENCE` scans that repeat the same Prompt × Provider
+cells `repeat_count` times to measure response reliability. A CONFIDENCE scan
+is always derived from a terminal `STANDARD` scan (the baseline) and clones its
+methodology.
+
+```
+Baseline STANDARD scan (terminal)
+   ↓
+ConfidenceScanCreationService clones methodology + creates repeated PromptRuns
+   ↓
+ScanExecutionService executes round-by-round (observation_index 1..N)
+   ↓
+ScanFinalizationService classifies terminal state + releases unused quota
+   ↓
+ConfidenceMetricsService computes reliability metrics from repeated observations
+```
+
+### New components
+
+| Component | Responsibility |
+|-----------|----------------|
+| `confidence_scan_creation_service.py` | Clones the baseline STANDARD scan's snapshotted prompt set, provider targets, execution modes, and model IDs. Creates `prompt_count × provider_count × repeat_count` `PromptRun` rows with appropriate `observation_index` values. Validates baseline scan is terminal and same-workspace. |
+| `confidence_metrics_service.py` | Computes reliability metrics from repeated CONFIDENCE observations: measurement coverage, repeat sufficiency, mention stability, round visibility, observed visibility range, and `MeasurementConfidenceLevel` (INSUFFICIENT/LOW/MEDIUM/HIGH). |
+| `confidence.py` (router) | Confidence scan API endpoints: create CONFIDENCE scan from baseline, retrieve confidence results and metrics. Tenant-isolated, role-enforced. |
+
+### Service extensions
+
+- **`ScanExecutionService`** — extended for round-by-round execution of
+  `CONFIDENCE` scans. Groups `PromptRun` rows by `observation_index`,
+  executes each round fully before advancing to the next, and reuses the
+  same atomic result recording, finalization, and stale-recovery machinery
+  as STANDARD scans.
+
 ## Technology stack
 
 | Layer | Technology |
@@ -290,7 +327,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | AI provider abstraction | IMPLEMENTED (Phase 5) |
 | Scan Engine | IMPLEMENTED (Phase 6) |
 | Brand / citation detection | IMPLEMENTED (Phase 7) |
-| Confidence Scans | PLANNED (Phase 8) |
+| Confidence Scans | IMPLEMENTED (Phase 8) |
 | Action Center | PLANNED (Phase 9) |
 | Verification system | PLANNED (Phase 10) |
 | Scheduling / email reports | PLANNED (Phase 11) |

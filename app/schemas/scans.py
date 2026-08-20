@@ -34,6 +34,8 @@ class ScanSummaryResponse(BaseModel):
     planned_ai_checks: int
     successful_runs: int
     failed_runs: int
+    repeat_count: int
+    baseline_scan_id: uuid.UUID | None
     providers: list[LLMProvider]
     created_at: datetime
     started_at: datetime | None
@@ -68,6 +70,7 @@ class PromptRunSummaryResponse(BaseModel):
     returned_model: str | None
     status: PromptRunStatus
     attempt_number: int
+    observation_index: int
     response_text: str | None
     provider_request_id: str | None
     provider_response_id: str | None

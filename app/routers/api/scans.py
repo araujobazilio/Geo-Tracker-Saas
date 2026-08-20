@@ -159,6 +159,8 @@ def _summary(view: ScanView) -> ScanSummaryResponse:
         planned_ai_checks=scan.planned_ai_checks,
         successful_runs=scan.successful_runs,
         failed_runs=scan.failed_runs,
+        repeat_count=scan.repeat_count,
+        baseline_scan_id=scan.baseline_scan_id,
         providers=view.providers,
         created_at=scan.created_at,
         started_at=scan.started_at,

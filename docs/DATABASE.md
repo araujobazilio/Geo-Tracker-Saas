@@ -75,6 +75,10 @@ Phase 7 adds `scan_entity_snapshots`, `scan_analyses`, `entity_mentions`, and
 `source_attributions` for deterministic brand/competitor visibility analysis.
 See "Analysis tables (Phase 7)" below.
 
+Phase 8 adds `repeat_count` and `baseline_scan_id` columns to `scans` and
+`observation_index` to `prompt_runs` for CONFIDENCE scan support. See
+"Confidence scan support migration (Phase 8)" below.
+
 Phase 3 adds four new tables and modifies two existing ones (see
 "Entitlements, usage and quota migration" below):
 
@@ -182,8 +186,9 @@ can never be orphaned from its originating reservation.
   on `workspace_id` where `is_primary = true` — at most one primary billing account
   per workspace at any time
 - `scans (workspace_id, idempotency_key)` and `scans.quota_reservation_id` — unique
-- `prompt_runs (scan_id, prompt_id, provider, attempt_number)` and
-  `prompt_runs.usage_event_id` — unique
+- `prompt_runs (scan_id, prompt_id, provider, observation_index, attempt_number)` and
+  `prompt_runs.usage_event_id` — unique (Phase 8: `observation_index` added to the
+  composite key so repeated observations of the same cell are distinct rows)
 - `response_sources (prompt_run_id, ordinal)` — unique ordered evidence
 - `provider_price_rules.pricing_key` and
   `(provider, provider_surface, model, effective_from)` — unique exact rules
@@ -514,6 +519,44 @@ Most-specific domain wins when multiple tracked domains could match.
 Unique constraint: `(scan_analysis_id, response_source_id, entity_snapshot_id)` —
 `uq_source_attributions_analysis_source_entity`.
 
+## Confidence scan support migration (Phase 8)
+
+**Name:** `add confidence scan support`
+**Revision ID:** `e7f8a9b0c1d2`
+**Revises:** `d677b6e44e9b`
+
+Adds CONFIDENCE scan support: repeated observations of the same
+Prompt × Provider cell to measure response reliability.
+
+Modifies two existing tables:
+
+| Table | Change |
+|-------|--------|
+| `scans` | Adds `repeat_count` column (Integer, NOT NULL, default 1, CHECK `> 0`). Adds `baseline_scan_id` column (UUID, NULLABLE, self-FK → `scans.id` `ON DELETE RESTRICT`). `repeat_count = 1` for STANDARD scans; `> 1` for CONFIDENCE scans. `baseline_scan_id` is set only for CONFIDENCE scans and references the baseline STANDARD scan. |
+| `prompt_runs` | Adds `observation_index` column (Integer, NOT NULL, default 1, CHECK `> 0`). Identifies which repeated observation (1..`repeat_count`) this run represents. Always 1 for STANDARD scans. |
+
+The `baseline_scan_id` self-referential foreign key uses `ON DELETE RESTRICT`
+so a baseline STANDARD scan cannot be deleted while a CONFIDENCE scan derived
+from it still exists.
+
+Updates the existing `prompt_runs` unique constraint from
+`(scan_id, prompt_id, provider, attempt_number)` to
+`(scan_id, prompt_id, provider, observation_index, attempt_number)` so that
+repeated observations of the same cell are distinct rows.
+
+Adds:
+- `scans.repeat_count` column with CHECK `> 0`
+- `scans.baseline_scan_id` column with self-FK → `scans.id` `ON DELETE RESTRICT`
+- `prompt_runs.observation_index` column with CHECK `> 0`
+- Updated unique constraint `uq_prompt_runs_scan_prompt_provider_obs_attempt`
+  on `(scan_id, prompt_id, provider, observation_index, attempt_number)`
+- Composite index `ix_prompt_runs_scan_observation` on
+  `(scan_id, observation_index)` for round-by-round execution queries
+
+Backfills:
+- Existing `scans` rows get `repeat_count = 1` and `baseline_scan_id = NULL`
+- Existing `prompt_runs` rows get `observation_index = 1`
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
@@ -535,6 +578,9 @@ Phase 7 analysis indexes: `scan_entity_snapshots.scan_id`,
 `source_attributions.scan_analysis_id`,
 `source_attributions.response_source_id`,
 `source_attributions.entity_snapshot_id`.
+
+Phase 8 confidence scan indexes: `prompt_runs (scan_id, observation_index)`
+composite index for round-by-round execution queries.
 
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`

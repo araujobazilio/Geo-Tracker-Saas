@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     pricing_require_rule_for_execution: bool = True
     celery_broker_url: str = ""
 
+    # --- Confidence scans (Phase 8) ---
+    confidence_scan_default_repeats: int = 3
+    confidence_scan_max_repeats: int = 5
+
     # --- AI providers ---
     openai_api_key: SecretStr = SecretStr("")
     openai_scan_model: str = ""
@@ -142,6 +146,8 @@ class Settings(BaseSettings):
         "scan_max_concurrency",
         "scan_reservation_ttl_seconds",
         "scan_stale_after_seconds",
+        "confidence_scan_default_repeats",
+        "confidence_scan_max_repeats",
     )
     @classmethod
     def _validate_positive_integer_setting(cls, v: int) -> int:
@@ -160,6 +166,7 @@ class Settings(BaseSettings):
         The real secret value is NEVER included in the error message.
         """
         if self.app_env in {"development", "test"}:
+            self._validate_confidence_scan_settings()
             return self
 
         secret = self.app_secret_key.get_secret_value()
@@ -180,7 +187,26 @@ class Settings(BaseSettings):
         # Enforce secure cookies in staging/production.
         if not self.session_cookie_secure:
             self.session_cookie_secure = True
+        self._validate_confidence_scan_settings()
         return self
+
+    def _validate_confidence_scan_settings(self) -> None:
+        """Validate confidence scan repeat-count configuration bounds.
+
+        - default >= 2 (a confidence scan must repeat at least twice)
+        - max >= default
+        - max <= 10 (absolute upper bound to prevent operational abuse)
+        """
+        if self.confidence_scan_default_repeats < 2:
+            raise ValueError("CONFIDENCE_SCAN_DEFAULT_REPEATS must be >= 2.")
+        if self.confidence_scan_max_repeats < self.confidence_scan_default_repeats:
+            raise ValueError(
+                "CONFIDENCE_SCAN_MAX_REPEATS must be >= CONFIDENCE_SCAN_DEFAULT_REPEATS."
+            )
+        if self.confidence_scan_max_repeats > 10:
+            raise ValueError(
+                "CONFIDENCE_SCAN_MAX_REPEATS must be <= 10 to prevent operational abuse."
+            )
 
     @property
     def is_production(self) -> bool:

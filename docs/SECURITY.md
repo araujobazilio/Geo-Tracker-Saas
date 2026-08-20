@@ -3,8 +3,9 @@
 ## Status
 
 Phases 0–6 establish the implemented application, tenant, quota, provider, and
-Scan Engine security boundaries described below. Additional launch hardening is
-Phase 17.
+Scan Engine security boundaries described below. Phase 7 adds analysis
+endpoint security. Phase 8 adds confidence scan tenant isolation. Additional
+launch hardening is Phase 17.
 
 ## Implemented
 
@@ -166,6 +167,44 @@ Security properties:
 - **Evidence immutability:** `ScanEntitySnapshots` are immutable. Users
   cannot modify entity terms after scan creation to influence analysis
   results.
+
+## Phase 8: Confidence scan security
+
+Phase 8 adds CONFIDENCE scan endpoints that create repeated-observation
+scans from a baseline STANDARD scan and retrieve reliability metrics.
+
+Security properties:
+
+- **Baseline scan tenant isolation:** a CONFIDENCE scan can only be
+  created from a baseline scan that belongs to the same workspace.
+  Workspace A cannot use Workspace B's scan as a baseline — the
+  baseline lookup is workspace-scoped and returns 404 (not 403) for
+  cross-tenant access, consistent with all other workspace-scoped
+  resources.
+- **Confidence results tenant isolation:** confidence scan results and
+  reliability metrics are scoped to the owning workspace. Workspace A
+  cannot read Workspace B's confidence results — cross-tenant access
+  returns 404 (not 403), consistent with all other workspace-scoped
+  endpoints.
+- **Role matrix:**
+
+  | Role | Create CONFIDENCE scan | Read confidence results |
+  |------|------------------------|-------------------------|
+  | OWNER | Yes | Yes |
+  | ADMIN | Yes | Yes |
+  | MEMBER | No | Yes |
+
+  Write operations (create CONFIDENCE scan) require ADMIN or OWNER.
+  Read operations (retrieve confidence results and metrics) require
+  MEMBER or above.
+- **Entitlement gating:** CONFIDENCE scan creation requires the
+  `confidence_scans` entitlement flag. A workspace without this
+  entitlement cannot create CONFIDENCE scans, regardless of role.
+- **No cost-injection vector beyond STANDARD:** CONFIDENCE scans use
+  the same full-reservation-before-dispatch, no-retry, atomic-commit
+  model as STANDARD scans. Failed observations release unused quota at
+  finalization. There is no endpoint that lets a user trigger
+  uncontrolled provider spending.
 
 ## Planned (later phases)
 

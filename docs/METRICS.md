@@ -149,6 +149,105 @@ All metrics are computed from persisted evidence. The same analysis
 evidence always produces the same metrics. No randomness, no AI, no
 external calls.
 
+## Confidence / Reliability Metrics (Phase 8)
+
+**IMPLEMENTED (Phase 8).** `ConfidenceMetricsService` computes
+reliability metrics from the repeated observations of a `CONFIDENCE`
+scan. These metrics quantify how stable a provider's responses are
+across repeated executions of the same Prompt × Provider cell.
+
+### Methodology version
+
+```
+CONFIDENCE_METHODOLOGY_VERSION = "repeat-reliability-v1"
+```
+
+This is **NOT a statistical confidence interval**. It is a deterministic
+heuristic that classifies the reliability of repeated observations into
+discrete levels based on coverage and stability.
+
+### Metric definitions
+
+#### Measurement coverage
+
+```
+measurement_coverage = succeeded_observations / planned_observations
+```
+
+- `planned_observations`: total `PromptRun` rows for the cell
+  (`repeat_count`).
+- `succeeded_observations`: `SUCCEEDED` runs only.
+- **Range**: [0.0, 1.0]
+- Failed observations reduce coverage; they are not re-executed.
+
+#### Repeat sufficiency
+
+```
+repeat_sufficiency = succeeded_observations / repeat_count
+```
+
+Indicates whether enough repeated observations succeeded to make a
+reliability claim. Low sufficiency means too many observations failed
+to draw conclusions.
+
+#### Mention stability
+
+For a given entity, mention stability measures how consistently the
+entity is mentioned across repeated observations of the same cell:
+
+```
+mention_stability = observations_with_mention / succeeded_observations
+```
+
+- `observations_with_mention`: succeeded observations where the entity
+  was mentioned.
+- **Range**: [0.0, 1.0]
+- `1.0` means the entity was mentioned in every successful observation.
+- `0.0` means the entity was never mentioned across successful
+  observations.
+
+#### Round visibility
+
+Round visibility reports whether the entity was visible (mentioned) in
+each individual observation round:
+
+| Field | Description |
+|-------|-------------|
+| `observation_index` | The round number (1..`repeat_count`) |
+| `visible` | Boolean — entity was mentioned in this observation |
+
+#### Observed visibility range
+
+Across all succeeded observations for a cell, the observed visibility
+range captures the spread of mention counts or visibility rates:
+
+| Field | Description |
+|-------|-------------|
+| `min_visibility` | Lowest visibility rate across observations |
+| `max_visibility` | Highest visibility rate across observations |
+| `visibility_range` | `max_visibility - min_visibility` |
+
+A range of `0.0` means perfectly stable visibility; a large range
+indicates high variability between rounds.
+
+### MeasurementConfidenceLevel
+
+`ConfidenceMetricsService` classifies each cell into a heuristic
+confidence level:
+
+| Level | Meaning |
+|-------|---------|
+| `INSUFFICIENT` | Too few succeeded observations to make any claim |
+| `LOW` | Minimal repeats succeeded; reliability claim is weak |
+| `MEDIUM` | Moderate repeats succeeded with acceptable stability |
+| `HIGH` | Many repeats succeeded with high stability |
+
+The level is determined by a combination of measurement coverage, repeat
+sufficiency, and mention stability. The default of 3 repeats can reach
+at most `MEDIUM`. `HIGH` requires **>= 5 repeats** (`repeat_count >= 5`),
+ensuring that high-confidence claims are backed by sufficient
+observations.
+
 ## See also
 
 - `docs/DETECTION_ENGINE.md` — detection rules and analysis lifecycle

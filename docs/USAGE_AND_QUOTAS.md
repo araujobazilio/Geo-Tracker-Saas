@@ -319,6 +319,45 @@ without encountering stale transaction state.
 | `scan_reservation_ttl_seconds` | `21600` (6 hours) | Explicit TTL used for the full STANDARD scan reservation |
 | `scan_stale_after_seconds` | `7200` (2 hours) | Age after which RUNNING unresolved scan work is failed without provider retry |
 
+## Confidence scan quota economics (Phase 8)
+
+A `CONFIDENCE` scan repeats the same Prompt × Provider cells `repeat_count`
+times, so the plan is larger than the baseline STANDARD scan:
+
+```
+planned_ai_checks = prompt_count × provider_count × repeat_count
+```
+
+### Full reservation before execution
+
+As with STANDARD scans, **all** planned AI Checks are reserved before any
+provider call is dispatched. Partial reservation is not allowed. If the
+workspace cannot reserve the full `planned_ai_checks` amount, the CONFIDENCE
+scan is rejected with `QuotaExceededError` and zero checks are consumed.
+
+### Failed observation release
+
+A failed observation (`FAILED` PromptRun) commits no `UsageEvent` and consumes
+zero AI Checks, identical to STANDARD scan failure semantics. At finalization,
+`ScanFinalizationService` releases all remaining uncommitted reservation
+balance in one atomic transaction. This means only succeeded observations
+consume customer quota; failed observations release their reserved checks back
+to the pool.
+
+### Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `confidence_scan_default_repeats` | `3` | Default `repeat_count` when a CONFIDENCE scan is created without an explicit value |
+| `confidence_scan_max_repeats` | `5` | Maximum allowed `repeat_count`; higher values are rejected |
+
+### Entitlement requirement
+
+CONFIDENCE scans require the `confidence_scans` entitlement flag on the
+workspace's effective plan. A workspace without this entitlement cannot create
+CONFIDENCE scans; the creation endpoint returns a 403/entitlement error before
+any quota is reserved.
+
 ## API endpoints
 
 | Method | Path | Description |

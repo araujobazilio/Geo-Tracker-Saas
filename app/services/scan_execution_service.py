@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
@@ -16,6 +17,7 @@ from app.core.enums import (
     ProviderExecutionMode,
     QuotaReservationStatus,
     ScanStatus,
+    ScanType,
 )
 from app.core.logging import get_logger
 from app.models.quota_reservation import QuotaReservation
@@ -34,7 +36,12 @@ logger = get_logger("app.scan_execution")
 
 
 class ScanExecutionService:
-    """Execute each planned PromptRun once with bounded async concurrency."""
+    """Execute each planned PromptRun once with bounded async concurrency.
+
+    For CONFIDENCE scans, runs are executed round-by-round: all
+    observation_index=1 runs finish before observation_index=2 begins.
+    Within each round, bounded concurrency is used.
+    """
 
     def __init__(
         self,
@@ -52,14 +59,15 @@ class ScanExecutionService:
     async def execute_scan(self, scan_id: uuid.UUID) -> bool:
         if not self._claim_scan(scan_id):
             return False
-        run_ids = self._list_run_ids(scan_id)
-        semaphore = asyncio.Semaphore(self._settings.scan_max_concurrency)
 
-        async def bounded(run_id: uuid.UUID) -> None:
-            async with semaphore:
-                await self._execute_run(run_id)
+        # Determine scan type to choose execution strategy.
+        scan_type, repeat_count = self._get_scan_type_and_repeats(scan_id)
 
-        await asyncio.gather(*(bounded(run_id) for run_id in run_ids))
+        if scan_type == ScanType.CONFIDENCE and repeat_count > 1:
+            await self._execute_confidence_rounds(scan_id, repeat_count)
+        else:
+            await self._execute_standard_round(scan_id)
+
         with self._factory() as session:
             ScanFinalizationService(
                 session,
@@ -67,6 +75,44 @@ class ScanExecutionService:
                 analysis_session_factory=self._factory,
             ).finalize(scan_id, trigger_analysis=True)
         return True
+
+    def _get_scan_type_and_repeats(self, scan_id: uuid.UUID) -> tuple[ScanType, int]:
+        with self._factory() as session:
+            scan = session.get(Scan, scan_id)
+            if scan is None:
+                return ScanType.STANDARD, 1
+            return scan.scan_type, scan.repeat_count
+
+    async def _execute_standard_round(self, scan_id: uuid.UUID) -> None:
+        """Execute all runs with bounded concurrency (STANDARD behavior)."""
+        run_ids = self._list_run_ids(scan_id)
+        await self._execute_run_ids(run_ids)
+
+    async def _execute_confidence_rounds(self, scan_id: uuid.UUID, repeat_count: int) -> None:
+        """Execute runs round-by-round.
+
+        For each observation_index from 1 to repeat_count:
+        - Gather all run IDs for that round.
+        - Execute them with bounded concurrency.
+        - Wait for the round to finish before starting the next.
+
+        This reduces accidental burst correlation and prevents sending
+        the same Prompt x Provider multiple times simultaneously.
+        """
+        for obs_idx in range(1, repeat_count + 1):
+            run_ids = self._list_run_ids_by_observation(scan_id, obs_idx)
+            if not run_ids:
+                continue
+            await self._execute_run_ids(run_ids)
+
+    async def _execute_run_ids(self, run_ids: list[uuid.UUID]) -> None:
+        semaphore = asyncio.Semaphore(self._settings.scan_max_concurrency)
+
+        async def bounded(run_id: uuid.UUID) -> None:
+            async with semaphore:
+                await self._execute_run(run_id)
+
+        await asyncio.gather(*(bounded(run_id) for run_id in run_ids))
 
     def _claim_scan(self, scan_id: uuid.UUID) -> bool:
         with self._factory() as session:
@@ -153,6 +199,22 @@ class ScanExecutionService:
     def _list_run_ids(self, scan_id: uuid.UUID) -> list[uuid.UUID]:
         with self._factory() as session:
             return PromptRunRepository(session).list_ids_by_scan(scan_id)
+
+    def _list_run_ids_by_observation(
+        self, scan_id: uuid.UUID, observation_index: int
+    ) -> list[uuid.UUID]:
+        """List run IDs for a specific observation round in deterministic order."""
+        with self._factory() as session:
+            return list(
+                session.execute(
+                    select(PromptRun.id)
+                    .where(
+                        PromptRun.scan_id == scan_id,
+                        PromptRun.observation_index == observation_index,
+                    )
+                    .order_by(PromptRun.created_at, PromptRun.id)
+                ).scalars()
+            )
 
     async def _execute_run(self, run_id: uuid.UUID) -> None:
         claimed = self._claim_run(run_id)

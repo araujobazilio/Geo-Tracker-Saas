@@ -127,6 +127,7 @@ class ScanCreationService:
                 planned_ai_checks=len(prompts) * len(targets),
                 successful_runs=0,
                 failed_runs=0,
+                repeat_count=1,
             )
             self._scans.create(scan)
             planned_runs = [
@@ -139,6 +140,7 @@ class ScanCreationService:
                     requested_model=target.requested_model,
                     status=PromptRunStatus.PENDING,
                     attempt_number=1,
+                    observation_index=1,
                 )
                 for prompt in prompts
                 for target in targets
@@ -191,7 +193,11 @@ class ScanCreationService:
         self, project: Project, scan_type: ScanType
     ) -> tuple[list[Prompt], list[ProviderExecutionTarget]]:
         if scan_type != ScanType.STANDARD:
-            raise ValidationError(f"Scan type {scan_type.value} is not supported in Phase 6.")
+            raise ValidationError(
+                f"Scan type {scan_type.value} is not supported by the generic "
+                f"scan creation endpoint. Use the dedicated confidence endpoint "
+                f"for CONFIDENCE scans."
+            )
         if project.status != ProjectStatus.ACTIVE:
             raise ConflictError("Project must be ACTIVE to start a scan.")
 
