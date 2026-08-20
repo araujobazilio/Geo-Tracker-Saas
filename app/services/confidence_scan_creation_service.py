@@ -284,7 +284,7 @@ class ConfidenceScanCreationService:
                 "Baseline scan has no successful runs; cannot repeat measurement."
             )
         # Check zero unresolved PromptRuns.
-        succeeded, failed, unresolved = self._runs.terminal_counts(baseline.id)
+        _succeeded, _failed, unresolved = self._runs.terminal_counts(baseline.id)
         if unresolved > 0:
             self._session.rollback()
             raise ValidationError("Baseline scan has unresolved PromptRuns.")
@@ -349,14 +349,14 @@ class ConfidenceScanCreationService:
             if target.provider not in entitlements.allowed_providers:
                 self._session.rollback()
                 raise EntitlementDeniedError(
-                    f"Provider '{target.provider.value}' is no longer allowed "
+                    f"Provider '{target.provider}' is no longer allowed "
                     f"by the current plan. Confidence Scan requires all "
                     f"baseline providers to remain allowed."
                 )
             if target.provider not in configured:
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider.value}' is no longer enabled "
+                    f"Provider '{target.provider}' is no longer enabled "
                     f"for this project. Confidence Scan requires all "
                     f"baseline providers to remain enabled."
                 )
@@ -369,7 +369,7 @@ class ConfidenceScanCreationService:
             ):
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider.value}' does not support " f"MODEL_ONLY mode."
+                    f"Provider '{target.provider}' does not support " f"MODEL_ONLY mode."
                 )
             if (
                 target.mode == ProviderExecutionMode.WEB_GROUNDED
@@ -377,7 +377,7 @@ class ConfidenceScanCreationService:
             ):
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider.value}' does not support " f"WEB_GROUNDED mode."
+                    f"Provider '{target.provider}' does not support " f"WEB_GROUNDED mode."
                 )
 
         return targets
@@ -391,7 +391,7 @@ class ConfidenceScanCreationService:
             return
         now = datetime.now(UTC)
         for target in targets:
-            if target.provider.value == "PERPLEXITY":
+            if target.provider == LLMProvider.PERPLEXITY:
                 continue
             try:
                 self._pricing.resolve(
