@@ -75,19 +75,21 @@ class Opportunity(UUIDPrimaryKey, TimestampMixin, Base):
         UUIDType, ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    opportunity_type: Mapped[OpportunityType] = mapped_column(nullable=False, index=True)
-    status: Mapped[OpportunityStatus] = mapped_column(
-        nullable=False, index=True, default=OpportunityStatus.OPEN
+    opportunity_type: Mapped[OpportunityType] = mapped_column(
+        String(50), nullable=False, index=True
     )
-    priority: Mapped[OpportunityPriority] = mapped_column(nullable=False, index=True)
+    status: Mapped[OpportunityStatus] = mapped_column(
+        String(20), nullable=False, index=True, default=OpportunityStatus.OPEN
+    )
+    priority: Mapped[OpportunityPriority] = mapped_column(String(10), nullable=False, index=True)
     action_engine_version: Mapped[str] = mapped_column(String(50), nullable=False)
 
     competitor_entity_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    provider: Mapped[LLMProvider | None] = mapped_column(nullable=True, index=True)
+    provider: Mapped[LLMProvider | None] = mapped_column(String(20), nullable=True, index=True)
     prompt_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType, ForeignKey("prompts.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    prompt_type: Mapped[PromptType] = mapped_column(nullable=False)
+    prompt_type: Mapped[PromptType] = mapped_column(String(20), nullable=False)
 
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
@@ -161,7 +163,7 @@ class OpportunityOccurrence(UUIDPrimaryKey, Base):
         nullable=False,
     )
 
-    priority_at_detection: Mapped[OpportunityPriority] = mapped_column(nullable=False)
+    priority_at_detection: Mapped[OpportunityPriority] = mapped_column(String(10), nullable=False)
 
     brand_visibility: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     competitor_visibility: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
@@ -205,7 +207,7 @@ class OpportunityEvidence(UUIDPrimaryKey, Base):
     )
 
     evidence_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    evidence_type: Mapped[OpportunityEvidenceType] = mapped_column(nullable=False)
+    evidence_type: Mapped[OpportunityEvidenceType] = mapped_column(String(30), nullable=False)
 
     prompt_id: Mapped[uuid.UUID | None] = mapped_column(
         UUIDType, ForeignKey("prompts.id", ondelete="RESTRICT"), nullable=True
@@ -217,7 +219,7 @@ class OpportunityEvidence(UUIDPrimaryKey, Base):
         UUIDType, ForeignKey("response_sources.id", ondelete="RESTRICT"), nullable=True
     )
 
-    provider: Mapped[LLMProvider | None] = mapped_column(nullable=True)
+    provider: Mapped[LLMProvider | None] = mapped_column(String(20), nullable=True)
 
     metric_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
