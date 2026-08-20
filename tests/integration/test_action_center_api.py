@@ -525,12 +525,12 @@ def _truncate_all_tables() -> None:
 
     API tests commit data directly (via _db_session), bypassing the
     db_session fixture's transaction rollback. This truncates all tables
-    in FK-safe order to prevent pollution of subsequent integration tests.
+    to prevent pollution of subsequent integration tests.
     """
     from sqlalchemy import text
 
-    # Order matters: child tables first, then parent tables.
-    # Using CASCADE to handle any remaining FK references.
+    # TRUNCATE with CASCADE handles all FK constraints automatically.
+    # A single statement avoids ordering issues.
     tables = [
         "opportunity_evidence",
         "opportunity_occurrences",
@@ -561,9 +561,9 @@ def _truncate_all_tables() -> None:
         "audit_logs",
         "sessions",
     ]
+    table_list = ", ".join(f'"{t}"' for t in tables)
     with _db_session() as db:
-        for table in tables:
-            db.execute(text(f'DELETE FROM "{table}"'))
+        db.execute(text(f"TRUNCATE TABLE {table_list} CASCADE"))
         db.commit()
 
 
