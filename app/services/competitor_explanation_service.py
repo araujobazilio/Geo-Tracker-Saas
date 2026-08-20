@@ -484,7 +484,10 @@ class CompetitorExplanationService:
             .where(PromptRun.scan_id == scan_id)
             .order_by(PromptRun.created_at, PromptRun.id)
         ).all()
-        return [(run, prompt) for run, prompt in rows]
+        result: list[tuple[PromptRun, Prompt]] = []
+        for run, prompt in rows:
+            result.append((run, prompt))
+        return result
 
     def _load_mentions(
         self, analysis_id: uuid.UUID, run_ids: set[uuid.UUID]
