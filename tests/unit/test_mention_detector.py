@@ -208,3 +208,144 @@ class TestDetectMentions:
         entity_ids = {m.entity_snapshot_id for m in result.mentions}
         assert "brand-1" in entity_ids
         assert "comp-1" in entity_ids
+
+
+class TestDomainBoundary:
+    """Domain mention boundary tests — Phase 7.1 hardening."""
+
+    def test_notacme_does_not_match_acme(self) -> None:
+        """notacme.com must NOT match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Visit notacme.com today.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 0
+
+    def test_fakeacme_does_not_match_acme(self) -> None:
+        """fakeacme.com must NOT match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("fakeacme.com is fake.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 0
+
+    def test_hostile_suffix_does_not_match(self) -> None:
+        """acme.com.attacker.test must NOT match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Go to acme.com.attacker.test.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 0
+
+    def test_fooacme_does_not_match(self) -> None:
+        """fooacme.com must NOT match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("fooacme.com is unrelated.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 0
+
+    def test_exact_domain_match(self) -> None:
+        """acme.com should match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Visit acme.com today.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+        assert domain_mentions[0].matched_text == "acme.com"
+
+    def test_uppercase_domain_match(self) -> None:
+        """ACME.COM should match acme.com (case-insensitive)."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Visit ACME.COM today.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+
+    def test_www_prefix_domain_match(self) -> None:
+        """www.acme.com should match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Check www.acme.com today.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+        assert domain_mentions[0].matched_text == "acme.com"
+
+    def test_url_scheme_domain_match(self) -> None:
+        """https://acme.com/path should match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("See https://acme.com/page for info.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+        assert domain_mentions[0].matched_text == "acme.com"
+
+    def test_subdomain_domain_match(self) -> None:
+        """blog.acme.com should match acme.com (subdomain policy)."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Read blog.acme.com for news.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+        assert domain_mentions[0].matched_text == "acme.com"
+
+    def test_punctuation_around_domain(self) -> None:
+        """Text punctuation around acme.com should still match."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Visit acme.com, it's great.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+
+    def test_domain_with_trailing_period(self) -> None:
+        """acme.com. (sentence-ending period) should match."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("I recommend acme.com.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+
+    def test_domain_with_port(self) -> None:
+        """acme.com:8080 should match acme.com."""
+        terms, _ = build_entity_terms(_snapshots())
+        result = detect_mentions("Access acme.com:8080 locally.", terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+
+    def test_domain_spans_correct(self) -> None:
+        """Start/end indices point to the exact domain substring."""
+        terms, _ = build_entity_terms(_snapshots())
+        text = "Visit acme.com today."
+        result = detect_mentions(text, terms)
+        domain_mentions = [m for m in result.mentions if m.match_type == EntityMatchType.DOMAIN]
+        assert len(domain_mentions) == 1
+        m = domain_mentions[0]
+        assert text[m.start_index : m.end_index] == "acme.com"
+
+
+class TestUnicodeNormalization:
+    """Unicode normalization regression tests — Phase 7.1.
+
+    The detection engine NFKC-normalizes configured terms but matches
+    against the ORIGINAL response text. This means:
+
+    - If the response uses the same Unicode form as the configured term,
+      matching works correctly and offsets are accurate.
+    - If the response uses a canonically equivalent but different Unicode
+      form (e.g., decomposed NFD vs composed NFC), the regex may NOT
+      match because the raw byte sequences differ.
+
+    This is a known limitation. Offsets are always relative to the
+    original response text and are never corrupted by normalization.
+    """
+
+    def test_composed_acute_matches_composed(self) -> None:
+        """Café (NFC) in both config and response → match."""
+        terms, _ = build_entity_terms(_snapshots(brand_name="Café"))
+        result = detect_mentions("I recommend Café for coffee.", terms)
+        assert len(result.mentions) == 1
+        assert result.mentions[0].matched_text == "Café"
+
+    def test_case_insensitive_composed(self) -> None:
+        """CAFÉ (uppercase NFC) matches Café (NFC)."""
+        terms, _ = build_entity_terms(_snapshots(brand_name="Café"))
+        result = detect_mentions("CAFÉ is great.", terms)
+        assert len(result.mentions) == 1
+
+    def test_offsets_against_original_text(self) -> None:
+        """Offsets must index into the ORIGINAL response text."""
+        terms, _ = build_entity_terms(_snapshots(brand_name="Café"))
+        text = "I recommend Café for coffee."
+        result = detect_mentions(text, terms)
+        assert len(result.mentions) == 1
+        m = result.mentions[0]
+        assert text[m.start_index : m.end_index] == "Café"

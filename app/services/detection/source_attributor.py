@@ -8,6 +8,8 @@ Key rules:
 - Exact domain match or subdomain match (host == domain OR
   host ends with "." + domain).
 - Most-specific domain wins when multiple tracked domains match.
+- Ambiguous matches (multiple equally-specific domains) are NOT
+  attributed and produce an AMBIGUOUS_SOURCE_DOMAIN warning.
 - Invalid URLs are skipped with a warning, not a failure.
 - Source title/entity semantic analysis is NOT performed — only
   hostname attribution counts as "owned citation".
@@ -18,9 +20,18 @@ from __future__ import annotations
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from app.services.detection.mention_detector import WarningCode
+
+
+class AttributionOutcome(str, Enum):
+    """Outcome of attempting to attribute a single source."""
+
+    NO_MATCH = "NO_MATCH"
+    ATTRIBUTED = "ATTRIBUTED"
+    AMBIGUOUS = "AMBIGUOUS"
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,19 @@ class Attribution:
     entity_snapshot_id: str
     source_host: str
     attribution_type: str = "OWNED_DOMAIN"
+
+
+@dataclass(frozen=True)
+class SourceAttributionDecision:
+    """Typed result of attributing a single source host.
+
+    Distinguishes NO_MATCH (no tracked domain matched), ATTRIBUTED
+    (exactly one entity matched), and AMBIGUOUS (multiple equally-
+    specific domains matched — no attribution, caller should warn).
+    """
+
+    outcome: AttributionOutcome
+    attribution: Attribution | None = None
 
 
 @dataclass
@@ -135,15 +159,18 @@ def build_entity_domains(snapshots: list[dict[str, Any]]) -> list[EntityDomain]:
 def attribute_source(
     source_host: str,
     entity_domains: list[EntityDomain],
-) -> Attribution | None:
+) -> SourceAttributionDecision:
     """Attribute a single source host to the most-specific matching entity.
 
-    Returns None if no entity domain matches.
-    If multiple domains have the same specificity and both match, returns
-    None (ambiguous — caller should record a warning).
+    Returns a SourceAttributionDecision with outcome:
+    - NO_MATCH: no tracked domain matched.
+    - ATTRIBUTED: exactly one entity matched (most-specific wins).
+    - AMBIGUOUS: multiple equally-specific domains matched; no
+      attribution is produced. The caller should record an
+      AMBIGUOUS_SOURCE_DOMAIN warning.
     """
     if not source_host:
-        return None
+        return SourceAttributionDecision(outcome=AttributionOutcome.NO_MATCH)
 
     matching: list[EntityDomain] = []
     for ed in entity_domains:
@@ -151,13 +178,16 @@ def attribute_source(
             matching.append(ed)
 
     if not matching:
-        return None
+        return SourceAttributionDecision(outcome=AttributionOutcome.NO_MATCH)
 
     if len(matching) == 1:
         ed = matching[0]
-        return Attribution(
-            entity_snapshot_id=ed.entity_snapshot_id,
-            source_host=source_host,
+        return SourceAttributionDecision(
+            outcome=AttributionOutcome.ATTRIBUTED,
+            attribution=Attribution(
+                entity_snapshot_id=ed.entity_snapshot_id,
+                source_host=source_host,
+            ),
         )
 
     # Multiple matches: find the most specific (most labels).
@@ -166,13 +196,16 @@ def attribute_source(
 
     if len(most_specific) == 1:
         ed = most_specific[0]
-        return Attribution(
-            entity_snapshot_id=ed.entity_snapshot_id,
-            source_host=source_host,
+        return SourceAttributionDecision(
+            outcome=AttributionOutcome.ATTRIBUTED,
+            attribution=Attribution(
+                entity_snapshot_id=ed.entity_snapshot_id,
+                source_host=source_host,
+            ),
         )
 
     # Ambiguous: equally specific domains match. Don't attribute.
-    return None
+    return SourceAttributionDecision(outcome=AttributionOutcome.AMBIGUOUS)
 
 
 def attribute_sources(
@@ -197,10 +230,17 @@ def attribute_sources(
             )
             continue
 
-        attr = attribute_source(host, entity_domains)
-        if attr is not None:
-            result.attributions.append(attr)
-        # If no match, the source simply has no attribution — that's
-        # normal and not a warning.
+        decision = attribute_source(host, entity_domains)
+        if decision.outcome == AttributionOutcome.ATTRIBUTED and decision.attribution:
+            result.attributions.append(decision.attribution)
+        elif decision.outcome == AttributionOutcome.AMBIGUOUS:
+            result.warnings.append(
+                (
+                    WarningCode.AMBIGUOUS_SOURCE_DOMAIN.value,
+                    f"Source host '{host}' matches multiple equally-specific tracked domains; "
+                    "no attribution assigned.",
+                )
+            )
+        # NO_MATCH: the source simply has no attribution — not a warning.
 
     return result

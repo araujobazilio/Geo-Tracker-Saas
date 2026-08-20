@@ -434,7 +434,7 @@ def test_finalization_failure_rolls_back_scan_state_and_quota_release(
     # Retry finalization with release working.
     monkeypatch.undo()
     assert original_release is QuotaService.release_reservation
-    ScanFinalizationService(db_session).finalize(scan.id)
+    ScanFinalizationService(db_session).finalize(scan.id, trigger_analysis=False)
     db_session.expire_all()
     scan = db_session.get(Scan, scan.id)
     reservation = db_session.get(QuotaReservation, scan.quota_reservation_id)
@@ -460,9 +460,9 @@ def test_repeated_finalization_is_idempotent(db_session: Session) -> None:
     scan = _create(db_session, workspace, project, user, FakeDispatcher(), key="idempotent-fin")
     _execute(db_session, scan.id, adapter)
 
-    status1 = ScanFinalizationService(db_session).finalize(scan.id)
-    status2 = ScanFinalizationService(db_session).finalize(scan.id)
-    status3 = ScanFinalizationService(db_session).finalize(scan.id)
+    status1 = ScanFinalizationService(db_session).finalize(scan.id, trigger_analysis=False)
+    status2 = ScanFinalizationService(db_session).finalize(scan.id, trigger_analysis=False)
+    status3 = ScanFinalizationService(db_session).finalize(scan.id, trigger_analysis=False)
 
     assert status1 == status2 == status3 == ScanStatus.COMPLETED
     db_session.expire_all()
@@ -507,7 +507,7 @@ def test_legacy_terminal_scan_with_active_reservation_self_heals(db_session: Ses
     db_session.expire_all()
 
     # finalize() should reconcile: release the remaining 1 reserved check.
-    status = ScanFinalizationService(db_session).finalize(scan.id)
+    status = ScanFinalizationService(db_session).finalize(scan.id, trigger_analysis=False)
     db_session.expire_all()
     scan = db_session.get(Scan, scan.id)
     reservation = db_session.get(QuotaReservation, scan.quota_reservation_id)
@@ -762,7 +762,7 @@ def test_finalizer_detects_run_count_mismatch(db_session: Session) -> None:
         pytest.raises(InfrastructureError, match="data corruption"),
         _factory(db_session)() as session,
     ):
-        ScanFinalizationService(session).finalize(scan_id)
+        ScanFinalizationService(session).finalize(scan_id, trigger_analysis=False)
 
     # Scan must NOT be terminal.
     db_session.expire_all()
@@ -840,7 +840,7 @@ def test_concurrent_finalizers_produce_one_effective_release(db_session: Session
     def finalize_once() -> None:
         with independent_factory() as session:
             barrier.wait(timeout=10)
-            status = ScanFinalizationService(session).finalize(scan_id)
+            status = ScanFinalizationService(session).finalize(scan_id, trigger_analysis=False)
             results.append(status)
 
     try:
@@ -971,7 +971,7 @@ def test_cross_month_finalization_releases_from_original_period(db_session: Sess
     db_session.commit()
     db_session.expire_all()
 
-    ScanFinalizationService(db_session).finalize(scan.id)
+    ScanFinalizationService(db_session).finalize(scan.id, trigger_analysis=False)
     db_session.expire_all()
 
     scan = db_session.get(Scan, scan.id)

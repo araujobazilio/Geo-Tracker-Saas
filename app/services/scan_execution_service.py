@@ -61,7 +61,11 @@ class ScanExecutionService:
 
         await asyncio.gather(*(bounded(run_id) for run_id in run_ids))
         with self._factory() as session:
-            ScanFinalizationService(session, self._audit).finalize(scan_id, trigger_analysis=False)
+            ScanFinalizationService(
+                session,
+                self._audit,
+                analysis_session_factory=self._factory,
+            ).finalize(scan_id, trigger_analysis=True)
         return True
 
     def _claim_scan(self, scan_id: uuid.UUID) -> bool:

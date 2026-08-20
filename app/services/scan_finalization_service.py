@@ -155,6 +155,9 @@ class ScanFinalizationService:
         Analysis runs in a fresh session. Analysis failure MUST NOT
         rollback scan completion, change quota, or repeat providers.
         The scan remains terminal regardless of analysis outcome.
+        The failure session factory is passed to ScanAnalysisService so
+        that unexpected exceptions persist a FAILED record in a separate
+        transaction.
         """
         if status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
             return
@@ -164,13 +167,19 @@ class ScanFinalizationService:
             if self._analysis_session_factory is not None:
                 ctx = self._analysis_session_factory
                 with ctx() as analysis_session:
-                    ScanAnalysisService(analysis_session).analyze(scan_id)
+                    ScanAnalysisService(
+                        analysis_session,
+                        failure_session_factory=self._analysis_session_factory,
+                    ).analyze(scan_id)
             else:
                 from app.db.session import get_session_factory
 
                 factory = get_session_factory()
                 with factory() as analysis_session:
-                    ScanAnalysisService(analysis_session).analyze(scan_id)
+                    ScanAnalysisService(
+                        analysis_session,
+                        failure_session_factory=factory,
+                    ).analyze(scan_id)
         except Exception:
             logger.error(
                 "auto_analysis_failed",

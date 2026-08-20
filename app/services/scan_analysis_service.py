@@ -13,11 +13,15 @@ Key invariants:
   is deleted before re-inserting).
 - Only terminal scans with at least one SUCCEEDED run are eligible.
 - Scans without entity snapshots fail with MISSING_ENTITY_SNAPSHOT.
+- Unexpected exceptions persist a FAILED ScanAnalysis record in a
+  separate transaction so the failure is always auditable.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 
 from sqlalchemy.exc import IntegrityError
@@ -50,6 +54,7 @@ from app.services.detection.mention_detector import (
     detect_mentions,
 )
 from app.services.detection.source_attributor import (
+    AttributionOutcome,
     attribute_source,
     build_entity_domains,
     parse_source_host,
@@ -61,14 +66,19 @@ logger = get_logger("app.scan_analysis")
 class ScanAnalysisService:
     """Orchestrate deterministic analysis of a terminal Scan."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        failure_session_factory: Callable[[], AbstractContextManager[Session]] | None = None,
+    ) -> None:
         self._session = session
         self._scans = ScanRepository(session)
         self._runs = PromptRunRepository(session)
         self._snapshots = ScanEntitySnapshotRepository(session)
         self._analyses = ScanAnalysisRepository(session)
         self._mentions = EntityMentionRepository(session)
-        self._attributions = ScanAnalysisRepository(session)
+        self._failure_session_factory = failure_session_factory
 
     def analyze(self, scan_id: uuid.UUID) -> ScanAnalysis:
         """Run or return the deterministic analysis for a scan.
@@ -125,7 +135,7 @@ class ScanAnalysisService:
             raise
         except Exception:
             self._session.rollback()
-            # Mark the analysis as FAILED if it exists.
+            # Persist a FAILED record in a separate transaction.
             self._mark_failed(scan_id)
             raise
 
@@ -222,8 +232,9 @@ class ScanAnalysisService:
                         )
                     )
                     continue
-                attr = attribute_source(host, entity_domains)
-                if attr is not None:
+                decision = attribute_source(host, entity_domains)
+                if decision.outcome == AttributionOutcome.ATTRIBUTED and decision.attribution:
+                    attr = decision.attribution
                     snap = snapshot_map.get(attr.entity_snapshot_id)
                     if snap is None:
                         continue
@@ -234,6 +245,14 @@ class ScanAnalysisService:
                             entity_snapshot_id=snap.id,
                             source_host=attr.source_host,
                             attribution_type=AttributionType.OWNED_DOMAIN,
+                        )
+                    )
+                elif decision.outcome == AttributionOutcome.AMBIGUOUS:
+                    all_warnings.append(
+                        (
+                            WarningCode.AMBIGUOUS_SOURCE_DOMAIN.value,
+                            f"Source host '{host}' matches multiple equally-specific "
+                            "tracked domains; no attribution assigned.",
                         )
                     )
 
@@ -282,17 +301,77 @@ class ScanAnalysisService:
         SourceAttributionRepository(self._session).delete_by_analysis(analysis_id)
 
     def _mark_failed(self, scan_id: uuid.UUID) -> None:
-        """Best-effort mark the analysis as FAILED after an exception."""
+        """Best-effort persist a FAILED ScanAnalysis record after an exception.
+
+        This runs in a **separate transaction** from the main analysis.
+        If the main analysis transaction rolled back, the ScanAnalysis
+        INSERT was undone — this method creates a fresh FAILED row.
+
+        Concurrency rules:
+        - If a COMPLETED analysis already exists, do NOT downgrade it.
+        - If a RUNNING/PENDING row exists (owned by this failed attempt),
+          transition it to FAILED.
+        - If no row exists (creation was rolled back), create a FAILED row.
+        - Handle IntegrityError race by re-reading.
+        """
+        factory = self._failure_session_factory
+        if factory is None:
+            # Fallback: use the global session factory.
+            from app.db.session import get_session_factory
+
+            factory = get_session_factory()
+
         try:
-            analysis = self._analyses.get_for_update(scan_id, ANALYSIS_VERSION)
-            if analysis is not None and analysis.status == ScanAnalysisStatus.RUNNING:
-                analysis.status = ScanAnalysisStatus.FAILED
-                analysis.failure_code = "INTERNAL_ERROR"
-                analysis.failure_message = "Deterministic analysis failed unexpectedly."
-                analysis.completed_at = datetime.now(UTC)
-                self._session.commit()
+            with factory() as fail_session:
+                repo = ScanAnalysisRepository(fail_session)
+                existing = repo.get_for_update(scan_id, ANALYSIS_VERSION)
+                if existing is not None:
+                    if existing.status == ScanAnalysisStatus.COMPLETED:
+                        # Do NOT downgrade a completed analysis.
+                        fail_session.commit()
+                        return
+                    # Transition RUNNING/PENDING/FAILED → FAILED.
+                    existing.status = ScanAnalysisStatus.FAILED
+                    existing.failure_code = "INTERNAL_ERROR"
+                    existing.failure_message = "Deterministic analysis failed unexpectedly."
+                    existing.completed_at = datetime.now(UTC)
+                    fail_session.commit()
+                else:
+                    # Row was rolled back — create a fresh FAILED record.
+                    analysis = ScanAnalysis(
+                        scan_id=scan_id,
+                        analysis_version=ANALYSIS_VERSION,
+                        status=ScanAnalysisStatus.FAILED,
+                        failure_code="INTERNAL_ERROR",
+                        failure_message="Deterministic analysis failed unexpectedly.",
+                        started_at=datetime.now(UTC),
+                        completed_at=datetime.now(UTC),
+                    )
+                    repo.create(analysis)
+                    fail_session.commit()
+        except IntegrityError:
+            # Another worker created the row concurrently. Re-read and
+            # do NOT downgrade if it's COMPLETED.
+            try:
+                with factory() as fail_session:
+                    existing = ScanAnalysisRepository(fail_session).get_by_scan_and_version(
+                        scan_id, ANALYSIS_VERSION
+                    )
+                    if existing is not None and existing.status not in (
+                        ScanAnalysisStatus.COMPLETED,
+                        ScanAnalysisStatus.FAILED,
+                    ):
+                        existing.status = ScanAnalysisStatus.FAILED
+                        existing.failure_code = "INTERNAL_ERROR"
+                        existing.failure_message = "Deterministic analysis failed unexpectedly."
+                        existing.completed_at = datetime.now(UTC)
+                        fail_session.commit()
+            except Exception:
+                logger.error(
+                    "analysis_failed_mark_failed_integrity",
+                    scan_id=str(scan_id),
+                )
         except Exception:
-            self._session.rollback()
             logger.error("analysis_failed_mark_failed", scan_id=str(scan_id))
 
     def get_analysis(self, scan_id: uuid.UUID) -> ScanAnalysis | None:

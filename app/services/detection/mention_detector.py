@@ -110,14 +110,32 @@ def _build_term_pattern(normalized_term: str) -> re.Pattern[str]:
 def _build_domain_pattern(normalized_domain: str) -> re.Pattern[str]:
     """Build a regex pattern for domain mention in text.
 
-    Domains appear as tokens like ``acme.com`` or ``www.acme.com``.
-    We match the domain optionally preceded by ``www.`` and ensure
-    it's bounded by non-domain characters (whitespace, punctuation,
-    start/end).
+    Uses hostname-aware boundary semantics:
+
+    Left boundary: the domain must NOT be preceded by an alphanumeric
+    or hyphen character. This prevents ``notacme.com`` and
+    ``fakeacme.com`` from matching ``acme.com``. A dot IS allowed
+    before the domain, so subdomain text like ``blog.acme.com``
+    correctly matches ``acme.com``.
+
+    Right boundary: the domain must NOT be followed by a dot + label
+    (``.`` + alphanumeric). This prevents ``acme.com.attacker.test``
+    from matching ``acme.com``. Trailing punctuation like ``acme.com.``
+    or ``acme.com,`` still matches because the dot/comma is not
+    followed by a label.
+
+    Subdomain text such as ``blog.acme.com`` is intentionally matched
+    as a DOMAIN mention for ``acme.com`` because it genuinely references
+    the tracked domain namespace. The matched_text captures only the
+    tracked domain portion (``acme.com``), not the subdomain prefix.
     """
     escaped = re.escape(normalized_domain)
-    # Allow optional www. prefix and optional scheme/path prefix.
-    pattern = r"(?:(?:https?://)?(?:www\.)?)" + escaped + _WORD_BOUNDARY_END
+    # Left: not preceded by alphanumeric or hyphen (dot is OK for subdomains).
+    left = r"(?<![A-Za-z0-9-])"
+    # Right: not followed by dot + alphanumeric label (prevents
+    # acme.com.attacker.test from matching acme.com).
+    right = r"(?!\.[A-Za-z0-9])"
+    pattern = left + escaped + right
     return re.compile(pattern, re.IGNORECASE | re.UNICODE)
 
 

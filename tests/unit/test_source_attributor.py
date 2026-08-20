@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.core.enums import AttributionType
 from app.services.detection.source_attributor import (
+    AttributionOutcome,
     attribute_source,
     build_entity_domains,
     parse_source_host,
@@ -58,25 +59,29 @@ class TestAttributeSource:
         )
 
     def test_exact_domain_match(self) -> None:
-        attr = attribute_source("acme.com", self._domains())
-        assert attr is not None
-        assert attr.entity_snapshot_id == "brand-1"
-        assert attr.source_host == "acme.com"
-        assert attr.attribution_type == AttributionType.OWNED_DOMAIN.value
+        decision = attribute_source("acme.com", self._domains())
+        assert decision.outcome == AttributionOutcome.ATTRIBUTED
+        assert decision.attribution is not None
+        assert decision.attribution.entity_snapshot_id == "brand-1"
+        assert decision.attribution.source_host == "acme.com"
+        assert decision.attribution.attribution_type == AttributionType.OWNED_DOMAIN.value
 
     def test_subdomain_match(self) -> None:
-        attr = attribute_source("blog.acme.com", self._domains())
-        assert attr is not None
-        assert attr.entity_snapshot_id == "brand-1"
+        decision = attribute_source("blog.acme.com", self._domains())
+        assert decision.outcome == AttributionOutcome.ATTRIBUTED
+        assert decision.attribution is not None
+        assert decision.attribution.entity_snapshot_id == "brand-1"
 
     def test_www_subdomain_match(self) -> None:
-        attr = attribute_source("www.acme.com", self._domains())
-        assert attr is not None
-        assert attr.entity_snapshot_id == "brand-1"
+        decision = attribute_source("www.acme.com", self._domains())
+        assert decision.outcome == AttributionOutcome.ATTRIBUTED
+        assert decision.attribution is not None
+        assert decision.attribution.entity_snapshot_id == "brand-1"
 
     def test_no_match(self) -> None:
-        attr = attribute_source("example.com", self._domains())
-        assert attr is None
+        decision = attribute_source("example.com", self._domains())
+        assert decision.outcome == AttributionOutcome.NO_MATCH
+        assert decision.attribution is None
 
     def test_most_specific_domain_wins(self) -> None:
         """When both acme.com and product.acme.com are tracked, the
@@ -88,9 +93,10 @@ class TestAttributeSource:
                 {"entity_snapshot_id": "sub-1", "domain": "product.acme.com"},
             ]
         )
-        attr = attribute_source("product.acme.com", domains)
-        assert attr is not None
-        assert attr.entity_snapshot_id == "sub-1"
+        decision = attribute_source("product.acme.com", domains)
+        assert decision.outcome == AttributionOutcome.ATTRIBUTED
+        assert decision.attribution is not None
+        assert decision.attribution.entity_snapshot_id == "sub-1"
 
     def test_most_specific_domain_wins_deep(self) -> None:
         """blog.product.acme.com should match product.acme.com, not acme.com."""
@@ -100,25 +106,39 @@ class TestAttributeSource:
                 {"entity_snapshot_id": "sub-1", "domain": "product.acme.com"},
             ]
         )
-        attr = attribute_source("blog.product.acme.com", domains)
-        assert attr is not None
-        assert attr.entity_snapshot_id == "sub-1"
+        decision = attribute_source("blog.product.acme.com", domains)
+        assert decision.outcome == AttributionOutcome.ATTRIBUTED
+        assert decision.attribution is not None
+        assert decision.attribution.entity_snapshot_id == "sub-1"
 
     def test_no_naive_substring_match(self) -> None:
         """evilacme.com must NOT match acme.com."""
-        attr = attribute_source("evilacme.com", self._domains())
-        assert attr is None
+        decision = attribute_source("evilacme.com", self._domains())
+        assert decision.outcome == AttributionOutcome.NO_MATCH
 
     def test_no_naive_suffix_match(self) -> None:
         """notacme.com must NOT match acme.com."""
-        attr = attribute_source("notacme.com", self._domains())
-        assert attr is None
+        decision = attribute_source("notacme.com", self._domains())
+        assert decision.outcome == AttributionOutcome.NO_MATCH
 
     def test_empty_host(self) -> None:
-        attr = attribute_source("", self._domains())
-        assert attr is None
+        decision = attribute_source("", self._domains())
+        assert decision.outcome == AttributionOutcome.NO_MATCH
 
     def test_competitor_domain_match(self) -> None:
-        attr = attribute_source("salesforce.com", self._domains())
-        assert attr is not None
-        assert attr.entity_snapshot_id == "comp-1"
+        decision = attribute_source("salesforce.com", self._domains())
+        assert decision.outcome == AttributionOutcome.ATTRIBUTED
+        assert decision.attribution is not None
+        assert decision.attribution.entity_snapshot_id == "comp-1"
+
+    def test_ambiguous_equal_domains(self) -> None:
+        """Two entities tracking the same domain → AMBIGUOUS."""
+        domains = build_entity_domains(
+            [
+                {"entity_snapshot_id": "brand-1", "domain": "example.com"},
+                {"entity_snapshot_id": "comp-1", "domain": "example.com"},
+            ]
+        )
+        decision = attribute_source("example.com", domains)
+        assert decision.outcome == AttributionOutcome.AMBIGUOUS
+        assert decision.attribution is None

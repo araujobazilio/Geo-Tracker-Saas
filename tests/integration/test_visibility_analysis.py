@@ -19,6 +19,7 @@ These integration tests run against real PostgreSQL and prove:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -366,9 +367,10 @@ def _execute_scan(
     scan_id: uuid.UUID,
     adapter: ScriptedAdapter,
 ) -> bool:
+    factory = _factory(db)
     return asyncio.run(
         ScanExecutionService(
-            _factory(db),
+            factory,
             registry=FakeRegistry(adapter),  # type: ignore[arg-type]
             settings=_settings(),
         ).execute_scan(scan_id)
@@ -1228,3 +1230,374 @@ def test_analysis_failure_does_not_affect_scan_state(db_session: Session) -> Non
     # Scan state unchanged
     scan_status_after = db_session.get(Scan, scan.id).status
     assert scan_status_before == scan_status_after
+
+
+# ---------------------------------------------------------------------------
+# Phase 7.1 — Automatic analysis, failure persistence, ambiguity warnings
+# ---------------------------------------------------------------------------
+
+
+def test_normal_execution_auto_produces_analysis(db_session: Session) -> None:
+    """ScanExecutionService.execute_scan() automatically produces a
+    COMPLETED ScanAnalysis without any manual analysis endpoint call.
+    """
+    workspace, user, project, _, _ = _seed(
+        db_session,
+        brand_name="Acme",
+        brand_domain="acme.test",
+    )
+    _add_price(db_session)
+    adapter = ScriptedAdapter(
+        LLMProvider.OPENAI,
+        SURFACE,
+        response_text="Acme is the best CRM.",
+    )
+    scan = _create_scan(
+        db_session,
+        workspace,
+        project,
+        user,
+        FakeDispatcher(),
+        key="auto-analysis",
+        adapter=adapter,
+    )
+
+    # Execute the scan — this should auto-finalize AND auto-analyze.
+    _execute_scan(db_session, scan.id, adapter)
+
+    # Expire cache so we see committed state from the execution sessions.
+    db_session.expire_all()
+
+    # Scan must be terminal.
+    scan_row = db_session.get(Scan, scan.id)
+    assert scan_row.status in (ScanStatus.COMPLETED, ScanStatus.PARTIAL)
+
+    # ScanAnalysis must exist and be COMPLETED — no manual call needed.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar_one_or_none()
+    assert analysis is not None
+    assert analysis.status == ScanAnalysisStatus.COMPLETED
+
+    # EntityMention evidence must exist.
+    mentions = list(
+        db_session.execute(
+            select(EntityMention).where(EntityMention.scan_analysis_id == analysis.id)
+        ).scalars()
+    )
+    assert len(mentions) >= 1
+
+
+def test_analysis_does_not_alter_quota(db_session: Session) -> None:
+    """Automatic analysis must not consume AI Checks or create UsageEvents."""
+    from app.models.workspace import Workspace
+
+    workspace, user, project, _, _ = _seed(
+        db_session,
+        brand_name="Acme",
+        brand_domain="acme.test",
+    )
+    _add_price(db_session)
+    adapter = ScriptedAdapter(
+        LLMProvider.OPENAI,
+        SURFACE,
+        response_text="Acme is recommended.",
+    )
+    scan = _create_scan(
+        db_session,
+        workspace,
+        project,
+        user,
+        FakeDispatcher(),
+        key="quota-check",
+        adapter=adapter,
+    )
+
+    # Record workspace AI checks before execution.
+    ws_before = db_session.get(Workspace, workspace.id)
+    assert ws_before is not None
+
+    _execute_scan(db_session, scan.id, adapter)
+
+    # Expire cache so we see committed state from the execution sessions.
+    db_session.expire_all()
+
+    # After execution + auto-analysis, AI checks should reflect only
+    # the provider calls, not the analysis.
+    scan_row = db_session.get(Scan, scan.id)
+    assert scan_row.status in (ScanStatus.COMPLETED, ScanStatus.PARTIAL)
+
+    # Verify analysis exists (it was auto-triggered).
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar_one_or_none()
+    assert analysis is not None
+    assert analysis.status == ScanAnalysisStatus.COMPLETED
+
+    # Verify no additional UsageEvents were created by analysis:
+    # UsageEvent count must match planned runs exactly.
+    usage_count = db_session.execute(
+        select(func.count()).select_from(UsageEvent).where(UsageEvent.workspace_id == workspace.id)
+    ).scalar()
+    assert usage_count == scan_row.planned_ai_checks
+
+    # Provider call count must be exactly planned_ai_checks.
+    assert len(adapter.requests) == scan_row.planned_ai_checks
+
+
+def test_no_auto_analysis_for_all_failed_scan(db_session: Session) -> None:
+    """An all-failed Scan (0 successful runs) must NOT create a
+    ScanAnalysis.
+    """
+    workspace, user, project, _, _ = _seed(
+        db_session,
+        brand_name="Acme",
+        brand_domain="acme.test",
+    )
+    _add_price(db_session)
+
+    # Create an adapter that always fails.
+    from app.providers.errors import ProviderError
+
+    class FailingAdapter:
+        def __init__(self) -> None:
+            self.provider = LLMProvider.OPENAI
+            self.surface = SURFACE
+            self.requests: list[ProviderRequest] = []
+
+        def capabilities(self) -> ProviderCapabilities:
+            return ProviderCapabilities(
+                supports_model_only=True,
+                supports_web_grounded=True,
+                supports_citations=True,
+                supports_search_result_metadata=True,
+            )
+
+        async def execute(self, request: ProviderRequest) -> ProviderResult:
+            self.requests.append(request)
+            raise ProviderError("Simulated failure")
+
+    failing_adapter = FailingAdapter()
+
+    scan = _create_scan(
+        db_session,
+        workspace,
+        project,
+        user,
+        FakeDispatcher(),
+        key="all-failed",
+        adapter=failing_adapter,  # type: ignore[arg-type]
+    )
+    _execute_scan(db_session, scan.id, failing_adapter)  # type: ignore[arg-type]
+
+    # Expire cache so we see committed state from the execution sessions.
+    db_session.expire_all()
+
+    scan_row = db_session.get(Scan, scan.id)
+    assert scan_row.status == ScanStatus.FAILED
+    assert scan_row.successful_runs == 0
+
+    # No ScanAnalysis should exist.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar_one_or_none()
+    assert analysis is None
+
+
+def test_analysis_failure_persists_failed_record(db_session: Session) -> None:
+    """Unexpected analysis exception persists a FAILED ScanAnalysis record.
+
+    The FAILED record is created in a separate transaction after the
+    main analysis transaction rolls back.
+    """
+    workspace, user, project, _, _ = _seed(
+        db_session,
+        brand_name="Acme",
+        brand_domain="acme.test",
+    )
+    _add_price(db_session)
+    adapter = ScriptedAdapter(
+        LLMProvider.OPENAI,
+        SURFACE,
+        response_text="Acme is recommended.",
+    )
+    scan = _create_scan(
+        db_session,
+        workspace,
+        project,
+        user,
+        FakeDispatcher(),
+        key="failure-persist",
+        adapter=adapter,
+    )
+    _execute_scan(db_session, scan.id, adapter)
+    db_session.expire_all()
+
+    # The auto-analysis should have succeeded. Delete the analysis to
+    # force a retry scenario.
+    db_session.execute(
+        text(
+            "DELETE FROM source_attributions WHERE scan_analysis_id IN "
+            "(SELECT id FROM scan_analyses WHERE scan_id = :sid)"
+        ),
+        {"sid": str(scan.id)},
+    )
+    db_session.execute(
+        text(
+            "DELETE FROM entity_mentions WHERE scan_analysis_id IN "
+            "(SELECT id FROM scan_analyses WHERE scan_id = :sid)"
+        ),
+        {"sid": str(scan.id)},
+    )
+    db_session.execute(
+        text("DELETE FROM scan_analyses WHERE scan_id = :sid"),
+        {"sid": str(scan.id)},
+    )
+    db_session.commit()
+
+    scan_status_before = db_session.get(Scan, scan.id).status
+
+    # Inject a failure by monkey-patching _run_analysis.
+    factory = _factory(db_session)
+    original_run = ScanAnalysisService._run_analysis
+
+    def failing_run(self: ScanAnalysisService, scan: Scan, analysis: ScanAnalysis) -> ScanAnalysis:
+        raise RuntimeError("Injected test failure")
+
+    ScanAnalysisService._run_analysis = failing_run  # type: ignore[method-assign]
+    try:
+        with factory() as analysis_session:
+            service = ScanAnalysisService(
+                analysis_session,
+                failure_session_factory=factory,
+            )
+            with contextlib.suppress(RuntimeError):
+                service.analyze(scan.id)
+    finally:
+        ScanAnalysisService._run_analysis = original_run  # type: ignore[method-assign]
+
+    # Scan state must be unchanged.
+    scan_status_after = db_session.get(Scan, scan.id).status
+    assert scan_status_before == scan_status_after
+
+    # A FAILED ScanAnalysis must exist.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar_one_or_none()
+    assert analysis is not None
+    assert analysis.status == ScanAnalysisStatus.FAILED
+    assert analysis.failure_code == "INTERNAL_ERROR"
+
+    # Now retry with the real implementation — should succeed.
+    result = ScanAnalysisService(db_session, failure_session_factory=factory).analyze(scan.id)
+    assert result.status == ScanAnalysisStatus.COMPLETED
+
+    # No duplicate analysis.
+    count = db_session.execute(
+        select(func.count()).select_from(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar()
+    assert count == 1
+
+
+def test_ambiguous_source_domain_warning(db_session: Session) -> None:
+    """When two entities track the same domain, a source from that domain
+    produces an AMBIGUOUS_SOURCE_DOMAIN warning and no attribution.
+    """
+    workspace, user, project, _, _ = _seed(
+        db_session,
+        brand_name="Acme",
+        brand_domain="example.com",
+        competitors=[{"name": "Rival", "domain": "example.com"}],
+    )
+    _add_price(db_session)
+    adapter = ScriptedAdapter(
+        LLMProvider.OPENAI,
+        SURFACE,
+        response_text="Acme is great.",
+        citations=(ProviderCitation(url="https://example.com/article", title="Article"),),
+    )
+    scan = _create_scan(
+        db_session,
+        workspace,
+        project,
+        user,
+        FakeDispatcher(),
+        key="ambiguous-domain",
+        adapter=adapter,
+    )
+    _execute_scan(db_session, scan.id, adapter)
+    db_session.expire_all()
+
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar_one_or_none()
+    assert analysis is not None
+    assert analysis.status == ScanAnalysisStatus.COMPLETED
+
+    # No SourceAttribution should exist (ambiguous → no attribution).
+    attributions = list(
+        db_session.execute(
+            select(SourceAttribution).where(SourceAttribution.scan_analysis_id == analysis.id)
+        ).scalars()
+    )
+    assert len(attributions) == 0
+
+    # warning_count should be > 0 (AMBIGUOUS_SOURCE_DOMAIN warning).
+    assert analysis.warning_count > 0
+
+
+def test_most_specific_domain_no_ambiguity(db_session: Session) -> None:
+    """When acme.com and product.acme.com are both tracked, a source from
+    docs.product.acme.com attributes to product.acme.com (most-specific)
+    with no ambiguity warning.
+    """
+    workspace, user, project, _, _ = _seed(
+        db_session,
+        brand_name="Acme",
+        brand_domain="acme.com",
+        competitors=[{"name": "Product", "domain": "product.acme.com"}],
+    )
+    _add_price(db_session)
+    adapter = ScriptedAdapter(
+        LLMProvider.OPENAI,
+        SURFACE,
+        response_text="Acme is great.",
+        citations=(ProviderCitation(url="https://docs.product.acme.com/docs", title="Docs"),),
+    )
+    scan = _create_scan(
+        db_session,
+        workspace,
+        project,
+        user,
+        FakeDispatcher(),
+        key="most-specific",
+        adapter=adapter,
+    )
+    _execute_scan(db_session, scan.id, adapter)
+    db_session.expire_all()
+
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == scan.id)
+    ).scalar_one_or_none()
+    assert analysis is not None
+    assert analysis.status == ScanAnalysisStatus.COMPLETED
+
+    # Attributions to the competitor (product.acme.com) — one per run.
+    attributions = list(
+        db_session.execute(
+            select(SourceAttribution).where(SourceAttribution.scan_analysis_id == analysis.id)
+        ).scalars()
+    )
+    assert len(attributions) == 2  # 2 runs, each with 1 citation
+
+    # The attributions should be to the competitor entity (product.acme.com).
+    comp_snapshots = list(
+        db_session.execute(
+            select(ScanEntitySnapshot).where(
+                ScanEntitySnapshot.scan_id == scan.id,
+                ScanEntitySnapshot.entity_type == TrackedEntityType.COMPETITOR,
+            )
+        ).scalars()
+    )
+    assert len(comp_snapshots) == 1
+    assert all(a.entity_snapshot_id == comp_snapshots[0].id for a in attributions)
