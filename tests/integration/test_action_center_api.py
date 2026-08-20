@@ -228,26 +228,30 @@ def _connection_factory(db: Session) -> Callable[[], AbstractContextManager[Sess
     return _ctx
 
 
-def _settings():
+def _settings(models: dict[LLMProvider, str] | None = None):
     from app.config import Settings
 
+    models = models or MODELS
     return Settings(
         app_env="test",
         openai_api_key="synthetic-openai-key",
-        openai_scan_model=MODELS[LLMProvider.OPENAI],
+        openai_scan_model=models[LLMProvider.OPENAI],
         anthropic_api_key="synthetic-anthropic-key",
-        anthropic_scan_model=MODELS[LLMProvider.ANTHROPIC],
+        anthropic_scan_model=models[LLMProvider.ANTHROPIC],
         google_api_key="synthetic-google-key",
-        google_scan_model=MODELS[LLMProvider.GOOGLE],
+        google_scan_model=models[LLMProvider.GOOGLE],
         perplexity_api_key="synthetic-perplexity-key",
-        perplexity_scan_model=MODELS[LLMProvider.PERPLEXITY],
+        perplexity_scan_model=models[LLMProvider.PERPLEXITY],
         pricing_require_rule_for_execution=True,
         scan_max_concurrency=2,
         scan_stale_after_seconds=60,
     )
 
 
-def _add_prices(db: Session, providers: list[LLMProvider]) -> None:
+def _add_prices(
+    db: Session, providers: list[LLMProvider], models: dict[LLMProvider, str] | None = None
+) -> None:
+    models = models or MODELS
     now = datetime.now(UTC)
     db.add_all(
         [
@@ -255,7 +259,7 @@ def _add_prices(db: Session, providers: list[LLMProvider]) -> None:
                 pricing_key=f"synthetic:{provider.value}:{uuid.uuid4().hex}",
                 provider=provider,
                 provider_surface=SURFACES[provider],
-                model=MODELS[provider],
+                model=models[provider],
                 effective_from=now - timedelta(days=1),
                 effective_to=now + timedelta(days=1),
                 input_per_million_usd=Decimal("1.0000000000"),
@@ -297,6 +301,8 @@ def _seed_full_pipeline(
     comp_name = competitors[0][0] if competitors else "Rival"
     comp_domain = competitors[0][1] if competitors else "rival.test"
     suffix = uuid.uuid4().hex
+    # Use unique model names per call to avoid price rule conflicts in CI.
+    models = {p: f"synthetic-{p.value.lower()}-{suffix}" for p in providers}
 
     # Seed prerequisites.
     with _db_session() as db:
@@ -387,7 +393,7 @@ def _seed_full_pipeline(
             for i in range(1, prompt_count + 1)
         ]
         db.add_all(prompts)
-        _add_prices(db, providers)
+        _add_prices(db, providers, models)
         db.commit()
 
     # Create scan.
@@ -410,7 +416,7 @@ def _seed_full_pipeline(
         result = ScanCreationService(
             db,
             dispatcher,
-            settings=_settings(),
+            settings=_settings(models),
             registry=registry,  # type: ignore[arg-type]
         ).create_scan(
             workspace_id,
@@ -449,7 +455,7 @@ def _seed_full_pipeline(
             ScanExecutionService(
                 factory,
                 registry=registry,  # type: ignore[arg-type]
-                settings=_settings(),
+                settings=_settings(models),
             ).execute_scan(scan_id)
         )
         db.commit()

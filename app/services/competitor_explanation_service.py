@@ -633,7 +633,8 @@ class CompetitorExplanationService:
     ) -> list[PromptGapEvidence]:
         """Find prompts where competitor appears and brand does not."""
         # Group by prompt_id using a typed structure.
-        prompt_providers: dict[uuid.UUID, set[LLMProvider]] = defaultdict(set)
+        prompt_all_providers: dict[uuid.UUID, set[LLMProvider]] = defaultdict(set)
+        prompt_competitor_only_providers: dict[uuid.UUID, set[LLMProvider]] = defaultdict(set)
         prompt_successful: dict[uuid.UUID, int] = defaultdict(int)
         prompt_competitor_only: dict[uuid.UUID, int] = defaultdict(int)
         prompt_obj: dict[uuid.UUID, Prompt] = {}
@@ -641,13 +642,14 @@ class CompetitorExplanationService:
         for run, prompt in scoped_succeeded:
             pid = prompt.id
             prompt_obj[pid] = prompt
-            prompt_providers[pid].add(run.provider)
+            prompt_all_providers[pid].add(run.provider)
             prompt_successful[pid] += 1
 
             is_brand = run.id in brand_mentioned_runs
             is_comp = run.id in competitor_mentioned_runs
             if is_comp and not is_brand:
                 prompt_competitor_only[pid] += 1
+                prompt_competitor_only_providers[pid].add(run.provider)
 
         # Filter to prompts with at least 1 competitor-only observation.
         gaps: list[PromptGapEvidence] = []
@@ -667,7 +669,7 @@ class CompetitorExplanationService:
                     else None,
                     commercial_intent=prompt.commercial_intent,
                     affected_providers=sorted(
-                        prompt_providers[pid],
+                        prompt_competitor_only_providers[pid],
                         key=lambda p: p.value if hasattr(p, "value") else p,
                     ),
                     successful_observations=prompt_successful[pid],
