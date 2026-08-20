@@ -74,6 +74,12 @@ jobs:
       - name: Alembic migration to head
         run: alembic upgrade head
 
+      - name: Alembic downgrade one revision
+        run: alembic downgrade -1
+
+      - name: Alembic re-upgrade to head
+        run: alembic upgrade head
+
       - name: Alembic drift check
         run: alembic check
 

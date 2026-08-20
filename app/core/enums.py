@@ -215,3 +215,28 @@ class AttributionType(str, Enum):
     """How a ResponseSource was attributed to an entity."""
 
     OWNED_DOMAIN = "OWNED_DOMAIN"
+
+
+class OpportunityType(str, Enum):
+    """Type of evidence-based opportunity detected by the Action Engine."""
+
+    DISCOVERY_VISIBILITY_GAP = "DISCOVERY_VISIBILITY_GAP"
+    PROVIDER_VISIBILITY_GAP = "PROVIDER_VISIBILITY_GAP"
+    OWNED_CITATION_GAP = "OWNED_CITATION_GAP"
+    PROMPT_COMPETITOR_GAP = "PROMPT_COMPETITOR_GAP"
+
+
+class OpportunityPriority(str, Enum):
+    """Deterministic priority for an Opportunity (not ML scoring)."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class OpportunityEvidenceType(str, Enum):
+    """Type of evidence backing an Opportunity occurrence."""
+
+    METRIC_GAP = "METRIC_GAP"
+    PROMPT_RUN = "PROMPT_RUN"
+    OWNED_SOURCE = "OWNED_SOURCE"

@@ -4,8 +4,9 @@
 
 Phases 0–6 establish the implemented application, tenant, quota, provider, and
 Scan Engine security boundaries described below. Phase 7 adds analysis
-endpoint security. Phase 8 adds confidence scan tenant isolation. Additional
-launch hardening is Phase 17.
+endpoint security. Phase 8 adds confidence scan tenant isolation. Phase 9
+adds Action Center and Competitor Explanation zero-cost endpoint security.
+Additional launch hardening is Phase 17.
 
 ## Implemented
 
@@ -205,6 +206,50 @@ Security properties:
   model as STANDARD scans. Failed observations release unused quota at
   finalization. There is no endpoint that lets a user trigger
   uncontrolled provider spending.
+
+## Phase 9: Action Center and Competitor Explanation security
+
+Phase 9 adds Action Center and Competitor Explanation endpoints that
+read persisted Scan evidence and generate deterministic Opportunities.
+
+Security properties:
+
+- **Tenant isolation:** all endpoints enforce workspace membership via
+  `WorkspaceAuthorizationService`. Cross-tenant access returns 404 (not
+  403) to avoid revealing resource existence, consistent with all other
+  workspace-scoped endpoints.
+- **Role matrix:**
+
+  | Role | Read explanations/opportunities | Refresh actions | Update status |
+  |------|----------------------------------|-----------------|---------------|
+  | OWNER | Yes | Yes | Yes |
+  | ADMIN | Yes | Yes | Yes |
+  | MEMBER | Yes | No | No |
+
+  Read operations (list/get competitor explanations, list/get
+  opportunities) require MEMBER or above. Write operations (refresh
+  actions, update opportunity status) require ADMIN or OWNER.
+- **Zero-cost endpoints:** Action refresh and competitor explanation
+  endpoints perform only deterministic local computation. They consume
+  zero AI Checks, zero UsageEvents, and zero paid provider calls. There
+  is no cost-injection vector — a user cannot trigger provider spending
+  via these endpoints.
+- **Analysis readiness (fail closed):** both competitor explanation and
+  action generation require a `COMPLETED` `ScanAnalysis`. A missing,
+  `PENDING`, `RUNNING`, or `FAILED` analysis raises `ConflictError`,
+  not zero visibility. This prevents users from interpreting absent
+  evidence as a measured zero.
+- **Historical snapshot integrity:** competitor explanations use
+  immutable `ScanEntitySnapshot` records, not current mutable
+  `Project`/`Competitor` state. A user cannot rename a brand or
+  competitor after scan creation to influence explanation results.
+- **VERIFIED status protection:** the `VERIFIED` opportunity status is
+  read-only in Phase 9. No API endpoint or service can transition an
+  Opportunity to `VERIFIED`. This status is reserved for Phase 10
+  Verification Scans.
+- **Cross-project isolation:** accessing an Opportunity from a different
+  project (within the same workspace) returns 404. Opportunity queries
+  are scoped to `(workspace_id, project_id)`.
 
 ## Planned (later phases)
 

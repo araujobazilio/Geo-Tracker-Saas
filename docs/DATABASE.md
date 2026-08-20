@@ -557,6 +557,101 @@ Backfills:
 - Existing `scans` rows get `repeat_count = 1` and `baseline_scan_id = NULL`
 - Existing `prompt_runs` rows get `observation_index = 1`
 
+## Action Center and Competitor Explanations migration (Phase 9)
+
+**Name:** `add action center and competitor explanations`
+**Revision ID:** `f9a1b2c3d4e5`
+**Revises:** `e7f8a9b0c1d2`
+
+Adds three new tables for the Phase 9 Action Center: logical
+Opportunities, immutable per-scan Occurrences, and typed Evidence rows.
+
+### `opportunities`
+
+Logical, deduplicated workflow entities representing evidence-based gaps
+detected from deterministic Scan analysis. Identified by a stable
+SHA-256 fingerprint for cross-scan deduplication.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID PK | |
+| `workspace_id` | UUID FK → `workspaces.id` | NOT NULL, indexed |
+| `project_id` | UUID FK → `projects.id` | NOT NULL, indexed |
+| `fingerprint` | VARCHAR(64) | NOT NULL; SHA-256 hex |
+| `opportunity_type` | VARCHAR | NOT NULL, indexed (`DISCOVERY_VISIBILITY_GAP`, `PROVIDER_VISIBILITY_GAP`, `OWNED_CITATION_GAP`, `PROMPT_COMPETITOR_GAP`) |
+| `status` | VARCHAR | NOT NULL, indexed, default `OPEN` (`OPEN`, `IN_PROGRESS`, `IMPLEMENTED`, `DISMISSED`, `VERIFIED`) |
+| `priority` | VARCHAR | NOT NULL, indexed (`HIGH`, `MEDIUM`, `LOW`) |
+| `action_engine_version` | VARCHAR(50) | NOT NULL |
+| `competitor_entity_key` | VARCHAR(255) | NULLABLE |
+| `provider` | VARCHAR | NULLABLE, indexed |
+| `prompt_id` | UUID FK → `prompts.id` | NULLABLE, indexed |
+| `prompt_type` | VARCHAR | NOT NULL |
+| `title` | VARCHAR(500) | NOT NULL |
+| `summary` | TEXT | NOT NULL |
+| `recommended_action` | TEXT | NOT NULL |
+| `first_detected_scan_id` | UUID FK → `scans.id` | NOT NULL |
+| `latest_detected_scan_id` | UUID FK → `scans.id` | NOT NULL |
+| `first_detected_at` | TIMESTAMPTZ | NOT NULL, default now() |
+| `last_detected_at` | TIMESTAMPTZ | NOT NULL, default now() |
+| `implemented_at` | TIMESTAMPTZ | NULLABLE |
+| `dismissed_at` | TIMESTAMPTZ | NULLABLE |
+| `verified_at` | TIMESTAMPTZ | NULLABLE |
+| `dismissal_reason` | TEXT | NULLABLE |
+| `created_at` / `updated_at` | TIMESTAMPTZ | TimestampMixin |
+
+Unique constraint: `(project_id, fingerprint)` — `uq_opportunities_project_fingerprint`.
+Foreign keys use `ON DELETE RESTRICT`.
+
+### `opportunity_occurrences`
+
+One immutable record per detecting Scan. A new Occurrence is created
+each time a different Scan detects the same logical Opportunity.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID PK | |
+| `opportunity_id` | UUID FK → `opportunities.id` | NOT NULL, indexed |
+| `scan_id` | UUID FK → `scans.id` | NOT NULL, indexed |
+| `scan_analysis_id` | UUID FK → `scan_analyses.id` | NOT NULL, indexed |
+| `competitor_entity_snapshot_id` | UUID FK → `scan_entity_snapshots.id` | NULLABLE |
+| `brand_entity_snapshot_id` | UUID FK → `scan_entity_snapshots.id` | NOT NULL |
+| `priority_at_detection` | VARCHAR | NOT NULL |
+| `brand_visibility` | NUMERIC(10,4) | NULLABLE |
+| `competitor_visibility` | NUMERIC(10,4) | NULLABLE |
+| `visibility_gap_pp` | NUMERIC(10,4) | NULLABLE |
+| `brand_citation_rate` | NUMERIC(10,4) | NULLABLE |
+| `competitor_citation_rate` | NUMERIC(10,4) | NULLABLE |
+| `citation_gap_pp` | NUMERIC(10,4) | NULLABLE |
+| `measurement_coverage` | NUMERIC(10,4) | NULLABLE |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default now() |
+
+Unique constraint: `(opportunity_id, scan_id)` — `uq_opportunity_occurrences_opp_scan`.
+Foreign keys use `ON DELETE RESTRICT`.
+
+### `opportunity_evidence`
+
+Typed evidence rows linking Occurrences to specific persisted Scan
+evidence (PromptRun, ResponseSource, metric gap).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID PK | |
+| `occurrence_id` | UUID FK → `opportunity_occurrences.id` | NOT NULL, indexed |
+| `evidence_key` | VARCHAR(255) | NOT NULL |
+| `evidence_type` | VARCHAR | NOT NULL (`METRIC_GAP`, `OWNED_SOURCE`, `PROMPT_RUN`) |
+| `prompt_id` | UUID FK → `prompts.id` | NULLABLE |
+| `prompt_run_id` | UUID FK → `prompt_runs.id` | NULLABLE |
+| `response_source_id` | UUID FK → `response_sources.id` | NULLABLE |
+| `provider` | VARCHAR | NULLABLE |
+| `metric_name` | VARCHAR(100) | NULLABLE |
+| `brand_value` | NUMERIC(10,4) | NULLABLE |
+| `competitor_value` | NUMERIC(10,4) | NULLABLE |
+| `delta_value` | NUMERIC(10,4) | NULLABLE |
+| `created_at` | TIMESTAMPTZ | NOT NULL, default now() |
+
+Unique constraint: `(occurrence_id, evidence_key)` — `uq_opportunity_evidence_occ_key`.
+Foreign keys use `ON DELETE RESTRICT`.
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
@@ -581,6 +676,13 @@ Phase 7 analysis indexes: `scan_entity_snapshots.scan_id`,
 
 Phase 8 confidence scan indexes: `prompt_runs (scan_id, observation_index)`
 composite index for round-by-round execution queries.
+
+Phase 9 Action Center indexes: `opportunities.workspace_id`,
+`opportunities.project_id`, `opportunities.opportunity_type`,
+`opportunities.status`, `opportunities.priority`, `opportunities.provider`,
+`opportunities.prompt_id`, `opportunity_occurrences.opportunity_id`,
+`opportunity_occurrences.scan_id`, `opportunity_occurrences.scan_analysis_id`,
+`opportunity_evidence.occurrence_id`.
 
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`

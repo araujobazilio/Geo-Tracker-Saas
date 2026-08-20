@@ -72,6 +72,9 @@ single responsibility boundary consumed by routers and other services.
 | `ScanFinalizationService` / `ScanRecoveryService` | Atomic terminal classification + unused quota release (single commit), idempotent reconciliation, run-count invariant, stale PENDING/RUNNING recovery without provider replay |
 | `ConfidenceScanCreationService` | Clones a baseline STANDARD scan's methodology to create a CONFIDENCE scan with repeated observations (Phase 8) |
 | `ConfidenceMetricsService` | Computes reliability metrics (measurement coverage, mention stability, confidence level) from repeated CONFIDENCE observations (Phase 8) |
+| `CompetitorExplanationService` | Computes evidence-based brand vs competitor explanations from persisted Scan analysis evidence (Phase 9) |
+| `ActionGenerationService` | Deterministic opportunity generation from completed STANDARD scan evidence; fingerprint-based cross-scan dedup; status-preserving upsert (Phase 9) |
+| `OpportunityWorkflowService` | Opportunity status transitions with audit timestamps; VERIFIED is read-only in Phase 9 (Phase 9) |
 | `PricingService` / `ProviderCostCalculator` | Exact effective price resolution and Decimal/null-safe cost calculation |
 
 ### Entitlement resolution
@@ -277,6 +280,63 @@ ConfidenceMetricsService computes reliability metrics from repeated observations
   same atomic result recording, finalization, and stale-recovery machinery
   as STANDARD scans.
 
+## Phase 9: Action Center and Competitor Explanations
+
+Phase 9 introduces evidence-based competitor explanations and a
+deterministic Action Center. Both features are **zero-cost**: they
+consume no AI Checks, no UsageEvents, and no paid provider calls. They
+operate exclusively on persisted Scan evidence.
+
+```
+COMPLETED STANDARD Scan + Analysis
+   ↓
+CompetitorExplanationService computes brand vs competitor gaps
+   ↓
+ActionGenerationService upserts Opportunities (fingerprint-deduped)
+   ↓
+User reviews, transitions status (OPEN → IN_PROGRESS → IMPLEMENTED)
+```
+
+### New components
+
+| Component | Responsibility |
+|-----------|----------------|
+| `competitor_explanation_service.py` | Computes deterministic brand vs competitor explanations from persisted evidence: visibility rates, overlap matrix, provider breakdown, owned citation rates, prompt gaps, optional reliability context. Requires COMPLETED analysis. Uses historical `ScanEntitySnapshot` (not current Project state). |
+| `action_generation_service.py` | Generates deterministic Opportunities from completed STANDARD scan evidence using 4 rules. Fingerprint-based cross-scan dedup. Status-preserving upsert. Idempotent per scan. Atomic per refresh. |
+| `opportunity_workflow_service.py` | Manages Opportunity status transitions with audit timestamps. VERIFIED is read-only (reserved for Phase 10). |
+| `action_engine.py` | Constants for all action generation thresholds and version identifier. |
+| `opportunities.py` (router) | Action Center API endpoints: list/get opportunities, refresh actions, update status. Tenant-isolated, role-enforced. |
+| `competitor_explanation.py` (router) | Competitor explanation API endpoints: list summaries, get detail. Tenant-isolated, role-enforced. |
+
+### New models
+
+- **`Opportunity`** — logical, deduplicated workflow entity identified by
+  a stable SHA-256 fingerprint. Human workflow status is preserved across
+  automated refreshes.
+- **`OpportunityOccurrence`** — immutable per-scan record. A new
+  Occurrence is created each time a different Scan detects the same
+  logical Opportunity.
+- **`OpportunityEvidence`** — typed evidence row linking to specific
+  persisted Scan evidence (PromptRun, ResponseSource, metric gap).
+
+### Key principles
+
+- **Zero-cost**: No AI Checks, no provider calls, no UsageEvents.
+- **Evidence-based**: Uses only persisted evidence
+  (`PromptRun`, `EntityMention`, `SourceAttribution`,
+  `ScanEntitySnapshot`).
+- **No causal claims**: Explanations describe observed patterns, not
+  causation.
+- **Fail closed**: Requires COMPLETED analysis. Missing or FAILED
+  analysis raises `ConflictError`, not zero visibility.
+- **Historical snapshot integrity**: Uses `ScanEntitySnapshot`
+  names/domains, not current mutable `Project`/`Competitor` state.
+- **Idempotent**: Refreshing the same Scan creates no duplicates.
+- **Status preservation**: `IN_PROGRESS`/`IMPLEMENTED`/`DISMISSED`
+  Opportunities are not reopened by new scan refreshes.
+
+See `docs/ACTION_CENTER.md` and `docs/COMPETITOR_EXPLANATIONS.md`.
+
 ## Technology stack
 
 | Layer | Technology |
@@ -328,7 +388,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Scan Engine | IMPLEMENTED (Phase 6) |
 | Brand / citation detection | IMPLEMENTED (Phase 7) |
 | Confidence Scans | IMPLEMENTED (Phase 8) |
-| Action Center | PLANNED (Phase 9) |
+| Action Center | IMPLEMENTED (Phase 9) |
 | Verification system | PLANNED (Phase 10) |
 | Scheduling / email reports | PLANNED (Phase 11) |
 | Dashboard / UI | PLANNED (Phase 12) |

@@ -14,6 +14,11 @@ from app.models.analysis import (
 )
 from app.models.audit import AuditLog
 from app.models.billing import AppSumoLicense, BillingAccount
+from app.models.opportunity import (
+    Opportunity,
+    OpportunityEvidence,
+    OpportunityOccurrence,
+)
 from app.models.plan_definition import PlanDefinition
 from app.models.plan_provider import PlanProvider
 from app.models.pricing import ProviderPriceRule
@@ -34,6 +39,9 @@ __all__ = [
     "BillingAccount",
     "Competitor",
     "EntityMention",
+    "Opportunity",
+    "OpportunityEvidence",
+    "OpportunityOccurrence",
     "PlanDefinition",
     "PlanProvider",
     "Project",

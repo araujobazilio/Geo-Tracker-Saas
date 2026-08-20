@@ -299,3 +299,72 @@ Provider breakdown metrics are fully provider-scoped:
 Provider breakdown uses `TrackedEntityType.BRAND` (Phase 7 enum), not
 the legacy `"PRIMARY_BRAND"` string. Comparison is robust to SQLAlchemy
 returning either the enum object or the string-backed value.
+
+## Competitor Explanation Metrics (Phase 9)
+
+**IMPLEMENTED (Phase 9).** `CompetitorExplanationService` computes
+evidence-based brand vs competitor comparison metrics from persisted
+STANDARD scan analysis evidence. These metrics are zero-cost (no AI
+Checks, no provider calls) and use only persisted evidence.
+
+### Visibility and Gap Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `brand_visibility_rate` | Percentage of SUCCEEDED runs mentioning the brand |
+| `competitor_visibility_rate` | Percentage of SUCCEEDED runs mentioning the competitor |
+| `visibility_gap_pp` | `competitor_visibility_rate - brand_visibility_rate` (percentage points) |
+| `brand_share_of_voice` | Brand mentions / total mentioned presences |
+| `competitor_share_of_voice` | Competitor mentions / total mentioned presences |
+
+### Overlap Matrix
+
+Classifies SUCCEEDED runs into four mutually exclusive buckets:
+
+| Bucket | Meaning |
+|--------|---------|
+| `brand_only_runs` | Brand mentioned, competitor not |
+| `competitor_only_runs` | Competitor mentioned, brand not |
+| `both_runs` | Both mentioned |
+| `neither_runs` | Neither mentioned |
+
+Reconciliation invariant: `brand_only + competitor_only + both + neither = successful_observations`.
+
+### Owned Citation Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `brand_owned_citation_rate` | Percentage of WEB_GROUNDED runs with brand-domain citations |
+| `competitor_owned_citation_rate` | Percentage of WEB_GROUNDED runs with competitor-domain citations |
+| `citation_gap_pp` | `competitor_owned_citation_rate - brand_owned_citation_rate` |
+
+Citation metrics are computed only for `WEB_GROUNDED` runs (MODEL_ONLY
+runs have no citations). Domain attribution uses
+`SourceAttribution` records from the analysis phase.
+
+### Provider Breakdown
+
+Per-provider brand vs competitor comparison with the same visibility,
+citation, and gap metrics, scoped to a single provider's runs.
+
+### Prompt Gaps
+
+Prompts where the competitor appears and the brand does not. Sorted by
+priority: PURCHASE+commercial > PURCHASE > CONSIDERATION+commercial >
+CONSIDERATION > AWARENESS, then by provider count (desc).
+
+### Reliability Context
+
+Optional `ReliabilityContext` from a linked `CONFIDENCE` scan (matched
+by `baseline_scan_id`). Provides `overall_visibility_rate`,
+`mention_stability`, `repeat_sufficiency`, observed visibility range,
+and `confidence_level` for the brand entity.
+
+### True Zero vs NULL
+
+A `0.0000` visibility rate with a COMPLETED analysis is a true measured
+zero (the brand was never mentioned in any SUCCEEDED run). `None` means
+no SUCCEEDED runs exist (denominator is zero). This distinction is
+preserved in all competitor explanation metrics.
+
+See `docs/COMPETITOR_EXPLANATIONS.md` for full details.
