@@ -1145,9 +1145,11 @@ def test_confidence_round_by_round_execution_order(db_session: Session) -> None:
         key="conf-1",
         repeat_count=3,
     )
+    # Reset counter before confidence execution (standard scan also used the adapter).
+    call_count[0] = 0
     _execute(db_session, result.scan.id, registry)
 
-    # Verify all 6 calls were made.
+    # Verify all 6 calls were made (2 prompts x 1 provider x 3 repeats).
     assert call_count[0] == 6
 
     # Verify run statuses.
