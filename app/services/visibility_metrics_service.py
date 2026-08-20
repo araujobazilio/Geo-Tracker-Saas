@@ -39,7 +39,7 @@ from app.core.enums import (
     ScanStatus,
     TrackedEntityType,
 )
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError
 from app.models.analysis import (
     ANALYSIS_VERSION,
     EntityMention,
@@ -125,6 +125,10 @@ class VisibilityMetricsService:
     ) -> MetricsResult:
         scan = self._load_scoped_scan(workspace_id, project_id, scan_id)
         analysis = self._load_analysis(scan_id)
+        # Analysis readiness: require COMPLETED analysis.
+        # A missing/failed/pending analysis is NOT evidence of brand absence.
+        self._require_completed_analysis(analysis)
+        assert analysis is not None  # for type narrowing; _require_completed_analysis raises
         snapshots = self._load_snapshots(scan_id)
 
         # Load runs joined with prompts for prompt_type filtering.
@@ -147,35 +151,34 @@ class VisibilityMetricsService:
         successful_count = len(scoped_succeeded)
         coverage = _pct(successful_count, planned_count)
 
-        # Load mentions and attributions for the analysis.
+        # Load mentions and attributions for the analysis (COMPLETED guaranteed).
         mentioned_run_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
         owned_source_count_by_entity: dict[uuid.UUID, int] = defaultdict(int)
         owned_cited_run_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
 
-        if analysis is not None and analysis.status == ScanAnalysisStatus.COMPLETED:
-            # Load mentions — only for runs in scope.
-            scoped_succeeded_ids = {r[0].id for r in scoped_succeeded}
-            mentions = self._load_mentions(analysis.id, scoped_succeeded_ids)
-            for mention in mentions:
-                mentioned_run_ids_by_entity[mention.entity_snapshot_id].add(mention.prompt_run_id)
+        # Load mentions — only for runs in scope.
+        scoped_succeeded_ids = {r[0].id for r in scoped_succeeded}
+        mentions = self._load_mentions(analysis.id, scoped_succeeded_ids)
+        for mention in mentions:
+            mentioned_run_ids_by_entity[mention.entity_snapshot_id].add(mention.prompt_run_id)
 
-            # Load attributions — need to join through response_sources → prompt_runs
-            # to filter by scope.
-            attributions = self._load_attributions(analysis.id)
-            # Build source → run mapping.
-            source_to_run = self._build_source_to_run_map(scan_id)
-            for attr in attributions:
-                run_id = source_to_run.get(attr.response_source_id)
-                if run_id is None:
-                    continue
-                if run_id not in scoped_succeeded_ids:
-                    continue
-                # Check if the run is WEB_GROUNDED for citation eligibility.
-                run = next((r for r in scoped_succeeded if r[0].id == run_id), None)
-                if run is None or run[0].execution_mode != ProviderExecutionMode.WEB_GROUNDED:
-                    continue
-                owned_source_count_by_entity[attr.entity_snapshot_id] += 1
-                owned_cited_run_ids_by_entity[attr.entity_snapshot_id].add(run_id)
+        # Load attributions — need to join through response_sources -> prompt_runs
+        # to filter by scope.
+        attributions = self._load_attributions(analysis.id)
+        # Build source -> run mapping.
+        source_to_run = self._build_source_to_run_map(scan_id)
+        for attr in attributions:
+            run_id = source_to_run.get(attr.response_source_id)
+            if run_id is None:
+                continue
+            if run_id not in scoped_succeeded_ids:
+                continue
+            # Check if the run is WEB_GROUNDED for citation eligibility.
+            run = next((r for r in scoped_succeeded if r[0].id == run_id), None)
+            if run is None or run[0].execution_mode != ProviderExecutionMode.WEB_GROUNDED:
+                continue
+            owned_source_count_by_entity[attr.entity_snapshot_id] += 1
+            owned_cited_run_ids_by_entity[attr.entity_snapshot_id].add(run_id)
 
         # Citation-eligible runs: SUCCEEDED WEB_GROUNDED in scope.
         citation_eligible_runs = [
@@ -304,6 +307,18 @@ class VisibilityMetricsService:
             raise NotFoundError("Scan not found.")
         return scan
 
+    def _require_completed_analysis(self, analysis: ScanAnalysis | None) -> None:
+        """Fail closed if analysis is missing or not COMPLETED.
+
+        A missing, PENDING, RUNNING, or FAILED analysis is NOT evidence
+        that a brand was absent. We must not silently populate zero-valued
+        mention metrics.
+        """
+        if analysis is None:
+            raise ConflictError("Scan analysis is not completed.")
+        if analysis.status != ScanAnalysisStatus.COMPLETED:
+            raise ConflictError("Scan analysis is not completed.")
+
     def _load_analysis(self, scan_id: uuid.UUID) -> ScanAnalysis | None:
         return self._session.execute(
             select(ScanAnalysis).where(
@@ -366,7 +381,7 @@ class VisibilityMetricsService:
         runs_with_prompts: list[tuple[PromptRun, Prompt]],
         prompt_type: PromptType,
         snapshots: list[ScanEntitySnapshot],
-        analysis: ScanAnalysis | None,
+        analysis: ScanAnalysis,
     ) -> list[ProviderBreakdown]:
         # Group runs by provider.
         providers: set[LLMProvider] = {r[0].provider for r in runs_with_prompts}
@@ -388,7 +403,7 @@ class VisibilityMetricsService:
 
             # Brand visibility for this provider.
             vis_rate: Decimal | None = None
-            if brand_snap and analysis and analysis.status == ScanAnalysisStatus.COMPLETED:
+            if brand_snap:
                 succeeded_ids = {r[0].id for r in succeeded}
                 if succeeded_ids:
                     mentioned_count = int(
@@ -409,7 +424,7 @@ class VisibilityMetricsService:
             citation_count = len(citation_eligible)
             owned_cited = 0
             citation_rate: Decimal | None = None
-            if brand_snap and analysis and analysis.status == ScanAnalysisStatus.COMPLETED:
+            if brand_snap:
                 cited_run_ids: set[uuid.UUID] = set()
                 if citation_count > 0:
                     eligible_ids = {r[0].id for r in citation_eligible}

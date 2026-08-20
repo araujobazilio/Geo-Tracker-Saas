@@ -386,3 +386,73 @@ Phase 8 does NOT implement embedding similarity, BLEU, semantic answer
 similarity, LLM comparison, or sentiment consistency. Confidence is
 about repeatability of entity presence, visibility, and citation
 evidence using existing deterministic evidence.
+
+## Phase 8.1: Metrics Integrity and Analysis Readiness
+
+### Analysis Readiness
+
+Confidence metrics and visibility metrics require a `COMPLETED`
+`ScanAnalysis` before computing any mention-based metrics.
+
+A missing, `PENDING`, `RUNNING`, or `FAILED` analysis is NOT evidence
+that a brand was absent. The services fail closed with:
+
+```
+ConflictError("Scan analysis is not completed.")
+```
+
+The services do NOT silently populate zero-valued mention metrics when
+analysis is unavailable.
+
+### True Zero vs No Measurement
+
+- **True measured zero**: `COMPLETED` analysis + successful observations
+  exist + brand detected in zero of them → `visibility_rate = 0%`.
+  Mention stability may be 100% because the measured absence was stable.
+- **No measurement**: zero successful observations →
+  `visibility = NULL`, `confidence = INSUFFICIENT`. No fake zero.
+- **Analysis not ready**: missing/failed analysis → `ConflictError`.
+  No fake zero.
+
+### Provider Isolation
+
+Every `ProviderReliability` value is calculated ONLY from that
+provider's `PromptRuns`:
+
+- **Brand visibility numerator**: SUCCEEDED runs from provider P that
+  mention BRAND, intersected with P's successful run IDs. Never divides
+  mentions from all providers by successes from one provider.
+- **Round summaries**: provider-specific. A round is valid for provider
+  P only if P has successful observations in that round. Provider P
+  does NOT inherit another provider's valid rounds.
+- **Visibility range**: `observed_visibility_min` and
+  `observed_visibility_max` come only from P's round visibility. No
+  overall multi-provider range for individual providers.
+- **Confidence level**: uses provider-specific measurement coverage,
+  valid round count, repeat sufficiency, and BRAND mention stability.
+- **Mention stability**: calculated from P's Prompt x Provider cells
+  only. Competitors or another provider's runs do not influence P's
+  stability.
+
+### Brand Snapshot Identification
+
+Provider breakdown identifies the primary tracked brand using
+`TrackedEntityType.BRAND` (the approved Phase 7 enum). The legacy
+`"PRIMARY_BRAND"` string is not used. Comparison is robust to
+SQLAlchemy returning either the enum object or the string-backed value.
+
+### Failed Provider Observations
+
+FAILED provider observations:
+- Reduce that provider's measurement coverage
+- Do NOT count as brand absence (no fake 0% visibility)
+- Do NOT inherit another provider's successful rounds or visibility range
+- Result in `brand_visibility_rate = NULL` when the provider has zero
+  successful observations
+
+### Provider Enum Normalization
+
+`ProviderReliability.provider` is safely normalized using
+`LLMProvider(value)` to handle SQLAlchemy string-backed enum fields that
+may return plain strings. This prevents
+`AttributeError: 'str' object has no attribute 'value'`.

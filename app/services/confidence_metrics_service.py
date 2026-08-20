@@ -15,6 +15,19 @@ Key concepts:
 - Round Visibility = ordinary Phase 7 visibility per observation_index
 - Observed Visibility Range = max(round visibilities) - min(round visibilities)
 
+Analysis readiness:
+- Metrics require a COMPLETED ScanAnalysis. A missing, PENDING, RUNNING,
+  or FAILED analysis is NOT evidence that a brand was absent. The service
+  fails closed with ConflictError("Scan analysis is not completed.").
+- A COMPLETED analysis with zero mentions is a TRUE measured zero
+  (visibility = 0%, stability may be 100%).
+
+Provider isolation:
+- Every ProviderReliability value is calculated ONLY from that provider's
+  PromptRuns. Provider numerators never inherit another provider's mentions.
+- Provider round summaries, visibility ranges, valid round counts, and
+  confidence levels are all provider-specific.
+
 Confidence Level heuristic (repeat-reliability-v1):
 - INSUFFICIENT: < 2 valid rounds, or coverage < 50%, or repeat sufficiency < 50%
 - LOW: coverage < 75%, or repeat sufficiency < 75%, or mention stability < 60%
@@ -45,8 +58,9 @@ from app.core.enums import (
     PromptType,
     ScanAnalysisStatus,
     ScanType,
+    TrackedEntityType,
 )
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.analysis import (
     ANALYSIS_VERSION,
     EntityMention,
@@ -93,6 +107,20 @@ def _pct(numerator: int, denominator: int) -> Decimal | None:
     return (Decimal(numerator) / Decimal(denominator) * Decimal(100)).quantize(
         _PRECISION, rounding=ROUND_HALF_UP
     )
+
+
+def _entity_type_str(etype: object) -> str:
+    """Safely convert a TrackedEntityType (enum or str) to its string value."""
+    if hasattr(etype, "value"):
+        return str(etype.value)
+    return str(etype)
+
+
+def _to_llm_provider(value: object) -> LLMProvider:
+    """Safely convert a provider value (enum or str) to LLMProvider."""
+    if isinstance(value, LLMProvider):
+        return value
+    return LLMProvider(str(value))
 
 
 # ----------------------------------------------------------------------
@@ -170,6 +198,9 @@ class ConfidenceMetricsService:
 
     No provider calls. No persistence of opaque percentages.
     Metrics are recomputed from immutable evidence on every request.
+
+    Requires a COMPLETED ScanAnalysis. A missing/failed/pending analysis
+    is NOT evidence of brand absence -- the service fails closed.
     """
 
     def __init__(self, session: Session) -> None:
@@ -187,7 +218,12 @@ class ConfidenceMetricsService:
         if scan.scan_type != ScanType.CONFIDENCE:
             raise ValidationError("Confidence metrics are only available for CONFIDENCE scans.")
 
+        # Analysis readiness: require COMPLETED analysis.
+        # A missing/failed/pending analysis is NOT evidence of brand absence.
         analysis = self._load_analysis(scan_id)
+        self._require_completed_analysis(analysis)
+        assert analysis is not None  # for type narrowing; _require_completed_analysis raises
+
         snapshots = self._load_snapshots(scan_id)
         runs_with_prompts = self._load_runs_with_prompts(scan_id)
 
@@ -205,13 +241,12 @@ class ConfidenceMetricsService:
         successful_count = len(scoped_succeeded)
         coverage = _pct(successful_count, planned_count)
 
-        # Load mentions for succeeded runs.
+        # Load mentions for succeeded runs (analysis is COMPLETED here).
         mentioned_run_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
-        if analysis is not None and analysis.status == ScanAnalysisStatus.COMPLETED:
-            succeeded_ids = {run.id for run, _ in scoped_succeeded}
-            mentions = self._load_mentions(analysis.id, succeeded_ids)
-            for mention in mentions:
-                mentioned_run_ids_by_entity[mention.entity_snapshot_id].add(mention.prompt_run_id)
+        succeeded_ids = {run.id for run, _ in scoped_succeeded}
+        mentions = self._load_mentions(analysis.id, succeeded_ids)
+        for mention in mentions:
+            mentioned_run_ids_by_entity[mention.entity_snapshot_id].add(mention.prompt_run_id)
 
         # Round summaries.
         round_summaries = self._compute_round_summaries(
@@ -225,22 +260,21 @@ class ConfidenceMetricsService:
             snapshots,
             mentioned_run_ids_by_entity,
             round_summaries,
+            scan.repeat_count,
         )
 
-        # Provider breakdown.
+        # Provider breakdown (provider-scoped).
         provider_breakdown = self._compute_provider_breakdown(
             scoped_runs,
             scoped_succeeded,
             snapshots,
             mentioned_run_ids_by_entity,
-            round_summaries,
+            scan.repeat_count,
         )
 
         # Overall confidence level.
         valid_rounds = [rs for rs in round_summaries if rs.successful_observations > 0]
-        repeat_sufficiency = self._compute_repeat_sufficiency(
-            scoped_runs, scoped_succeeded, snapshots, mentioned_run_ids_by_entity
-        )
+        repeat_sufficiency = self._compute_repeat_sufficiency(scoped_runs, scoped_succeeded)
         mention_stability = self._compute_mention_stability(
             scoped_runs, scoped_succeeded, snapshots, mentioned_run_ids_by_entity
         )
@@ -267,6 +301,22 @@ class ConfidenceMetricsService:
             provider_breakdown=provider_breakdown,
             overall_confidence_level=overall_level,
         )
+
+    # ------------------------------------------------------------------
+    # Analysis readiness
+    # ------------------------------------------------------------------
+
+    def _require_completed_analysis(self, analysis: ScanAnalysis | None) -> None:
+        """Fail closed if analysis is missing or not COMPLETED.
+
+        A missing, PENDING, RUNNING, or FAILED analysis is NOT evidence
+        that a brand was absent. We must not silently populate zero-valued
+        mention metrics.
+        """
+        if analysis is None:
+            raise ConflictError("Scan analysis is not completed.")
+        if analysis.status != ScanAnalysisStatus.COMPLETED:
+            raise ConflictError("Scan analysis is not completed.")
 
     # ------------------------------------------------------------------
     # Round summaries
@@ -322,16 +372,17 @@ class ConfidenceMetricsService:
         snapshots: list[ScanEntitySnapshot],
         mentioned_run_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]],
         round_summaries: list[RoundSummary],
+        repeat_count: int,
     ) -> list[EntityReliability]:
-        # Build cell map: (prompt_id, provider) → list of succeeded run IDs.
+        # Build cell map: (prompt_id, provider) -> list of succeeded run IDs.
         cell_succeeded: dict[tuple[uuid.UUID, LLMProvider], list[uuid.UUID]] = defaultdict(list)
         for run, _ in scoped_succeeded:
-            cell_key = (run.prompt_id, run.provider)
+            cell_key = (run.prompt_id, _to_llm_provider(run.provider))
             cell_succeeded[cell_key].append(run.id)
 
         # All planned cells.
         planned_cells: set[tuple[uuid.UUID, LLMProvider]] = {
-            (run.prompt_id, run.provider) for run, _ in scoped_runs
+            (run.prompt_id, _to_llm_provider(run.provider)) for run, _ in scoped_runs
         }
 
         results: list[EntityReliability] = []
@@ -385,10 +436,7 @@ class ConfidenceMetricsService:
             # Confidence level for this entity.
             valid_rounds = [rs for rs in round_summaries if rs.successful_observations > 0]
             level = classify_confidence_level(
-                repeat_count=max(
-                    (rs.observation_index for rs in round_summaries),
-                    default=0,
-                ),
+                repeat_count=repeat_count,
                 valid_round_count=len(valid_rounds),
                 measurement_coverage=_pct(len(scoped_succeeded), len(scoped_runs)),
                 repeat_sufficiency=repeat_suff,
@@ -398,11 +446,7 @@ class ConfidenceMetricsService:
             results.append(
                 EntityReliability(
                     entity_snapshot_id=snap.id,
-                    entity_type=(
-                        snap.entity_type.value
-                        if hasattr(snap.entity_type, "value")
-                        else snap.entity_type
-                    ),
+                    entity_type=_entity_type_str(snap.entity_type),
                     name=snap.name,
                     domain=snap.domain,
                     overall_visibility_rate=overall_vis,
@@ -422,7 +466,7 @@ class ConfidenceMetricsService:
         return results
 
     # ------------------------------------------------------------------
-    # Provider breakdown
+    # Provider breakdown — fully provider-scoped
     # ------------------------------------------------------------------
 
     def _compute_provider_breakdown(
@@ -431,41 +475,43 @@ class ConfidenceMetricsService:
         scoped_succeeded: list[tuple[PromptRun, Prompt]],
         snapshots: list[ScanEntitySnapshot],
         mentioned_run_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]],
-        round_summaries: list[RoundSummary],
+        repeat_count: int,
     ) -> list[ProviderReliability]:
-        providers = sorted({run.provider for run, _ in scoped_runs})
+        providers = sorted({_to_llm_provider(run.provider) for run, _ in scoped_runs})
+
+        # Find brand snapshot using TrackedEntityType.BRAND (not PRIMARY_BRAND).
+        brand_snap = self._find_brand_snapshot(snapshots)
+
         results: list[ProviderReliability] = []
-
-        # Find brand snapshot.
-        brand_snap = None
-        for s in snapshots:
-            etype = s.entity_type.value if hasattr(s.entity_type, "value") else s.entity_type
-            if etype == "PRIMARY_BRAND":
-                brand_snap = s
-                break
-
         for prov in providers:
-            prov_runs = [(r, p) for r, p in scoped_runs if r.provider == prov]
-            prov_succeeded = [(r, p) for r, p in scoped_succeeded if r.provider == prov]
+            prov_runs = [(r, p) for r, p in scoped_runs if _to_llm_provider(r.provider) == prov]
+            prov_succeeded = [
+                (r, p) for r, p in scoped_succeeded if _to_llm_provider(r.provider) == prov
+            ]
             prov_coverage = _pct(len(prov_succeeded), len(prov_runs))
 
-            # Brand visibility for this provider.
+            # Brand visibility for this provider — numerator MUST intersect
+            # with this provider's successful run IDs.
             brand_vis: Decimal | None = None
             if brand_snap is not None:
+                prov_succeeded_ids = {r.id for r, _ in prov_succeeded}
                 brand_mentioned = mentioned_run_ids_by_entity.get(brand_snap.id, set())
-                brand_vis = _pct(len(brand_mentioned), len(prov_succeeded))
+                brand_mentioned_in_provider = brand_mentioned & prov_succeeded_ids
+                brand_vis = _pct(len(brand_mentioned_in_provider), len(prov_succeeded))
 
-            # Per-provider cells.
-            cell_succeeded: dict[tuple[uuid.UUID, LLMProvider], list[uuid.UUID]] = defaultdict(list)
+            # Per-provider cells: (prompt_id, provider) -> succeeded run IDs.
+            # Since we're already scoped to one provider, the cell key is
+            # effectively (prompt_id, prov).
+            cell_succeeded: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
             for run, _ in prov_succeeded:
-                cell_succeeded[(run.prompt_id, run.provider)].append(run.id)
+                cell_succeeded[run.prompt_id].append(run.id)
 
-            planned_cells = {(run.prompt_id, run.provider) for run, _ in prov_runs}
+            planned_cells = {run.prompt_id for run, _ in prov_runs}
 
             repeat_analyzable = 0
             stable = 0
-            for cell_key in planned_cells:
-                succeeded_ids = cell_succeeded.get(cell_key, [])
+            for prompt_id in planned_cells:
+                succeeded_ids = cell_succeeded.get(prompt_id, [])
                 if len(succeeded_ids) >= 2:
                     repeat_analyzable += 1
                     if brand_snap is not None:
@@ -481,26 +527,36 @@ class ConfidenceMetricsService:
             repeat_suff = _pct(repeat_analyzable, len(planned_cells))
             mention_stab = _pct(stable, repeat_analyzable)
 
-            # Per-provider round visibility range for brand.
+            # Provider-specific round summaries for visibility range.
+            # Only this provider's runs count toward round validity and
+            # visibility.
+            prov_round_vis_values: list[Decimal] = []
+            prov_valid_rounds = 0
+            observation_indices = sorted({run.observation_index for run, _ in prov_runs})
+            for obs_idx in observation_indices:
+                round_succeeded = [
+                    (r, p) for r, p in prov_succeeded if r.observation_index == obs_idx
+                ]
+                if len(round_succeeded) > 0:
+                    prov_valid_rounds += 1
+                    if brand_snap is not None:
+                        round_succeeded_ids = {r.id for r, _ in round_succeeded}
+                        brand_mentioned = mentioned_run_ids_by_entity.get(brand_snap.id, set())
+                        mentioned_in_round = brand_mentioned & round_succeeded_ids
+                        vis = _pct(len(mentioned_in_round), len(round_succeeded))
+                        if vis is not None:
+                            prov_round_vis_values.append(vis)
+
             vis_min: Decimal | None = None
             vis_max: Decimal | None = None
-            if brand_snap is not None:
-                round_vis_values: list[Decimal] = []
-                for rs in round_summaries:
-                    vis = rs.entity_visibility.get(brand_snap.id)
-                    if vis is not None:
-                        round_vis_values.append(vis)
-                if round_vis_values:
-                    vis_min = min(round_vis_values)
-                    vis_max = max(round_vis_values)
+            if prov_round_vis_values:
+                vis_min = min(prov_round_vis_values)
+                vis_max = max(prov_round_vis_values)
 
-            valid_rounds = [rs for rs in round_summaries if rs.successful_observations > 0]
+            # Provider-specific confidence level.
             level = classify_confidence_level(
-                repeat_count=max(
-                    (rs.observation_index for rs in round_summaries),
-                    default=0,
-                ),
-                valid_round_count=len(valid_rounds),
+                repeat_count=repeat_count,
+                valid_round_count=prov_valid_rounds,
                 measurement_coverage=prov_coverage,
                 repeat_sufficiency=repeat_suff,
                 mention_stability=mention_stab,
@@ -530,14 +586,12 @@ class ConfidenceMetricsService:
         self,
         scoped_runs: list[tuple[PromptRun, Prompt]],
         scoped_succeeded: list[tuple[PromptRun, Prompt]],
-        snapshots: list[ScanEntitySnapshot],
-        mentioned_run_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]],
     ) -> Decimal | None:
         cell_succeeded: dict[tuple[uuid.UUID, LLMProvider], list[uuid.UUID]] = defaultdict(list)
         for run, _ in scoped_succeeded:
-            cell_succeeded[(run.prompt_id, run.provider)].append(run.id)
+            cell_succeeded[(run.prompt_id, _to_llm_provider(run.provider))].append(run.id)
 
-        planned_cells = {(run.prompt_id, run.provider) for run, _ in scoped_runs}
+        planned_cells = {(run.prompt_id, _to_llm_provider(run.provider)) for run, _ in scoped_runs}
         repeat_analyzable = sum(
             1 for cell in planned_cells if len(cell_succeeded.get(cell, [])) >= 2
         )
@@ -552,9 +606,9 @@ class ConfidenceMetricsService:
     ) -> Decimal | None:
         cell_succeeded: dict[tuple[uuid.UUID, LLMProvider], list[uuid.UUID]] = defaultdict(list)
         for run, _ in scoped_succeeded:
-            cell_succeeded[(run.prompt_id, run.provider)].append(run.id)
+            cell_succeeded[(run.prompt_id, _to_llm_provider(run.provider))].append(run.id)
 
-        planned_cells = {(run.prompt_id, run.provider) for run, _ in scoped_runs}
+        planned_cells = {(run.prompt_id, _to_llm_provider(run.provider)) for run, _ in scoped_runs}
 
         repeat_analyzable_cells = 0
         stable_cells = 0
@@ -578,8 +632,23 @@ class ConfidenceMetricsService:
         return _pct(stable_cells, repeat_analyzable_cells)
 
     # ------------------------------------------------------------------
-    # Data loading helpers
+    # Helpers
     # ------------------------------------------------------------------
+
+    def _find_brand_snapshot(
+        self, snapshots: list[ScanEntitySnapshot]
+    ) -> ScanEntitySnapshot | None:
+        """Find the BRAND snapshot using TrackedEntityType.BRAND.
+
+        Robust to SQLAlchemy returning either the enum object or the
+        string-backed value.
+        """
+        brand_str = TrackedEntityType.BRAND.value
+        for s in snapshots:
+            etype = _entity_type_str(s.entity_type)
+            if etype == brand_str:
+                return s
+        return None
 
     def _load_scoped_scan(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID, scan_id: uuid.UUID

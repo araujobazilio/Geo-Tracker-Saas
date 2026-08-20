@@ -216,7 +216,7 @@ VisibilityMetricsService computes metrics from persisted evidence
 | `mention_detector.py` | Deterministic text matching for brand/competitor mentions. Case-insensitive, token-boundary-aware (no substring false positives). Produces `EntityMention` records. |
 | `source_attributor.py` | URL host parsing and domain matching to attribute `ResponseSource` URLs to tracked entities. Produces `SourceAttribution` records. Phase 7 supports `OWNED_DOMAIN` attribution only. |
 | `scan_analysis_service.py` | Orchestrates analysis: loads immutable `ScanEntitySnapshot`s, runs mention detection + source attribution on each SUCCEEDED `PromptRun`, persists evidence atomically. Idempotent (re-running returns existing COMPLETED analysis). Concurrent-safe via row locking. Zero AI Checks, zero provider calls. |
-| `visibility_metrics_service.py` | Computes all visibility metrics from persisted evidence: visibility rate, mention counts, citation counts, share of voice, measurement coverage, provider breakdown, leaderboard. Distinguishes zero vs null semantics for `visibility_rate`. |
+| `visibility_metrics_service.py` | Computes all visibility metrics from persisted evidence: visibility rate, mention counts, citation counts, share of voice, measurement coverage, provider breakdown, leaderboard. Distinguishes zero vs null semantics for `visibility_rate`. Requires COMPLETED analysis (Phase 8.1). |
 | `analysis.py` (router) | Analysis API endpoints for running/getting analysis and metrics. Tenant-isolated, role-enforced (ADMIN for POST, MEMBER for GET). |
 | `analysis_repository.py` | Data access for `ScanAnalysis`, `EntityMention`, `SourceAttribution`, `ScanEntitySnapshot`. |
 
@@ -266,7 +266,7 @@ ConfidenceMetricsService computes reliability metrics from repeated observations
 | Component | Responsibility |
 |-----------|----------------|
 | `confidence_scan_creation_service.py` | Clones the baseline STANDARD scan's snapshotted prompt set, provider targets, execution modes, and model IDs. Creates `prompt_count × provider_count × repeat_count` `PromptRun` rows with appropriate `observation_index` values. Validates baseline scan is terminal and same-workspace. |
-| `confidence_metrics_service.py` | Computes reliability metrics from repeated CONFIDENCE observations: measurement coverage, repeat sufficiency, mention stability, round visibility, observed visibility range, and `MeasurementConfidenceLevel` (INSUFFICIENT/LOW/MEDIUM/HIGH). |
+| `confidence_metrics_service.py` | Computes reliability metrics from repeated CONFIDENCE observations: measurement coverage, repeat sufficiency, mention stability, round visibility, observed visibility range, and `MeasurementConfidenceLevel` (INSUFFICIENT/LOW/MEDIUM/HIGH). Requires COMPLETED analysis. Provider breakdown is fully provider-scoped (Phase 8.1). |
 | `confidence.py` (router) | Confidence scan API endpoints: create CONFIDENCE scan from baseline, retrieve confidence results and metrics. Tenant-isolated, role-enforced. |
 
 ### Service extensions

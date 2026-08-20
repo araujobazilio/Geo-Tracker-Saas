@@ -252,3 +252,50 @@ observations.
 
 - `docs/DETECTION_ENGINE.md` — detection rules and analysis lifecycle
 - `docs/DATABASE.md` — analysis schema and table definitions
+
+## Phase 8.1: Metrics Integrity and Analysis Readiness
+
+### Analysis Required Before Metrics
+
+Both `VisibilityMetricsService` and `ConfidenceMetricsService` now
+require a `COMPLETED` `ScanAnalysis` before computing any mention-based
+metrics. A missing, `PENDING`, `RUNNING`, or `FAILED` analysis is NOT
+evidence that a brand was absent — the services fail closed with
+`ConflictError("Scan analysis is not completed.")`.
+
+This prevents the false-zero bug where:
+- analysis failed → `mentioned_run_ids = empty` → `visibility = 0%`
+
+That was scientifically wrong. Now:
+- analysis missing/failed → metric unavailable (ConflictError)
+- analysis completed with zero mentions → `0%` (true measured zero)
+
+### True Zero vs No Measurement vs Analysis Not Ready
+
+| Scenario | `visibility_rate` | Behavior |
+|----------|-------------------|----------|
+| COMPLETED analysis, 0 mentions | `0.0` | True measured zero |
+| COMPLETED analysis, 0 successful obs | `None` | No measurement |
+| Missing/FAILED/PENDING/RUNNING analysis | N/A | `ConflictError` |
+
+### Provider Isolation
+
+Provider breakdown metrics are fully provider-scoped:
+
+- **Brand visibility**: numerator = SUCCEEDED runs from provider P that
+  mention BRAND, intersected with P's successful run IDs. Never divides
+  mentions from all providers by one provider's successes.
+- **Round validity**: a round is valid for provider P only if P has
+  successful observations in that round. P does not inherit another
+  provider's valid rounds.
+- **Visibility range**: `observed_visibility_min`/`max` come only from
+  P's round visibility, not an overall multi-provider range.
+- **Confidence level**: uses provider-specific coverage, valid rounds,
+  repeat sufficiency, and BRAND mention stability.
+- **Mention stability**: calculated from P's cells only.
+
+### Brand Snapshot Identification
+
+Provider breakdown uses `TrackedEntityType.BRAND` (Phase 7 enum), not
+the legacy `"PRIMARY_BRAND"` string. Comparison is robust to SQLAlchemy
+returning either the enum object or the string-backed value.

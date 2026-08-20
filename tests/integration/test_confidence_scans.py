@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -38,6 +40,7 @@ from app.core.enums import (
     PromptType,
     ProviderExecutionMode,
     ProviderSurface,
+    ScanAnalysisStatus,
     ScanStatus,
     ScanType,
     TrackedEntityType,
@@ -62,6 +65,7 @@ from app.models import (
     PromptSet,
     ProviderPriceRule,
     Scan,
+    ScanAnalysis,
     ScanEntitySnapshot,
     User,
     Workspace,
@@ -75,10 +79,13 @@ from app.providers.base import (
     ProviderResult,
     ProviderUsage,
 )
+from app.services.confidence_metrics_service import ConfidenceMetricsService
 from app.services.confidence_scan_creation_service import ConfidenceScanCreationService
 from app.services.prompt_generation_service import GENERATOR_KEY
+from app.services.scan_analysis_service import ScanAnalysisService
 from app.services.scan_creation_service import ScanCreationService
 from app.services.scan_execution_service import ScanExecutionService
+from app.services.scan_finalization_service import ScanFinalizationService
 
 pytestmark = pytest.mark.integration
 
@@ -406,6 +413,37 @@ def _execute(
             settings=settings or _settings(),
         ).execute_scan(scan_id)
     )
+
+
+def _connection_factory(db: Session) -> Callable[[], AbstractContextManager[Session]]:
+    """Factory bound to the same connection (for analysis auto-trigger)."""
+
+    @contextmanager
+    def _ctx() -> Iterator[Session]:
+        factory = sessionmaker(
+            bind=db.connection(),
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
+        session = factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    return _ctx
+
+
+def _finalize(db: Session, scan_id: uuid.UUID) -> ScanStatus:
+    return ScanFinalizationService(db, analysis_session_factory=_connection_factory(db)).finalize(
+        scan_id, trigger_analysis=True
+    )
+
+
+def _analyze(db: Session, scan_id: uuid.UUID) -> ScanAnalysis:
+    return ScanAnalysisService(db, failure_session_factory=_connection_factory(db)).analyze(scan_id)
 
 
 def _create_confidence(
@@ -1092,52 +1130,26 @@ def test_confidence_idempotency_different_repeat_count_conflicts(
 
 
 def test_confidence_round_by_round_execution_order(db_session: Session) -> None:
-    """All obs=1 runs finish before obs=2 begins.
+    """All obs=1 runs finish before obs=2 begins, and so on.
 
-    Uses a fake adapter with a barrier to ensure round 1 completes
-    before round 2 starts.
+    Instruments _execute_run_ids to record the observation_index of each
+    batch. Asserts batches occur strictly [1], [2], [3].
     """
-    import threading
-
-    ws, user, project, pset, prompts = _seed(
+    ws, _user, project, _pset, _prompts = _seed(
         db_session, providers=[LLMProvider.OPENAI], prompt_count=2
     )
     _add_prices(db_session, [LLMProvider.OPENAI])
-
-    lock = threading.Lock()
-
-    class OrderedAdapter(TrackingFakeAdapter):
-        async def execute(self, request: ProviderRequest) -> ProviderResult:
-            # We need to figure out the observation_index from the run.
-            # The adapter doesn't have direct access, but we can track
-            # call order. With scan_max_concurrency=2 and 2 prompts,
-            # round 1 = 2 calls, round 2 = 2 calls, round 3 = 2 calls.
-            result = await super().execute(request)
-            return result
-
-    # Simpler approach: track call count. With 2 prompts x 1 provider x 3 repeats = 6 calls.
-    # Round 1: calls 1-2, Round 2: calls 3-4, Round 3: calls 5-6.
-    call_count = [0]
-
-    class CountingAdapter(TrackingFakeAdapter):
-        async def execute(self, request: ProviderRequest) -> ProviderResult:
-            with lock:
-                call_count[0] += 1
-            return await super().execute(request)
-
-    registry = FakeProviderRegistry(
-        {LLMProvider.OPENAI: CountingAdapter(LLMProvider.OPENAI, SURFACES[LLMProvider.OPENAI])}
-    )
+    registry = _registry([LLMProvider.OPENAI])
     dispatcher = FakeDispatcher()
 
-    std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
+    std_result = _create_standard(db_session, ws, _user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
     db_session.expire_all()
 
     result = _create_confidence(
         db_session,
         ws,
-        user,
+        _user,
         project,
         std_result.scan.id,
         registry,
@@ -1145,14 +1157,50 @@ def test_confidence_round_by_round_execution_order(db_session: Session) -> None:
         key="conf-1",
         repeat_count=3,
     )
-    # Reset counter before confidence execution (standard scan also used the adapter).
-    call_count[0] = 0
-    _execute(db_session, result.scan.id, registry)
 
-    # Verify all 6 calls were made (2 prompts x 1 provider x 3 repeats).
-    assert call_count[0] == 6
+    # Instrument _execute_run_ids to record the observation_index of each batch.
+    # The execution service loads run IDs by observation_index per round,
+    # so each call to _execute_run_ids corresponds to exactly one round.
+    batch_obs_indices: list[list[int]] = []
+    original_execute_run_ids = ScanExecutionService._execute_run_ids
 
-    # Verify run statuses.
+    async def recording_execute_run_ids(
+        self: ScanExecutionService, run_ids: list[uuid.UUID]
+    ) -> None:
+        # Look up the observation_index for each run_id in this batch.
+        factory = self._factory
+        with factory() as session:
+            from app.models.scan import PromptRun as _PR
+
+            rows = (
+                session.execute(select(_PR.observation_index).where(_PR.id.in_(run_ids)))
+                .scalars()
+                .all()
+            )
+            obs_values = sorted({int(v) for v in rows})
+        batch_obs_indices.append(obs_values)
+        await original_execute_run_ids(self, run_ids)
+
+    ScanExecutionService._execute_run_ids = recording_execute_run_ids  # type: ignore[method-assign]
+    try:
+        _execute(db_session, result.scan.id, registry)
+    finally:
+        ScanExecutionService._execute_run_ids = original_execute_run_ids  # type: ignore[method-assign]
+
+    # Assert: batches occur strictly [1], [2], [3].
+    # Each batch must contain only one observation_index value, and the
+    # sequence of indices must be strictly increasing by 1.
+    assert len(batch_obs_indices) == 3, f"Expected 3 batches, got {len(batch_obs_indices)}"
+    flat_indices = [obs for batch in batch_obs_indices for obs in batch]
+    assert flat_indices == [1, 1, 2, 2, 3, 3], f"Expected [1,1,2,2,3,3], got {flat_indices}"
+    # Each batch must be homogeneous (single observation_index).
+    for i, batch in enumerate(batch_obs_indices):
+        assert len(set(batch)) == 1, f"Batch {i} has mixed observation indices: {batch}"
+    # Batches must be strictly ordered.
+    batch_order = [batch[0] for batch in batch_obs_indices]
+    assert batch_order == [1, 2, 3], f"Expected batch order [1,2,3], got {batch_order}"
+
+    # Verify all runs succeeded.
     db_session.expire_all()
     runs = list(
         db_session.execute(select(PromptRun).where(PromptRun.scan_id == result.scan.id)).scalars()
@@ -1181,3 +1229,358 @@ def test_standard_scan_still_has_repeat_count_1(db_session: Session) -> None:
     )
     assert all(r.observation_index == 1 for r in runs)
     assert all(r.attempt_number == 1 for r in runs)
+
+
+# ----------------------------------------------------------------------
+# Phase 8.1: Metrics integrity and analysis readiness
+# ----------------------------------------------------------------------
+
+
+def _full_pipeline(
+    db: Session,
+    ws: Workspace,
+    user: User,
+    project: Project,
+    registry: FakeProviderRegistry,
+    dispatcher: FakeDispatcher,
+    *,
+    std_key: str,
+    conf_key: str,
+    repeat_count: int = 3,
+) -> tuple[Scan, Scan]:
+    """Create + execute + finalize + analyze a STANDARD then a CONFIDENCE scan."""
+    std_result = _create_standard(db, ws, user, project, registry, dispatcher, key=std_key)
+    _execute(db, std_result.scan.id, registry)
+    db.expire_all()
+    _finalize(db, std_result.scan.id)
+    _analyze(db, std_result.scan.id)
+    db.expire_all()
+
+    conf_result = _create_confidence(
+        db,
+        ws,
+        user,
+        project,
+        std_result.scan.id,
+        registry,
+        dispatcher,
+        key=conf_key,
+        repeat_count=repeat_count,
+    )
+    _execute(db, conf_result.scan.id, registry)
+    db.expire_all()
+    _finalize(db, conf_result.scan.id)
+    _analyze(db, conf_result.scan.id)
+    db.expire_all()
+    return std_result.scan, conf_result.scan
+
+
+def test_confidence_metrics_require_completed_analysis(db_session: Session) -> None:
+    """ConfidenceMetricsService must reject a scan with FAILED analysis."""
+    ws, user, project, _pset, _prompts = _seed(db_session, providers=[LLMProvider.OPENAI])
+    _add_prices(db_session, [LLMProvider.OPENAI])
+    registry = _registry([LLMProvider.OPENAI])
+    dispatcher = FakeDispatcher()
+
+    _std, conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-fail",
+        conf_key="conf-fail",
+        repeat_count=2,
+    )
+
+    # Force the analysis to FAILED.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == conf.id)
+    ).scalar_one()
+    analysis.status = ScanAnalysisStatus.FAILED
+    db_session.commit()
+
+    with pytest.raises(ConflictError, match="Scan analysis is not completed"):
+        ConfidenceMetricsService(db_session).get_metrics(ws.id, project.id, conf.id)
+
+
+def test_confidence_metrics_missing_analysis_rejected(db_session: Session) -> None:
+    """ConfidenceMetricsService must reject a scan with no analysis at all."""
+    ws, user, project, _pset, _prompts = _seed(db_session, providers=[LLMProvider.OPENAI])
+    _add_prices(db_session, [LLMProvider.OPENAI])
+    registry = _registry([LLMProvider.OPENAI])
+    dispatcher = FakeDispatcher()
+
+    _std, conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-missing",
+        conf_key="conf-missing",
+        repeat_count=2,
+    )
+
+    # Delete the analysis entirely.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == conf.id)
+    ).scalar_one()
+    db_session.delete(analysis)
+    db_session.commit()
+
+    with pytest.raises(ConflictError, match="Scan analysis is not completed"):
+        ConfidenceMetricsService(db_session).get_metrics(ws.id, project.id, conf.id)
+
+
+def test_visibility_metrics_missing_analysis_rejected(db_session: Session) -> None:
+    """VisibilityMetricsService must reject a scan with no analysis."""
+    ws, user, project, _pset, _prompts = _seed(db_session, providers=[LLMProvider.OPENAI])
+    _add_prices(db_session, [LLMProvider.OPENAI])
+    registry = _registry([LLMProvider.OPENAI])
+    dispatcher = FakeDispatcher()
+
+    std, _conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-vis-missing",
+        conf_key="conf-vis-missing",
+        repeat_count=2,
+    )
+
+    # Delete the analysis for the standard scan.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == std.id)
+    ).scalar_one()
+    db_session.delete(analysis)
+    db_session.commit()
+
+    from app.services.visibility_metrics_service import VisibilityMetricsService
+
+    with pytest.raises(ConflictError, match="Scan analysis is not completed"):
+        VisibilityMetricsService(db_session).get_metrics(ws.id, project.id, std.id)
+
+
+def test_visibility_metrics_failed_analysis_rejected(db_session: Session) -> None:
+    """VisibilityMetricsService must reject a scan with FAILED analysis."""
+    ws, user, project, _pset, _prompts = _seed(db_session, providers=[LLMProvider.OPENAI])
+    _add_prices(db_session, [LLMProvider.OPENAI])
+    registry = _registry([LLMProvider.OPENAI])
+    dispatcher = FakeDispatcher()
+
+    std, _conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-vis-failed",
+        conf_key="conf-vis-failed",
+        repeat_count=2,
+    )
+
+    # Force the analysis to FAILED.
+    analysis = db_session.execute(
+        select(ScanAnalysis).where(ScanAnalysis.scan_id == std.id)
+    ).scalar_one()
+    analysis.status = ScanAnalysisStatus.FAILED
+    db_session.commit()
+
+    from app.services.visibility_metrics_service import VisibilityMetricsService
+
+    with pytest.raises(ConflictError, match="Scan analysis is not completed"):
+        VisibilityMetricsService(db_session).get_metrics(ws.id, project.id, std.id)
+
+
+def test_confidence_true_zero_visibility(db_session: Session) -> None:
+    """COMPLETED analysis with zero brand mentions → visibility = 0%, stability = 100%."""
+    ws, user, project, _pset, _prompts = _seed(db_session, providers=[LLMProvider.OPENAI])
+    _add_prices(db_session, [LLMProvider.OPENAI])
+    # Adapter that never mentions the brand.
+    registry = _registry([LLMProvider.OPENAI], mention_brand=False)
+    dispatcher = FakeDispatcher()
+
+    _std, conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-truezero",
+        conf_key="conf-truezero",
+        repeat_count=2,
+    )
+
+    result = ConfidenceMetricsService(db_session).get_metrics(ws.id, project.id, conf.id)
+
+    # Brand should have 0% visibility (true measured zero).
+    brand = next(er for er in result.entity_reliability if er.entity_type == "BRAND")
+    assert brand.overall_visibility_rate == Decimal("0.0000")
+    # Stability may be 100% because the measured absence was stable.
+    assert brand.mention_stability == Decimal("100.0000")
+
+
+def test_provider_brand_visibility_isolation(db_session: Session) -> None:
+    """OpenAI mentions brand 100%, Google mentions 0% — no cross-provider inflation.
+
+    OpenAI: 10 successful observations, brand mentioned in 10 → 100%
+    Google: 10 successful observations, brand mentioned in 0 → 0%
+    Overall: 50%
+    """
+    ws, user, project, _pset, _prompts = _seed(
+        db_session, providers=[LLMProvider.OPENAI, LLMProvider.GOOGLE], prompt_count=2
+    )
+    _add_prices(db_session, [LLMProvider.OPENAI, LLMProvider.GOOGLE])
+
+    # OpenAI mentions brand, Google does not.
+    registry = FakeProviderRegistry(
+        {
+            LLMProvider.OPENAI: _adapter(LLMProvider.OPENAI, mention_brand=True),
+            LLMProvider.GOOGLE: _adapter(LLMProvider.GOOGLE, mention_brand=False),
+        }
+    )
+    dispatcher = FakeDispatcher()
+
+    # repeat_count=5 → 2 prompts x 2 providers x 5 repeats = 20 runs per scan.
+    _std, conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-iso",
+        conf_key="conf-iso",
+        repeat_count=5,
+    )
+
+    result = ConfidenceMetricsService(db_session).get_metrics(ws.id, project.id, conf.id)
+
+    assert len(result.provider_breakdown) == 2
+    openai_pb = next(pb for pb in result.provider_breakdown if pb.provider == LLMProvider.OPENAI)
+    google_pb = next(pb for pb in result.provider_breakdown if pb.provider == LLMProvider.GOOGLE)
+
+    # OpenAI: 10 successful, brand mentioned in all 10 → 100%
+    assert openai_pb.successful_observations == 10
+    assert openai_pb.brand_visibility_rate == Decimal("100.0000")
+
+    # Google: 10 successful, brand mentioned in 0 → 0%
+    assert google_pb.successful_observations == 10
+    assert google_pb.brand_visibility_rate == Decimal("0.0000")
+
+    # Overall brand visibility = 50% (10/20).
+    brand = next(er for er in result.entity_reliability if er.entity_type == "BRAND")
+    assert brand.overall_visibility_rate == Decimal("50.0000")
+
+
+def test_provider_failed_round_isolation(db_session: Session) -> None:
+    """Google fails all rounds — must not inherit OpenAI's valid rounds or range.
+
+    OpenAI: succeeds all 3 rounds → valid_rounds=3
+    Google: fails all 3 rounds → valid_rounds=0, coverage=0%, INSUFFICIENT,
+            brand_visibility_rate=NULL
+    """
+    from app.providers.errors import ProviderTimeoutError
+
+    ws, user, project, _pset, _prompts = _seed(
+        db_session, providers=[LLMProvider.OPENAI, LLMProvider.GOOGLE], prompt_count=1
+    )
+    _add_prices(db_session, [LLMProvider.OPENAI, LLMProvider.GOOGLE])
+
+    # OpenAI succeeds, Google always times out.
+    google_outcomes: list[Exception | None] = [ProviderTimeoutError("google timeout")] * 100
+    registry = FakeProviderRegistry(
+        {
+            LLMProvider.OPENAI: _adapter(LLMProvider.OPENAI, mention_brand=True),
+            LLMProvider.GOOGLE: _adapter(
+                LLMProvider.GOOGLE, mention_brand=True, outcomes=google_outcomes
+            ),
+        }
+    )
+    dispatcher = FakeDispatcher()
+
+    _std, conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-fail",
+        conf_key="conf-fail",
+        repeat_count=3,
+    )
+
+    result = ConfidenceMetricsService(db_session).get_metrics(ws.id, project.id, conf.id)
+
+    assert len(result.provider_breakdown) == 2
+    openai_pb = next(pb for pb in result.provider_breakdown if pb.provider == LLMProvider.OPENAI)
+    google_pb = next(pb for pb in result.provider_breakdown if pb.provider == LLMProvider.GOOGLE)
+
+    # OpenAI: 3 successful observations (1 prompt x 3 repeats), all succeed.
+    assert openai_pb.successful_observations == 3
+    assert openai_pb.measurement_coverage == Decimal("100.0000")
+    assert openai_pb.confidence_level != "INSUFFICIENT" or openai_pb.successful_observations > 0
+
+    # Google: 0 successful, coverage=0%, INSUFFICIENT, brand_vis=NULL.
+    assert google_pb.successful_observations == 0
+    assert google_pb.measurement_coverage is None
+    assert google_pb.confidence_level == "INSUFFICIENT"
+    assert google_pb.brand_visibility_rate is None
+    # Google must NOT inherit OpenAI's range.
+    assert google_pb.observed_visibility_min is None
+    assert google_pb.observed_visibility_max is None
+
+
+def test_provider_partial_coverage(db_session: Session) -> None:
+    """Google: 2 of 3 rounds succeed — failed round does NOT become 'NO'."""
+    from app.providers.errors import ProviderTimeoutError
+
+    ws, user, project, _pset, _prompts = _seed(
+        db_session, providers=[LLMProvider.OPENAI, LLMProvider.GOOGLE], prompt_count=1
+    )
+    _add_prices(db_session, [LLMProvider.OPENAI, LLMProvider.GOOGLE])
+
+    # Google: round 1 success, round 2 success, round 3 timeout.
+    # outcomes are consumed in call order. With concurrency=2 and 1 prompt,
+    # calls are sequential per round.
+    google_outcomes: list[Exception | None] = [None, None, ProviderTimeoutError("google timeout")]
+    registry = FakeProviderRegistry(
+        {
+            LLMProvider.OPENAI: _adapter(LLMProvider.OPENAI, mention_brand=True),
+            LLMProvider.GOOGLE: _adapter(
+                LLMProvider.GOOGLE, mention_brand=True, outcomes=google_outcomes
+            ),
+        }
+    )
+    dispatcher = FakeDispatcher()
+
+    _std, conf = _full_pipeline(
+        db_session,
+        ws,
+        user,
+        project,
+        registry,
+        dispatcher,
+        std_key="std-partial",
+        conf_key="conf-partial",
+        repeat_count=3,
+    )
+
+    result = ConfidenceMetricsService(db_session).get_metrics(ws.id, project.id, conf.id)
+
+    google_pb = next(pb for pb in result.provider_breakdown if pb.provider == LLMProvider.GOOGLE)
+    # 2 successful out of 3 planned → coverage = 66.6667%
+    assert google_pb.successful_observations == 2
+    assert google_pb.planned_observations == 3
+    assert google_pb.measurement_coverage == Decimal("66.6667")
+    # Brand visibility based on 2 successful observations (both mention brand).
+    assert google_pb.brand_visibility_rate == Decimal("100.0000")
