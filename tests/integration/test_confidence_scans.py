@@ -480,7 +480,10 @@ def test_confidence_creation_rejects_non_standard_baseline(db_session: Session) 
     # Create and execute a STANDARD scan.
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
-    assert std_result.scan.status in (ScanStatus.COMPLETED, ScanStatus.PARTIAL)
+    db_session.expire_all()
+    std_scan = db_session.get(Scan, std_result.scan.id)
+    assert std_scan is not None
+    assert std_scan.status in (ScanStatus.COMPLETED, ScanStatus.PARTIAL)
 
     # Create a confidence scan from the baseline.
     conf_result = _create_confidence(
@@ -521,6 +524,7 @@ def test_confidence_creation_rejects_foreign_workspace_baseline(db_session: Sess
         db_session, ws1, user1, project1, registry, dispatcher, key="std-1"
     )
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     # Try to create a confidence scan in workspace 2 using workspace 1's baseline.
     with pytest.raises(NotFoundError):
@@ -549,6 +553,7 @@ def test_confidence_creation_rejects_disabled_entitlement(db_session: Session) -
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     with pytest.raises(EntitlementDeniedError):
         _create_confidence(
@@ -576,6 +581,7 @@ def test_confidence_creation_with_default_repeat_count(db_session: Session) -> N
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
@@ -600,6 +606,7 @@ def test_confidence_creation_with_explicit_repeat_count_2(db_session: Session) -
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
@@ -623,6 +630,7 @@ def test_confidence_creation_rejects_repeat_count_1(db_session: Session) -> None
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     with pytest.raises(ValidationError, match=">= 2"):
         _create_confidence(
@@ -646,6 +654,7 @@ def test_confidence_creation_rejects_repeat_count_above_max(db_session: Session)
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     with pytest.raises(ValidationError, match="<= 5"):
         _create_confidence(
@@ -677,6 +686,7 @@ def test_confidence_run_plan_correctness(db_session: Session) -> None:
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
@@ -724,6 +734,7 @@ def test_confidence_snapshots_cloned_from_baseline(db_session: Session) -> None:
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     # Now change the project brand and competitors.
     project.brand_name = "NewCo"
@@ -797,6 +808,7 @@ def test_confidence_rejects_when_baseline_provider_disallowed(db_session: Sessio
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     # Remove GOOGLE from the plan's allowed providers.
     plan_provider = db_session.execute(
@@ -834,6 +846,7 @@ def test_confidence_rejects_when_baseline_provider_disabled_for_project(
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     # Disable GOOGLE for the project.
     pp = db_session.execute(
@@ -872,6 +885,7 @@ def test_confidence_preserves_baseline_requested_model(db_session: Session) -> N
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
@@ -919,6 +933,7 @@ def test_confidence_quota_success(db_session: Session) -> None:
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
@@ -972,6 +987,7 @@ def test_confidence_quota_partial(db_session: Session) -> None:
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
@@ -1006,6 +1022,7 @@ def test_confidence_idempotency_same_key_returns_same_scan(db_session: Session) 
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result1 = _create_confidence(
         db_session,
@@ -1042,6 +1059,7 @@ def test_confidence_idempotency_different_repeat_count_conflicts(
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     _create_confidence(
         db_session,
@@ -1114,6 +1132,7 @@ def test_confidence_round_by_round_execution_order(db_session: Session) -> None:
 
     std_result = _create_standard(db_session, ws, user, project, registry, dispatcher, key="std-1")
     _execute(db_session, std_result.scan.id, registry)
+    db_session.expire_all()
 
     result = _create_confidence(
         db_session,
