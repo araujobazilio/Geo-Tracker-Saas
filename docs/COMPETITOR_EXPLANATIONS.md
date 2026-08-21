@@ -91,6 +91,11 @@ share_of_voice = entity_mentioned_runs / total_mentioned_presences * 100
   `competitor_mentioned_runs`.
 - `None` when `total_mentioned_presences == 0`.
 - **Range**: [0.0, 100.0]
+- **Phase 9.1**: SOV is computed via `VisibilityMetricsService` (Phase 7
+  global formula) to guarantee consistency between the explanation
+  endpoint and the metrics endpoint. The denominator includes ALL
+  entities in the scan (not just brand + competitor), so multi-competitor
+  SOV is correctly proportional.
 
 ### Overlap matrix
 
@@ -129,6 +134,7 @@ For each provider that ran prompts for the scan (filtered by
 | `brand_owned_citation_rate` | Brand cited runs / WEB_GROUNDED runs * 100 |
 | `competitor_owned_citation_rate` | Competitor cited runs / WEB_GROUNDED runs * 100 |
 | `competitor_only_runs` | Runs where competitor mentioned and brand not |
+| `citation_eligible_observations` | SUCCEEDED WEB_GROUNDED runs for this provider |
 
 Providers are sorted by name ascending.
 
@@ -142,10 +148,15 @@ those produce source URLs:
 owned_citation_rate = cited_runs / web_grounded_runs * 100
 ```
 
-- `web_grounded_runs`: SUCCEEDED `WEB_GROUNDED` runs in scope.
+- `web_grounded_runs`: SUCCEEDED `WEB_GROUNDED` runs in scope
+  (also called `citation_eligible_observations`).
 - `cited_runs`: runs with at least one `SourceAttribution` attributed
   to the entity (owned-domain match).
 - `None` when `web_grounded_runs == 0`.
+- **Phase 9.1**: `citation_eligible_observations` is exposed on both
+  `CompetitorExplanation` and `ProviderExplanation` so callers can
+  verify the sample size behind citation rates. MODEL_ONLY and FAILED
+  runs are excluded.
 
 ### Citation gap
 
@@ -172,6 +183,7 @@ gap:
 | `affected_providers` | Providers that produced competitor-only runs |
 | `successful_observations` | Total successful runs for this prompt |
 | `competitor_only_count` | Runs where competitor mentioned, brand not |
+| `competitor_only_prompt_run_ids` | Exact SUCCEEDED PromptRun IDs (Phase 9.1) |
 
 Prompt gaps are sorted by priority:
 

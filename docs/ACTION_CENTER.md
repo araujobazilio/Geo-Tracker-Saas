@@ -27,11 +27,31 @@ uses only evidence already persisted from prior scans.
 ## Action Engine Version
 
 ```
-ACTION_ENGINE_VERSION = "deterministic-actions-v1"
+ACTION_ENGINE_VERSION = "deterministic-actions-v1.1"
 ```
 
 Returned in every `RefreshActionsResponse`. If rules or thresholds
 change materially, bump this version.
+
+### v1.1 Changes (Phase 9.1)
+
+- **Concurrent refresh safety**: Project row lock + `IntegrityError`
+  handling prevents duplicate Opportunities, Occurrences, or Evidence
+  rows when two sessions refresh the same scan (or different scans for
+  the same project) simultaneously.
+- **Citation eligibility enforcement**: `MIN_CITATION_ELIGIBLE_OBSERVATIONS`
+  is now explicitly enforced in `_check_citation_gap`. MODEL_ONLY and
+  FAILED runs are excluded from the eligible count.
+- **SOV consistency**: Share of Voice now reuses the Phase 7 global
+  formula via `VisibilityMetricsService`, ensuring the explanation's SOV
+  always matches the metrics endpoint.
+- **Prompt-run lineage**: `PROMPT_COMPETITOR_GAP` evidence now includes
+  per-`PromptRun` evidence rows (`evidence_type=PROMPT_RUN`) with exact
+  SUCCEEDED run IDs. FAILED runs are never included.
+- **Occurrence version stamp**: `OpportunityOccurrence.action_engine_version_at_detection`
+  records the engine version used when this occurrence was written.
+  Historical occurrences from v1 retain `deterministic-actions-v1` via
+  `server_default`.
 
 ## Rules
 
@@ -156,6 +176,7 @@ Key fields:
 | `competitor_entity_snapshot_id` | Competitor snapshot at detection |
 | `brand_entity_snapshot_id` | Brand snapshot at detection |
 | `priority_at_detection` | Priority when this occurrence was written |
+| `action_engine_version_at_detection` | Engine version when this occurrence was written |
 | `brand_visibility` / `competitor_visibility` | Rates at detection |
 | `visibility_gap_pp` | Gap in percentage points |
 | `brand_citation_rate` / `competitor_citation_rate` | Citation rates |
@@ -277,7 +298,7 @@ Response: `OpportunityListResponse`
       "opportunity_type": "DISCOVERY_VISIBILITY_GAP",
       "status": "OPEN",
       "priority": "HIGH",
-      "action_engine_version": "deterministic-actions-v1",
+      "action_engine_version": "deterministic-actions-v1.1",
       "title": "...",
       "summary": "...",
       "recommended_action": "...",
@@ -316,7 +337,7 @@ Response: `RefreshActionsResponse`
 
 ```json
 {
-  "action_engine_version": "deterministic-actions-v1",
+  "action_engine_version": "deterministic-actions-v1.1",
   "scan_id": "uuid",
   "opportunities_detected": 12,
   "opportunities_created": 5,

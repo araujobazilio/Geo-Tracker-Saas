@@ -846,7 +846,7 @@ def test_api_refresh_actions_owner(api) -> None:  # type: ignore[no-untyped-def]
     assert data["scan_id"] == str(scan_id)
     assert data["opportunities_detected"] >= 1
     assert data["opportunities_created"] >= 1
-    assert data["action_engine_version"] == "deterministic-actions-v1"
+    assert data["action_engine_version"] == "deterministic-actions-v1.1"
 
 
 def test_api_refresh_actions_admin(api) -> None:  # type: ignore[no-untyped-def]

@@ -61,6 +61,9 @@ share_of_voice = entity_mention_count / total_mention_count
 - `total_mention_count == 0` → `share_of_voice is None` for all
   entities.
 - **Range**: [0.0, 1.0]
+- **Phase 9.1**: `CompetitorExplanationService` reuses this formula via
+  `VisibilityMetricsService` to guarantee SOV consistency between the
+  metrics and explanation endpoints.
 
 ### Measurement coverage
 

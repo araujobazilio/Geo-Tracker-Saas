@@ -28,6 +28,7 @@ from app.schemas.opportunity import (
     OverlapMatrixResponse,
     OwnedCitationEvidenceResponse,
     PromptGapEvidenceResponse,
+    PromptGapRunRefResponse,
     ProviderExplanationResponse,
     ReliabilityContextResponse,
 )
@@ -146,6 +147,7 @@ def get_competitor_explanation(
         brand_owned_citation_rate=explanation.brand_owned_citation_rate,
         competitor_owned_citation_rate=explanation.competitor_owned_citation_rate,
         citation_gap_pp=explanation.citation_gap_pp,
+        citation_eligible_observations=explanation.citation_eligible_observations,
         successful_observations=explanation.successful_observations,
         measurement_coverage=explanation.measurement_coverage,
         overlap=OverlapMatrixResponse(
@@ -168,6 +170,7 @@ def get_competitor_explanation(
                 brand_owned_citation_rate=pb.brand_owned_citation_rate,
                 competitor_owned_citation_rate=pb.competitor_owned_citation_rate,
                 competitor_only_runs=pb.competitor_only_runs,
+                citation_eligible_observations=pb.citation_eligible_observations,
             )
             for pb in explanation.provider_breakdown
         ],
@@ -182,6 +185,13 @@ def get_competitor_explanation(
                 affected_providers=pg.affected_providers,
                 successful_observations=pg.successful_observations,
                 competitor_only_count=pg.competitor_only_count,
+                competitor_only_prompt_run_ids=[
+                    PromptGapRunRefResponse(
+                        prompt_run_id=r.prompt_run_id,
+                        provider=r.provider,
+                    )
+                    for r in pg.competitor_only_prompt_run_ids
+                ],
             )
             for pg in explanation.prompt_gaps
         ],

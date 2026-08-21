@@ -40,6 +40,12 @@ class ProviderExplanationResponse(BaseModel):
     brand_owned_citation_rate: Decimal | None
     competitor_owned_citation_rate: Decimal | None
     competitor_only_runs: int
+    citation_eligible_observations: int = 0
+
+
+class PromptGapRunRefResponse(BaseModel):
+    prompt_run_id: uuid.UUID
+    provider: LLMProvider
 
 
 class PromptGapEvidenceResponse(BaseModel):
@@ -52,6 +58,7 @@ class PromptGapEvidenceResponse(BaseModel):
     affected_providers: list[LLMProvider]
     successful_observations: int
     competitor_only_count: int
+    competitor_only_prompt_run_ids: list[PromptGapRunRefResponse] = []
 
 
 class OwnedCitationEvidenceResponse(BaseModel):
@@ -93,6 +100,7 @@ class CompetitorExplanationResponse(BaseModel):
     brand_owned_citation_rate: Decimal | None
     competitor_owned_citation_rate: Decimal | None
     citation_gap_pp: Decimal | None
+    citation_eligible_observations: int = 0
     successful_observations: int
     measurement_coverage: Decimal | None
     overlap: OverlapMatrixResponse
@@ -146,6 +154,7 @@ class OpportunityOccurrenceResponse(BaseModel):
     scan_id: uuid.UUID
     scan_analysis_id: uuid.UUID
     priority_at_detection: OpportunityPriority
+    action_engine_version_at_detection: str
     brand_visibility: Decimal | None
     competitor_visibility: Decimal | None
     visibility_gap_pp: Decimal | None

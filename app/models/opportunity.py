@@ -50,9 +50,6 @@ if TYPE_CHECKING:
     from app.models.project import Project
     from app.models.workspace import Workspace
 
-# --- Action Engine version (must bump if rules/thresholds change) ---
-ACTION_ENGINE_VERSION = "deterministic-actions-v1"
-
 
 class Opportunity(UUIDPrimaryKey, TimestampMixin, Base):
     """A logical, deduplicated evidence-based gap the user can act on.
@@ -164,6 +161,9 @@ class OpportunityOccurrence(UUIDPrimaryKey, Base):
     )
 
     priority_at_detection: Mapped[OpportunityPriority] = mapped_column(String(10), nullable=False)
+    action_engine_version_at_detection: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="deterministic-actions-v1"
+    )
 
     brand_visibility: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     competitor_visibility: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)

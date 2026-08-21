@@ -195,6 +195,7 @@ def get_opportunity(
             scan_id=latest.scan_id,
             scan_analysis_id=latest.scan_analysis_id,
             priority_at_detection=latest.priority_at_detection,
+            action_engine_version_at_detection=latest.action_engine_version_at_detection,
             brand_visibility=latest.brand_visibility,
             competitor_visibility=latest.competitor_visibility,
             visibility_gap_pp=latest.visibility_gap_pp,

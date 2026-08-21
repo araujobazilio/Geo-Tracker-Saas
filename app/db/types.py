@@ -42,4 +42,4 @@ class StringList(TypeDecorator[list[str]]):
         return []
 
 
-__all__ = ["JSONBType", "UUIDType", "StringList", "String"]
+__all__ = ["JSONBType", "String", "StringList", "UUIDType"]

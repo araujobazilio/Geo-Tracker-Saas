@@ -11,7 +11,9 @@ from __future__ import annotations
 from decimal import Decimal
 
 # --- Methodology version ---
-ACTION_ENGINE_VERSION = "deterministic-actions-v1"
+# v1.1: citation eligibility minimum enforced, global SOV formula,
+# prompt-run evidence lineage, concurrent refresh safety.
+ACTION_ENGINE_VERSION = "deterministic-actions-v1.1"
 
 # --- Rule 1: Discovery visibility gap (NON_BRANDED, per competitor) ---
 MIN_GLOBAL_SUCCESSFUL_OBSERVATIONS = 3

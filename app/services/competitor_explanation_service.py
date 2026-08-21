@@ -93,6 +93,15 @@ class ProviderExplanation:
     brand_owned_citation_rate: Decimal | None
     competitor_owned_citation_rate: Decimal | None
     competitor_only_runs: int
+    citation_eligible_observations: int = 0
+
+
+@dataclass(frozen=True)
+class PromptGapRunRef:
+    """Reference to a specific competitor-only SUCCEEDED PromptRun."""
+
+    prompt_run_id: uuid.UUID
+    provider: LLMProvider
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,7 @@ class PromptGapEvidence:
     affected_providers: list[LLMProvider]
     successful_observations: int
     competitor_only_count: int
+    competitor_only_prompt_run_ids: list[PromptGapRunRef] = ()  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -162,6 +172,8 @@ class CompetitorExplanation:
     brand_owned_citation_rate: Decimal | None
     competitor_owned_citation_rate: Decimal | None
     citation_gap_pp: Decimal | None
+
+    citation_eligible_observations: int
 
     successful_observations: int
     measurement_coverage: Decimal | None
@@ -242,10 +254,25 @@ class CompetitorExplanationService:
         competitor_vis = _pct(len(competitor_mentioned_runs), successful_count)
         gap_pp = self._gap_pp(competitor_vis, brand_vis)
 
-        # Share of voice: entity mentioned / total mentioned presences.
-        total_mentioned_presences = len(brand_mentioned_runs) + len(competitor_mentioned_runs)
-        brand_sov = _pct(len(brand_mentioned_runs), total_mentioned_presences)
-        competitor_sov = _pct(len(competitor_mentioned_runs), total_mentioned_presences)
+        # Share of Voice: use the Phase 7 global formula via
+        # VisibilityMetricsService to ensure consistency. The denominator
+        # is the sum of run-presence counts across ALL tracked entities
+        # (brand + all competitors) in the scope, not just brand+competitor.
+        brand_sov, competitor_sov = self._compute_global_sov(
+            workspace_id,
+            project_id,
+            scan_id,
+            prompt_type,
+            provider,
+            brand_snap,
+            competitor_snap,
+        )
+
+        # Pairwise share (optional, for transparency): brand vs this
+        # competitor only, using the pairwise denominator. Not exposed as
+        # "Share of Voice" — kept internal for potential future use.
+        # See brand_pairwise_share / competitor_pairwise_share if product
+        # needs it.
 
         # Overlap matrix.
         brand_only = len(brand_mentioned_runs - competitor_mentioned_runs)
@@ -350,6 +377,7 @@ class CompetitorExplanationService:
             brand_owned_citation_rate=brand_citation_rate,
             competitor_owned_citation_rate=competitor_citation_rate,
             citation_gap_pp=citation_gap_pp,
+            citation_eligible_observations=citation_eligible_count,
             successful_observations=successful_count,
             measurement_coverage=coverage,
             overlap=overlap,
@@ -415,6 +443,43 @@ class CompetitorExplanationService:
         if competitor is None or brand is None:
             return None
         return (competitor - brand).quantize(_PRECISION, rounding=ROUND_HALF_UP)
+
+    def _compute_global_sov(
+        self,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        scan_id: uuid.UUID,
+        prompt_type: PromptType,
+        provider: LLMProvider | None,
+        brand_snap: ScanEntitySnapshot,
+        competitor_snap: ScanEntitySnapshot,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """Compute Share of Voice using the Phase 7 global formula.
+
+        Reuses VisibilityMetricsService to ensure the denominator is the
+        sum of run-presence counts across ALL tracked entities (brand +
+        all competitors) in the scope, not just brand + selected competitor.
+
+        Returns (brand_sov, competitor_sov). Both are None if no entity
+        is mentioned at all (denominator = 0).
+        """
+        from app.services.visibility_metrics_service import VisibilityMetricsService
+
+        metrics = VisibilityMetricsService(self._session).get_metrics(
+            workspace_id,
+            project_id,
+            scan_id,
+            prompt_type=prompt_type,
+            provider=provider,
+        )
+        brand_sov: Decimal | None = None
+        competitor_sov: Decimal | None = None
+        for em in metrics.entity_metrics:
+            if em.entity_snapshot_id == brand_snap.id:
+                brand_sov = em.share_of_voice
+            elif em.entity_snapshot_id == competitor_snap.id:
+                competitor_sov = em.share_of_voice
+        return brand_sov, competitor_sov
 
     def _load_scoped_scan(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID, scan_id: uuid.UUID
@@ -620,6 +685,7 @@ class CompetitorExplanationService:
                     brand_owned_citation_rate=brand_citation_rate,
                     competitor_owned_citation_rate=competitor_citation_rate,
                     competitor_only_runs=competitor_only,
+                    citation_eligible_observations=citation_count,
                 )
             )
 
@@ -631,13 +697,19 @@ class CompetitorExplanationService:
         brand_mentioned_runs: set[uuid.UUID],
         competitor_mentioned_runs: set[uuid.UUID],
     ) -> list[PromptGapEvidence]:
-        """Find prompts where competitor appears and brand does not."""
+        """Find prompts where competitor appears and brand does not.
+
+        Each PromptGapEvidence includes the exact SUCCEEDED PromptRun IDs
+        where competitor was mentioned and brand was absent, enabling
+        direct evidence lineage for PROMPT_COMPETITOR_GAP actions.
+        """
         # Group by prompt_id using a typed structure.
         prompt_all_providers: dict[uuid.UUID, set[LLMProvider]] = defaultdict(set)
         prompt_competitor_only_providers: dict[uuid.UUID, set[LLMProvider]] = defaultdict(set)
         prompt_successful: dict[uuid.UUID, int] = defaultdict(int)
         prompt_competitor_only: dict[uuid.UUID, int] = defaultdict(int)
         prompt_obj: dict[uuid.UUID, Prompt] = {}
+        prompt_comp_only_runs: dict[uuid.UUID, list[PromptGapRunRef]] = defaultdict(list)
 
         for run, prompt in scoped_succeeded:
             pid = prompt.id
@@ -650,6 +722,9 @@ class CompetitorExplanationService:
             if is_comp and not is_brand:
                 prompt_competitor_only[pid] += 1
                 prompt_competitor_only_providers[pid].add(run.provider)
+                prompt_comp_only_runs[pid].append(
+                    PromptGapRunRef(prompt_run_id=run.id, provider=run.provider)
+                )
 
         # Filter to prompts with at least 1 competitor-only observation.
         gaps: list[PromptGapEvidence] = []
@@ -674,6 +749,10 @@ class CompetitorExplanationService:
                     ),
                     successful_observations=prompt_successful[pid],
                     competitor_only_count=comp_only_count,
+                    competitor_only_prompt_run_ids=sorted(
+                        prompt_comp_only_runs[pid],
+                        key=lambda r: r.prompt_run_id,
+                    ),
                 )
             )
 

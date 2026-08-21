@@ -34,8 +34,8 @@ from app.models.workspace import Workspace, WorkspaceMember
 from app.models.workspace_usage_period import WorkspaceUsagePeriod
 
 __all__ = [
-    "AuditLog",
     "AppSumoLicense",
+    "AuditLog",
     "BillingAccount",
     "Competitor",
     "EntityMention",

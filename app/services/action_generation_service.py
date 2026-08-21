@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.action_engine import (
@@ -35,6 +36,7 @@ from app.core.action_engine import (
     HIGH_PROVIDER_VISIBILITY_GAP_PP,
     MAX_OPPORTUNITIES_PER_REFRESH,
     MAX_PROMPT_OPPORTUNITIES_PER_COMPETITOR,
+    MIN_CITATION_ELIGIBLE_OBSERVATIONS,
     MIN_DISCOVERY_VISIBILITY_GAP_PP,
     MIN_GLOBAL_SUCCESSFUL_OBSERVATIONS,
     MIN_OWNED_CITATION_GAP_PP,
@@ -60,6 +62,7 @@ from app.models.opportunity import (
     OpportunityEvidence,
     OpportunityOccurrence,
 )
+from app.models.project import Project
 from app.models.scan import Scan
 from app.services.competitor_explanation_service import (
     CompetitorExplanation,
@@ -128,6 +131,12 @@ class ActionGenerationService:
 
         Atomic: all opportunities/evidence commit together or none.
         Status on pre-existing Opportunities is preserved.
+
+        Concurrency: acquires a project-scoped row lock (SELECT ... FOR UPDATE
+        on the Project row) before any upsert. This serializes Action Center
+        mutation for one project while allowing other projects to proceed
+        concurrently. IntegrityError from unique constraints is handled via
+        savepoint + deterministic re-read as a final defense.
         """
         scan = self._load_scoped_scan(workspace_id, project_id, scan_id)
         self._require_standard_scan(scan)
@@ -136,6 +145,17 @@ class ActionGenerationService:
         analysis = self._load_analysis(scan_id)
         self._require_completed_analysis(analysis)
         assert analysis is not None
+
+        # Acquire project-scoped row lock to serialize concurrent refreshes
+        # for the same project. Other projects proceed concurrently.
+        self._session.execute(
+            select(Project)
+            .where(
+                Project.id == project_id,
+                Project.workspace_id == workspace_id,
+            )
+            .with_for_update()
+        )
 
         snapshots = self._load_snapshots(scan_id)
         brand_snap = self._find_brand_snapshot(snapshots)
@@ -378,27 +398,20 @@ class ActionGenerationService:
         comp_snap: ScanEntitySnapshot,
         brand_snap: ScanEntitySnapshot,
     ) -> _DetectedOpportunity | None:
-        """Rule 3: OWNED_CITATION_GAP."""
-        # Need enough citation-eligible (WEB_GROUNDED) observations.
-        # We infer this from the explanation's citation rates being non-None.
+        """Rule 3: OWNED_CITATION_GAP.
+
+        Requires at least MIN_CITATION_ELIGIBLE_OBSERVATIONS SUCCEEDED
+        WEB_GROUNDED runs in scope. MODEL_ONLY and FAILED runs are
+        excluded from the eligible count.
+        """
+        # Enforce citation eligibility minimum.
+        if explanation.citation_eligible_observations < MIN_CITATION_ELIGIBLE_OBSERVATIONS:
+            return None
+
+        # Citation rates must be non-None (guaranteed when eligible > 0).
         if explanation.brand_owned_citation_rate is None:
             return None
         if explanation.competitor_owned_citation_rate is None:
-            return None
-
-        # Check minimum eligible observations via provider breakdown.
-        total_citation_eligible = sum(
-            1 for pb in explanation.provider_breakdown if pb.brand_owned_citation_rate is not None
-        )
-        # Actually, we need the citation-eligible count from the explanation.
-        # The CompetitorExplanation doesn't expose this directly, but we can
-        # check that at least one provider has citation-eligible observations.
-        # A simpler check: both rates are non-None, meaning there were eligible obs.
-        # For the minimum, we use the fact that the rates are computed from
-        # at least MIN_CITATION_ELIGIBLE_OBSERVATIONS.
-        # Since we don't have the exact count here, we rely on the rates being non-None.
-        # In practice, if there are 0 eligible observations, the rates would be None.
-        if total_citation_eligible < 1:
             return None
 
         gap = explanation.citation_gap_pp
@@ -531,12 +544,24 @@ class ActionGenerationService:
             evidence_rows: list[_EvidenceRow] = [
                 _EvidenceRow(
                     evidence_key=f"prompt_gap_{pg.prompt_id}",
-                    evidence_type=OpportunityEvidenceType.PROMPT_RUN,
+                    evidence_type=OpportunityEvidenceType.METRIC_GAP,
                     prompt_id=pg.prompt_id,
                     metric_name="competitor_only_count",
                     competitor_value=Decimal(pg.competitor_only_count),
                 )
             ]
+
+            # Add per-PromptRun evidence for exact lineage.
+            for run_ref in pg.competitor_only_prompt_run_ids:
+                evidence_rows.append(
+                    _EvidenceRow(
+                        evidence_key=f"prompt_run:{run_ref.prompt_run_id}",
+                        evidence_type=OpportunityEvidenceType.PROMPT_RUN,
+                        prompt_id=pg.prompt_id,
+                        prompt_run_id=run_ref.prompt_run_id,
+                        provider=run_ref.provider,
+                    )
+                )
 
             results.append(
                 _DetectedOpportunity(
@@ -578,6 +603,12 @@ class ActionGenerationService:
         """Upsert an Opportunity + Occurrence + Evidence.
 
         Returns (is_new_opportunity, had_existing_occurrence_for_this_scan).
+
+        Concurrency safety: the project row lock in refresh_from_scan
+        serializes upserts for one project. As a final defense against
+        any race (e.g. lock escalation edge cases), IntegrityError from
+        the UNIQUE(project_id, fingerprint) constraint is caught via a
+        savepoint and the existing row is re-read deterministically.
         """
         existing = self._session.execute(
             select(Opportunity).where(
@@ -589,31 +620,50 @@ class ActionGenerationService:
         now = _utcnow()
 
         if existing is None:
-            # Create new Opportunity.
-            opp = Opportunity(
-                workspace_id=workspace_id,
-                project_id=project_id,
-                fingerprint=det.fingerprint,
-                opportunity_type=det.opportunity_type,
-                status=OpportunityStatus.OPEN,
-                priority=det.priority,
-                action_engine_version=ACTION_ENGINE_VERSION,
-                competitor_entity_key=det.competitor_entity_key,
-                provider=det.provider,
-                prompt_id=det.prompt_id,
-                prompt_type=det.prompt_type,
-                title=det.title,
-                summary=det.summary,
-                recommended_action=det.recommended_action,
-                first_detected_scan_id=scan_id,
-                latest_detected_scan_id=scan_id,
-                first_detected_at=now,
-                last_detected_at=now,
-            )
-            self._session.add(opp)
-            self._session.flush()
-            existing = opp
-            is_new = True
+            # Create new Opportunity with savepoint for race recovery.
+            try:
+                with self._session.begin_nested():
+                    opp = Opportunity(
+                        workspace_id=workspace_id,
+                        project_id=project_id,
+                        fingerprint=det.fingerprint,
+                        opportunity_type=det.opportunity_type,
+                        status=OpportunityStatus.OPEN,
+                        priority=det.priority,
+                        action_engine_version=ACTION_ENGINE_VERSION,
+                        competitor_entity_key=det.competitor_entity_key,
+                        provider=det.provider,
+                        prompt_id=det.prompt_id,
+                        prompt_type=det.prompt_type,
+                        title=det.title,
+                        summary=det.summary,
+                        recommended_action=det.recommended_action,
+                        first_detected_scan_id=scan_id,
+                        latest_detected_scan_id=scan_id,
+                        first_detected_at=now,
+                        last_detected_at=now,
+                    )
+                    self._session.add(opp)
+                    self._session.flush()
+                    existing = opp
+                    is_new = True
+            except IntegrityError:
+                # Concurrent insert won the race. Re-read deterministically.
+                self._session.rollback()
+                existing = self._session.execute(
+                    select(Opportunity).where(
+                        Opportunity.project_id == project_id,
+                        Opportunity.fingerprint == det.fingerprint,
+                    )
+                ).scalar_one()
+                is_new = False
+                # Apply updates to the now-existing row.
+                existing.priority = det.priority
+                existing.title = det.title
+                existing.summary = det.summary
+                existing.recommended_action = det.recommended_action
+                existing.latest_detected_scan_id = scan_id
+                existing.last_detected_at = now
         else:
             is_new = False
             # Update mutable fields but PRESERVE status and workflow timestamps.
@@ -637,24 +687,37 @@ class ActionGenerationService:
             # Idempotent: occurrence already exists for this scan.
             return is_new, True
 
-        # Create new Occurrence.
-        occ = OpportunityOccurrence(
-            opportunity_id=existing.id,
-            scan_id=scan_id,
-            scan_analysis_id=analysis_id,
-            competitor_entity_snapshot_id=det.competitor_snapshot_id,
-            brand_entity_snapshot_id=det.brand_snapshot_id,
-            priority_at_detection=det.priority,
-            brand_visibility=det.brand_visibility,
-            competitor_visibility=det.competitor_visibility,
-            visibility_gap_pp=det.visibility_gap_pp,
-            brand_citation_rate=det.brand_citation_rate,
-            competitor_citation_rate=det.competitor_citation_rate,
-            citation_gap_pp=det.citation_gap_pp,
-            measurement_coverage=det.measurement_coverage,
-        )
-        self._session.add(occ)
-        self._session.flush()
+        # Create new Occurrence with savepoint for race recovery.
+        try:
+            with self._session.begin_nested():
+                occ = OpportunityOccurrence(
+                    opportunity_id=existing.id,
+                    scan_id=scan_id,
+                    scan_analysis_id=analysis_id,
+                    competitor_entity_snapshot_id=det.competitor_snapshot_id,
+                    brand_entity_snapshot_id=det.brand_snapshot_id,
+                    priority_at_detection=det.priority,
+                    action_engine_version_at_detection=ACTION_ENGINE_VERSION,
+                    brand_visibility=det.brand_visibility,
+                    competitor_visibility=det.competitor_visibility,
+                    visibility_gap_pp=det.visibility_gap_pp,
+                    brand_citation_rate=det.brand_citation_rate,
+                    competitor_citation_rate=det.competitor_citation_rate,
+                    citation_gap_pp=det.citation_gap_pp,
+                    measurement_coverage=det.measurement_coverage,
+                )
+                self._session.add(occ)
+                self._session.flush()
+        except IntegrityError:
+            # Concurrent insert won the race. Re-read and treat as idempotent.
+            self._session.rollback()
+            existing_occ = self._session.execute(
+                select(OpportunityOccurrence).where(
+                    OpportunityOccurrence.opportunity_id == existing.id,
+                    OpportunityOccurrence.scan_id == scan_id,
+                )
+            ).scalar_one()
+            return is_new, True
 
         # Create Evidence rows.
         for er in det.evidence_rows:

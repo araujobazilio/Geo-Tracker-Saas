@@ -337,6 +337,23 @@ User reviews, transitions status (OPEN → IN_PROGRESS → IMPLEMENTED)
 
 See `docs/ACTION_CENTER.md` and `docs/COMPETITOR_EXPLANATIONS.md`.
 
+### Phase 9.1: Correctness Pass
+
+- **Concurrent refresh safety**: Project row lock + `IntegrityError`
+  handling prevents duplicate rows when multiple sessions refresh
+  simultaneously.
+- **Citation eligibility**: `MIN_CITATION_ELIGIBLE_OBSERVATIONS` enforced
+  in `_check_citation_gap`. `citation_eligible_observations` exposed on
+  `CompetitorExplanation` and `ProviderExplanation`.
+- **SOV consistency**: `CompetitorExplanationService` reuses
+  `VisibilityMetricsService` for Share of Voice, guaranteeing
+  explanation/metrics parity.
+- **Prompt-run lineage**: `PROMPT_COMPETITOR_GAP` evidence includes
+  per-`PromptRun` rows with exact SUCCEEDED run IDs.
+- **Action engine v1.1**: `ACTION_ENGINE_VERSION` bumped to
+  `deterministic-actions-v1.1`. `OpportunityOccurrence.action_engine_version_at_detection`
+  records the engine version at detection time.
+
 ## Technology stack
 
 | Layer | Technology |
