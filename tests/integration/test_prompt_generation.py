@@ -167,9 +167,9 @@ class TestPromptGeneration:
 
         non_branded = [s for s in specs if s.prompt_type == PromptType.NON_BRANDED]
         for spec in non_branded:
-            assert "acme" not in spec.text.lower(), (
-                f"NON_BRANDED prompt contains brand name: {spec.text}"
-            )
+            assert (
+                "acme" not in spec.text.lower()
+            ), f"NON_BRANDED prompt contains brand name: {spec.text}"
 
     def test_non_branded_does_not_contain_brand_aliases(self, db_session) -> None:  # type: ignore[no-untyped-def]
         project = _make_project(
@@ -200,9 +200,9 @@ class TestPromptGeneration:
 
         non_branded = [s for s in specs if s.prompt_type == PromptType.NON_BRANDED]
         for spec in non_branded:
-            assert "salesforce" not in spec.text.lower(), (
-                f"NON_BRANDED prompt contains competitor name: {spec.text}"
-            )
+            assert (
+                "salesforce" not in spec.text.lower()
+            ), f"NON_BRANDED prompt contains competitor name: {spec.text}"
 
     def test_non_branded_does_not_contain_competitor_domains(self, db_session) -> None:  # type: ignore[no-untyped-def]
         project = _make_project(db_session, brand_name="Acme")
@@ -344,9 +344,9 @@ class TestPromptGeneration:
         specs = svc.generate_prompts(project, [kw], [])
 
         for spec in specs:
-            assert len(spec.text) <= 1000, (
-                f"Prompt exceeds 1000 chars ({len(spec.text)}): {spec.text[:100]}"
-            )
+            assert (
+                len(spec.text) <= 1000
+            ), f"Prompt exceeds 1000 chars ({len(spec.text)}): {spec.text[:100]}"
 
     def test_deterministic_generation_same_inputs(self, db_session) -> None:  # type: ignore[no-untyped-def]
         project = _make_project(db_session, brand_name="Acme")

@@ -158,9 +158,9 @@ class TestNonBrandedSafety:
         non_branded = [s for s in specs if s.prompt_type == PromptType.NON_BRANDED]
 
         for spec in non_branded:
-            assert "acme" not in normalize_text_for_comparison(spec.text), (
-                f"NON_BRANDED prompt contains brand name: {spec.text}"
-            )
+            assert "acme" not in normalize_text_for_comparison(
+                spec.text
+            ), f"NON_BRANDED prompt contains brand name: {spec.text}"
 
     def test_non_branded_excludes_brand_aliases(self) -> None:
         svc = PromptGenerationService()
@@ -187,9 +187,9 @@ class TestNonBrandedSafety:
 
         for spec in non_branded:
             text_lower = normalize_text_for_comparison(spec.text)
-            assert "mailchimp" not in text_lower, (
-                f"NON_BRANDED prompt contains competitor name: {spec.text}"
-            )
+            assert (
+                "mailchimp" not in text_lower
+            ), f"NON_BRANDED prompt contains competitor name: {spec.text}"
 
     def test_non_branded_excludes_competitor_domains(self) -> None:
         svc = PromptGenerationService()
@@ -202,9 +202,9 @@ class TestNonBrandedSafety:
 
         for spec in non_branded:
             text_lower = normalize_text_for_comparison(spec.text)
-            assert "hubspot" not in text_lower, (
-                f"NON_BRANDED prompt contains competitor domain: {spec.text}"
-            )
+            assert (
+                "hubspot" not in text_lower
+            ), f"NON_BRANDED prompt contains competitor domain: {spec.text}"
 
     def test_branded_prompt_contains_brand(self) -> None:
         svc = PromptGenerationService()

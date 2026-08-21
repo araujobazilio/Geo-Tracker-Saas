@@ -1027,16 +1027,16 @@ def test_different_key_concurrency_real_postgresql(engine_factory) -> None:  # t
     t1.join(timeout=60)
     t2.join(timeout=60)
 
-    assert results["success"] == 1, (
-        f"Expected 1 success, got {results['success']}: {results['errors']}"
-    )
-    assert results["conflict"] == 1, (
-        f"Expected 1 ConflictError, got {results['conflict']}: {results['errors']}"
-    )
+    assert (
+        results["success"] == 1
+    ), f"Expected 1 success, got {results['success']}: {results['errors']}"
+    assert (
+        results["conflict"] == 1
+    ), f"Expected 1 ConflictError, got {results['conflict']}: {results['errors']}"
     # No raw IntegrityError leaks.
-    assert all("IntegrityError" not in e for e in results["errors"]), (
-        f"Raw IntegrityError leaked: {results['errors']}"
-    )
+    assert all(
+        "IntegrityError" not in e for e in results["errors"]
+    ), f"Raw IntegrityError leaked: {results['errors']}"
 
     # Verify exactly one PENDING verification exists.
     verify_session = factory()
