@@ -175,6 +175,17 @@ class VerificationEvaluationService:
             )
         if verification_scan.scan_type != ScanType.VERIFICATION:
             raise ValidationError("Verification scan is not a VERIFICATION scan.")
+        if verification_scan.status == ScanStatus.FAILED:
+            # Phase 10.2: gracefully terminalize a FAILED verification
+            # scan instead of raising ValidationError and leaving the
+            # verification PENDING forever.
+            return self._persist_inconclusive(
+                verification,
+                VerificationReasonCode.VERIFICATION_SCAN_FAILED,
+                "The verification scan failed before evidence could be "
+                "collected. The verification measurement could not be "
+                "completed.",
+            )
         if verification_scan.status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
             raise ValidationError("Verification scan must be COMPLETED or PARTIAL to evaluate.")
 
@@ -307,8 +318,10 @@ class VerificationEvaluationService:
         # Compute the delta (baseline - verification; positive = improvement).
         delta = self._compute_delta(baseline_value, verification_value)
 
-        # Phase 10.1: Brand-side resolution safeguard.
-        brand_safeguard_passes = self._brand_safeguard_passes(opportunity, verification_explanation)
+        # Phase 10.2: Brand-side resolution safeguard — compare vs frozen baseline.
+        brand_safeguard_passes = self._brand_safeguard_passes(
+            opportunity, baseline_explanation, verification_explanation
+        )
 
         # Decide the outcome.
         outcome, message = self._decide_outcome(
@@ -548,20 +561,31 @@ class VerificationEvaluationService:
     def _brand_safeguard_passes(
         self,
         opportunity: Opportunity,
+        baseline_explanation: CompetitorExplanation,
         verification_explanation: CompetitorExplanation,
     ) -> bool:
-        """Phase 10.1: Brand-side resolution safeguard.
+        """Phase 10.2: Brand-side resolution safeguard.
 
-        For RESOLVED to be valid, the brand must actually appear in the
-        verification scan.  A gap of 0 because the brand disappeared
-        entirely is NOT a resolution — it's a measurement artifact.
+        For RESOLVED to be valid, the brand-side metric must NOT
+        deteriorate versus the frozen baseline.  A gap closing because
+        the brand itself deteriorated is NOT a resolution — it's a
+        measurement artifact.
 
-        - DISCOVERY_VISIBILITY_GAP: brand_visibility_rate > 0
-        - PROVIDER_VISIBILITY_GAP: brand_visibility_rate > 0
-        - OWNED_CITATION_GAP: brand_owned_citation_rate > 0
-        - PROMPT_COMPETITOR_GAP: brand must appear in at least one
-          observation (brand_visibility_rate > 0 OR brand appears in
-          overlap.both_runs > 0)
+        Phase 10.1 only checked brand > 0.  Phase 10.2 requires:
+
+        - DISCOVERY_VISIBILITY_GAP:
+            verification_brand_visibility >= baseline_brand_visibility
+        - PROVIDER_VISIBILITY_GAP:
+            verification_brand_visibility >= baseline_brand_visibility
+            (within the Opportunity's provider scope)
+        - OWNED_CITATION_GAP:
+            verification_brand_owned_citation_rate
+            >= baseline_brand_owned_citation_rate
+        - PROMPT_COMPETITOR_GAP:
+            brand must appear in at least one successful observation
+            (categorical — does NOT require brand_visibility >= baseline
+            because the resolution condition is competitor-only
+            disappearance, not a gap metric)
         """
         opp_type = opportunity.opportunity_type
 
@@ -569,15 +593,22 @@ class VerificationEvaluationService:
             OpportunityType.DISCOVERY_VISIBILITY_GAP,
             OpportunityType.PROVIDER_VISIBILITY_GAP,
         ):
-            brand_vis = verification_explanation.brand_visibility_rate
-            return brand_vis is not None and brand_vis > 0
+            baseline_brand = baseline_explanation.brand_visibility_rate
+            verification_brand = verification_explanation.brand_visibility_rate
+            if verification_brand is None or verification_brand <= 0:
+                return False
+            return not (baseline_brand is not None and verification_brand < baseline_brand)
 
         if opp_type == OpportunityType.OWNED_CITATION_GAP:
-            brand_cit = verification_explanation.brand_owned_citation_rate
-            return brand_cit is not None and brand_cit > 0
+            baseline_brand = baseline_explanation.brand_owned_citation_rate
+            verification_brand = verification_explanation.brand_owned_citation_rate
+            if verification_brand is None or verification_brand <= 0:
+                return False
+            return not (baseline_brand is not None and verification_brand < baseline_brand)
 
         if opp_type == OpportunityType.PROMPT_COMPETITOR_GAP:
-            # Brand must appear in at least one observation.
+            # Categorical: brand must appear in at least one observation.
+            # Does NOT require brand_visibility >= baseline.
             brand_vis = verification_explanation.brand_visibility_rate
             return brand_vis is not None and brand_vis > 0
 
@@ -634,11 +665,9 @@ class VerificationEvaluationService:
             if not brand_safeguard_passes:
                 return (
                     VerificationOutcome.NOT_IMPROVED,
-                    f"Verification {metric_name} ({verification_value}) is below "
-                    f"the resolution threshold ({resolution_threshold}), but the "
-                    f"brand does not appear in the verification scan. "
-                    f"The gap closed because the brand disappeared, not because "
-                    f"the issue was resolved.",
+                    "The measured gap fell below the resolution threshold, but "
+                    "the brand-side metric also declined versus the frozen "
+                    "baseline, so the opportunity cannot be considered resolved.",
                 )
             if metric_name in ("competitor_only_rate", "competitor_only_count"):
                 return (

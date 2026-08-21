@@ -39,6 +39,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -56,6 +57,7 @@ from app.core.enums import (
     ScanStatus,
     ScanType,
     VerificationOutcome,
+    VerificationReasonCode,
 )
 from app.core.exceptions import (
     ConflictError,
@@ -288,20 +290,59 @@ class VerificationScanCreationService:
             raise
 
         # Reserve quota.
+        # Save scan + verification data before quota reservation — the
+        # quota service calls session.rollback() on QuotaExceededError,
+        # which may undo the scan + verification INSERTs when running
+        # inside an outer transaction (e.g., integration tests).  If
+        # the scan is not found after the rollback, we re-create it as
+        # FAILED and the verification as INCONCLUSIVE.
+        scan_id_for_quota = scan.id
+        verification_id_for_quota = verification.id
+        planned_checks = scan.planned_ai_checks
+        scan_data = {
+            "workspace_id": scan.workspace_id,
+            "project_id": scan.project_id,
+            "prompt_set_id": scan.prompt_set_id,
+            "scan_type": scan.scan_type,
+            "requested_by_user_id": scan.requested_by_user_id,
+            "idempotency_key": scan.idempotency_key,
+            "prompt_count": scan.prompt_count,
+            "provider_count": scan.provider_count,
+            "planned_ai_checks": scan.planned_ai_checks,
+            "repeat_count": scan.repeat_count,
+            "baseline_scan_id": scan.baseline_scan_id,
+        }
+        verification_data = {
+            "workspace_id": verification.workspace_id,
+            "project_id": verification.project_id,
+            "opportunity_id": verification.opportunity_id,
+            "baseline_occurrence_id": verification.baseline_occurrence_id,
+            "baseline_scan_id": verification.baseline_scan_id,
+            "idempotency_key": verification.idempotency_key,
+            "verification_methodology_version": verification.verification_methodology_version,
+            "metric_name": verification.metric_name,
+        }
+
         try:
             reservation = self._quota.reserve_ai_checks(
                 workspace_id=workspace_id,
-                requested_checks=scan.planned_ai_checks,
-                idempotency_key=f"scan:{scan.id}",
+                requested_checks=planned_checks,
+                idempotency_key=f"scan:{scan_id_for_quota}",
                 user_id=requested_by_user_id,
                 project_id=project_id,
                 ttl_seconds=self._settings.scan_reservation_ttl_seconds,
             )
         except QuotaExceededError as exc:
-            self._mark_quota_failed(scan.id, str(exc))
+            self._mark_quota_failed(
+                scan_id_for_quota,
+                verification_id_for_quota,
+                str(exc),
+                scan_data=scan_data,
+                verification_data=verification_data,
+            )
             raise
 
-        attached_scan = self._scans.get_by_id(scan.id)
+        attached_scan = self._scans.get_by_id(scan_id_for_quota)
         if attached_scan is None:
             raise InfrastructureError("Scan disappeared after quota reservation.")
         attached_scan.quota_reservation_id = reservation.id
@@ -407,6 +448,11 @@ class VerificationScanCreationService:
 
         Also checks for verifications whose scan is still PENDING or
         RUNNING, as those represent active provider-spending cycles.
+
+        Phase 10.2: if a PENDING verification exists but its scan is
+        definitively FAILED, terminalize it first (releasing the PENDING
+        slot) instead of blocking creation.  This prevents a dead scan
+        from permanently locking the implementation cycle.
         """
         existing = list(
             self._session.execute(
@@ -417,24 +463,34 @@ class VerificationScanCreationService:
             ).scalars()
         )
         for ver in existing:
-            if ver.outcome == VerificationOutcome.PENDING:
-                # Check if the scan is still active (PENDING or RUNNING).
-                scan = self._session.get(Scan, ver.verification_scan_id)
-                if scan is not None and scan.status in (ScanStatus.PENDING, ScanStatus.RUNNING):
-                    self._session.rollback()
-                    raise ConflictError(
-                        "An active verification scan is already in progress "
-                        "for this implementation cycle. Wait for it to complete "
-                        "or evaluate it before creating a new one."
-                    )
-                # If the scan is terminal but evaluation hasn't run, the
-                # verification is still PENDING.  Block creation to prevent
-                # double spend.
+            if ver.outcome != VerificationOutcome.PENDING:
+                continue
+            # Check if the scan is still active (PENDING or RUNNING).
+            scan = self._session.get(Scan, ver.verification_scan_id)
+            if scan is not None and scan.status in (ScanStatus.PENDING, ScanStatus.RUNNING):
                 self._session.rollback()
                 raise ConflictError(
-                    "A pending verification exists for this implementation "
-                    "cycle. Evaluate it before creating a new one."
+                    "An active verification scan is already in progress "
+                    "for this implementation cycle. Wait for it to complete "
+                    "or evaluate it before creating a new one."
                 )
+            # Phase 10.2: if the scan is FAILED, terminalize the
+            # verification to release the PENDING slot.
+            if scan is not None and scan.status == ScanStatus.FAILED:
+                from app.services.verification_lifecycle_service import (
+                    VerificationLifecycleService,
+                )
+
+                VerificationLifecycleService(self._session).terminalize_failed_scan(ver.id)
+                continue
+            # If the scan is terminal (COMPLETED/PARTIAL) but evaluation
+            # hasn't run, the verification is still PENDING.  Block
+            # creation to prevent double spend.
+            self._session.rollback()
+            raise ConflictError(
+                "A pending verification exists for this implementation "
+                "cycle. Evaluate it before creating a new one."
+            )
 
     # ------------------------------------------------------------------
     # Phase 10.1: Scoped provider validation
@@ -652,20 +708,108 @@ class VerificationScanCreationService:
             scan=scan, verification=verification, created=created, dispatched=True
         )
 
-    def _mark_quota_failed(self, scan_id: uuid.UUID, message: str) -> None:
-        scan = self._scans.get_for_update(scan_id)
-        if scan is None:
-            self._session.rollback()
-            return
+    def _mark_quota_failed(
+        self,
+        scan_id: uuid.UUID,
+        verification_id: uuid.UUID,
+        message: str,
+        *,
+        scan_data: dict[str, Any] | None = None,
+        verification_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Mark a scan as FAILED due to quota reservation failure.
+
+        Also terminalizes the associated verification as INCONCLUSIVE
+        with reason VERIFICATION_SCAN_FAILED.
+
+        In production, the scan was committed before the quota
+        reservation, so it survives the quota service's rollback.
+        The scan_data/verification_data parameters are used only if
+        the scan was destroyed by the rollback (e.g., in tests with
+        transaction-wrapped sessions).
+        """
         now = datetime.now(UTC)
-        scan.status = ScanStatus.FAILED
-        scan.failed_runs = scan.planned_ai_checks
-        scan.completed_at = now
-        scan.failure_code = "QUOTA_EXCEEDED"
-        scan.failure_message = message[:1000]
-        self._runs.mark_unresolved_failed(scan.id, now, "Quota reservation failed.")
-        self._session.commit()
-        self._record_audit("SCAN_FAILED", scan)
+
+        # Try to load the scan — it may have been destroyed by the
+        # quota service's session.rollback().
+        self._session.expire_all()
+        scan = self._session.get(Scan, scan_id)
+        if scan is not None:
+            # Scan still exists — mark it as FAILED.
+            scan.status = ScanStatus.FAILED
+            scan.failed_runs = scan.planned_ai_checks
+            scan.completed_at = now
+            scan.failure_code = "QUOTA_EXCEEDED"
+            scan.failure_message = message[:1000]
+            self._runs.mark_unresolved_failed(scan.id, now, "Quota reservation failed.")
+            self._session.commit()
+            self._record_audit("SCAN_FAILED", scan)
+        elif scan_data is not None:
+            # Scan was destroyed by the rollback — re-create it as FAILED.
+            logger.warning(
+                "quota_failed_scan_recreated",
+                scan_id=str(scan_id),
+            )
+            failed_scan = Scan(
+                id=scan_id,
+                workspace_id=scan_data["workspace_id"],
+                project_id=scan_data["project_id"],
+                prompt_set_id=scan_data["prompt_set_id"],
+                scan_type=scan_data["scan_type"],
+                status=ScanStatus.FAILED,
+                requested_by_user_id=scan_data["requested_by_user_id"],
+                idempotency_key=scan_data["idempotency_key"],
+                prompt_count=scan_data["prompt_count"],
+                provider_count=scan_data["provider_count"],
+                planned_ai_checks=scan_data["planned_ai_checks"],
+                successful_runs=0,
+                failed_runs=scan_data["planned_ai_checks"],
+                repeat_count=scan_data["repeat_count"],
+                baseline_scan_id=scan_data["baseline_scan_id"],
+                completed_at=now,
+                failure_code="QUOTA_EXCEEDED",
+                failure_message=message[:1000],
+            )
+            self._scans.create(failed_scan)
+            self._session.commit()
+
+        # Terminalize the verification as INCONCLUSIVE.
+        ver = self._session.get(OpportunityVerification, verification_id)
+        if ver is not None:
+            ver.outcome = VerificationOutcome.INCONCLUSIVE
+            ver.reason_code = VerificationReasonCode.VERIFICATION_SCAN_FAILED
+            ver.evaluation_message = (
+                "The verification measurement could not start because "
+                "required quota could not be reserved."
+            )
+            ver.evaluated_at = now
+            self._session.commit()
+        elif verification_data is not None:
+            # Verification was destroyed by the rollback — re-create
+            # it as INCONCLUSIVE.
+            failed_ver = OpportunityVerification(
+                id=verification_id,
+                workspace_id=verification_data["workspace_id"],
+                project_id=verification_data["project_id"],
+                opportunity_id=verification_data["opportunity_id"],
+                baseline_occurrence_id=verification_data["baseline_occurrence_id"],
+                baseline_scan_id=verification_data["baseline_scan_id"],
+                verification_scan_id=scan_id,
+                idempotency_key=verification_data["idempotency_key"],
+                verification_methodology_version=verification_data[
+                    "verification_methodology_version"
+                ],
+                metric_name=verification_data["metric_name"],
+                outcome=VerificationOutcome.INCONCLUSIVE,
+                reason_code=VerificationReasonCode.VERIFICATION_SCAN_FAILED,
+                evaluation_message=(
+                    "The verification measurement could not start because "
+                    "required quota could not be reserved."
+                ),
+                evaluated_at=now,
+            )
+            self._session.add(failed_ver)
+            self._session.commit()
 
     def _record_audit(self, action: str, scan: Scan) -> None:
         if self._audit is not None:
@@ -676,3 +820,27 @@ class VerificationScanCreationService:
                 entity_type="scan",
                 entity_id=scan.id,
             )
+
+    def _terminalize_verification_for_failed_scan(self, scan_id: uuid.UUID, message: str) -> None:
+        """Phase 10.2: terminalize a PENDING verification whose scan FAILED.
+
+        This releases the partial unique PENDING slot so a new
+        verification can be created for the same implementation cycle.
+        Zero AI Checks, zero provider calls.
+        """
+        from app.services.verification_lifecycle_service import (
+            VerificationLifecycleService,
+        )
+
+        verification = self._session.execute(
+            select(OpportunityVerification).where(
+                OpportunityVerification.verification_scan_id == scan_id
+            )
+        ).scalar_one_or_none()
+        if verification is None:
+            return
+        VerificationLifecycleService(self._session).terminalize_failed_scan(
+            verification.id,
+            reason_code=VerificationReasonCode.VERIFICATION_SCAN_FAILED,
+            message=message,
+        )

@@ -110,30 +110,44 @@ class OpportunityWorkflowService:
         """System-only transition: IMPLEMENTED → VERIFIED.
 
         Called by the VerificationEvaluationService after a
-        VerificationOutcome.RESOLVED result is persisted.  Locks the
-        Opportunity row and verifies it is still IMPLEMENTED before
-        transitioning.  If the user has changed the status while the
-        verification was in flight, the result is preserved as
-        historical evidence but the Opportunity is NOT forced to
-        VERIFIED.
+        VerificationOutcome.RESOLVED result is persisted.
 
-        Phase 10.1 hardening: independently validates that the
-        verification record exists, belongs to this Opportunity, and
-        has outcome RESOLVED.  This prevents a corrupted or stale
-        verification_id from triggering an invalid transition.
+        Phase 10.2 hardening:
+        1. Lock the Opportunity FOR UPDATE before any validation.
+        2. Validate the verification record matches ALL of:
+           - verification.id == verification_id
+           - verification.workspace_id == workspace_id
+           - verification.project_id == project_id
+           - verification.opportunity_id == opportunity_id
+           - verification.outcome == RESOLVED
+        3. Validate the verification's baseline_occurrence_id equals
+           the Opportunity's CURRENT implementation_baseline_occurrence_id.
+           This prevents a RESOLVED verification from an OLD
+           implementation cycle from marking a NEW cycle VERIFIED.
+        4. Verify the Opportunity is still IMPLEMENTED.
+
+        If any check fails, the RESOLVED verification remains valid
+        historical evidence for its cycle, but the Opportunity is NOT
+        transitioned to VERIFIED.
 
         Returns the final status (VERIFIED if transitioned, or the
-        current status if the user changed it).
+        current status if validation failed).
         """
-        # Independent validation: verify the verification record is RESOLVED.
         from app.core.enums import VerificationOutcome
         from app.models.opportunity import OpportunityVerification
 
+        # Phase 10.2: lock the Opportunity FIRST, before any
+        # validation, to prevent the implementation cycle from
+        # changing between validation and transition.
+        opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
+
+        # Full ownership validation: ALL fields must match.
         verification = self._session.execute(
             select(OpportunityVerification).where(
                 OpportunityVerification.id == verification_id,
-                OpportunityVerification.opportunity_id == opportunity_id,
                 OpportunityVerification.workspace_id == workspace_id,
+                OpportunityVerification.project_id == project_id,
+                OpportunityVerification.opportunity_id == opportunity_id,
             )
         ).scalar_one_or_none()
         if verification is None:
@@ -143,8 +157,6 @@ class OpportunityWorkflowService:
                 verification_id=str(verification_id),
             )
             self._session.commit()
-            # Return current status without transitioning.
-            opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
             return opp.status
         if verification.outcome != VerificationOutcome.RESOLVED:
             logger.warning(
@@ -154,10 +166,31 @@ class OpportunityWorkflowService:
                 outcome=verification.outcome.value,
             )
             self._session.commit()
-            opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
             return opp.status
 
-        opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
+        # Phase 10.2: validate the verification's baseline_occurrence_id
+        # equals the Opportunity's CURRENT frozen baseline.  This
+        # prevents a RESOLVED verification from an OLD implementation
+        # cycle from marking a NEW cycle VERIFIED.
+        if opp.implementation_baseline_occurrence_id is None:
+            logger.info(
+                "verification_resolved_but_no_current_baseline",
+                opportunity_id=str(opportunity_id),
+                verification_id=str(verification_id),
+            )
+            self._session.commit()
+            return opp.status
+        if verification.baseline_occurrence_id != opp.implementation_baseline_occurrence_id:
+            logger.info(
+                "verification_resolved_but_baseline_cycle_mismatch",
+                opportunity_id=str(opportunity_id),
+                verification_id=str(verification_id),
+                verification_baseline=str(verification.baseline_occurrence_id),
+                current_baseline=str(opp.implementation_baseline_occurrence_id),
+            )
+            self._session.commit()
+            return opp.status
+
         if opp.status != OpportunityStatus.IMPLEMENTED:
             logger.info(
                 "verification_resolved_but_status_changed",

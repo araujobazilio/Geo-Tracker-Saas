@@ -237,7 +237,7 @@ def test_false_resolution_brand_disappears(db_session: Session) -> None:
     # Should NOT be RESOLVED — brand disappeared.
     assert eval_result.outcome != VerificationOutcome.RESOLVED
     assert eval_result.outcome == VerificationOutcome.NOT_IMPROVED
-    assert "brand does not appear" in eval_result.evaluation_message.lower()
+    assert "brand-side metric" in eval_result.evaluation_message.lower()
 
     # Opportunity should remain IMPLEMENTED, not VERIFIED.
     db_session.expire_all()

@@ -205,22 +205,22 @@ class ScanFinalizationService:
     def _maybe_auto_evaluate_verification(
         self, session: Session, scan_id: uuid.UUID, analysis_status: str
     ) -> None:
-        """Phase 10.1: Auto-evaluate a VERIFICATION scan after analysis.
+        """Phase 10.1 + 10.2: Auto-evaluate or terminalize a VERIFICATION scan.
 
-        If the scan is a VERIFICATION scan and the analysis is COMPLETED,
-        find the corresponding OpportunityVerification record and
-        evaluate it.  Evaluation failure is logged and swallowed — it
-        MUST NOT rollback the analysis or repeat providers.  The
-        verification record remains PENDING and can be evaluated
-        manually later.
+        Phase 10.1: if the analysis is COMPLETED, find the corresponding
+        OpportunityVerification record and evaluate it.  Evaluation
+        failure is logged and swallowed — it MUST NOT rollback the
+        analysis or repeat providers.  The verification record remains
+        PENDING and can be evaluated manually later.
+
+        Phase 10.2: if the analysis is definitively FAILED,
+        terminalize the PENDING verification as INCONCLUSIVE /
+        ANALYSIS_NOT_COMPLETED so it does not remain PENDING forever.
         """
         from sqlalchemy import select
 
         from app.core.enums import ScanAnalysisStatus, ScanType
         from app.models.opportunity import OpportunityVerification
-
-        if analysis_status != ScanAnalysisStatus.COMPLETED:
-            return
 
         scan = session.get(Scan, scan_id)
         if scan is None or scan.scan_type != ScanType.VERIFICATION:
@@ -238,6 +238,34 @@ class ScanFinalizationService:
             )
             return
         if verification.outcome != "PENDING":
+            return
+
+        # Phase 10.2: analysis definitively FAILED → terminalize.
+        if analysis_status == ScanAnalysisStatus.FAILED:
+            try:
+                from app.services.verification_lifecycle_service import (
+                    VerificationLifecycleService,
+                )
+
+                VerificationLifecycleService(session).terminalize_analysis_failure(
+                    verification.id
+                )
+                logger.info(
+                    "verification_terminalized_analysis_failed",
+                    scan_id=str(scan_id),
+                    verification_id=str(verification.id),
+                )
+            except Exception:
+                logger.error(
+                    "verification_terminalize_analysis_failed_error",
+                    scan_id=str(scan_id),
+                    verification_id=str(verification.id),
+                    exc_info=True,
+                )
+            return
+
+        # Phase 10.1: analysis COMPLETED → auto-evaluate.
+        if analysis_status != ScanAnalysisStatus.COMPLETED:
             return
 
         try:
@@ -319,4 +347,46 @@ class ScanRecoveryService:
         )
         self._session.commit()
         self._finalizer.finalize(scan.id, trigger_analysis=False)
+
+        # Phase 10.2: if the recovered scan is a VERIFICATION scan that
+        # became FAILED, terminalize the PENDING verification so it does
+        # not block the implementation cycle forever.
+        self._maybe_terminalize_verification_after_recovery(scan.id)
         return True
+
+    def _maybe_terminalize_verification_after_recovery(self, scan_id: uuid.UUID) -> None:
+        """Phase 10.2: terminalize a PENDING verification if its scan FAILED."""
+        from sqlalchemy import select
+
+        from app.core.enums import ScanType
+        from app.models.opportunity import OpportunityVerification
+
+        scan = self._session.get(Scan, scan_id)
+        if scan is None or scan.scan_type != ScanType.VERIFICATION:
+            return
+        if scan.status != ScanStatus.FAILED:
+            return
+        verification = self._session.execute(
+            select(OpportunityVerification).where(
+                OpportunityVerification.verification_scan_id == scan_id
+            )
+        ).scalar_one_or_none()
+        if verification is None:
+            return
+        if verification.outcome != "PENDING":
+            return
+        try:
+            from app.services.verification_lifecycle_service import (
+                VerificationLifecycleService,
+            )
+
+            VerificationLifecycleService(self._session).terminalize_failed_scan(
+                verification.id
+            )
+        except Exception:
+            logger.error(
+                "verification_terminalize_after_recovery_error",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
+                exc_info=True,
+            )

@@ -45,6 +45,7 @@ from app.core.enums import (
     ScanStatus,
     ScanType,
     VerificationOutcome,
+    VerificationReasonCode,
     WorkspaceRole,
     WorkspaceType,
 )
@@ -1235,9 +1236,12 @@ def test_verification_inconclusive_low_coverage(db_session: Session) -> None:
     ver_scan = db_session.get(Scan, result.scan.id)
     assert ver_scan.status == ScanStatus.FAILED
 
-    # Evaluation should raise ValidationError because the scan is not COMPLETED/PARTIAL.
-    with pytest.raises(ValidationError, match="COMPLETED or PARTIAL"):
-        _evaluate_verification(db_session, result.verification.id)
+    # Phase 10.2: evaluation of a FAILED scan gracefully returns
+    # INCONCLUSIVE with VERIFICATION_SCAN_FAILED instead of raising
+    # ValidationError and leaving the verification PENDING forever.
+    eval_result = _evaluate_verification(db_session, result.verification.id)
+    assert eval_result.outcome == VerificationOutcome.INCONCLUSIVE
+    assert eval_result.reason_code == VerificationReasonCode.VERIFICATION_SCAN_FAILED
 
 
 def test_verification_zero_cost_evaluation(db_session: Session) -> None:
