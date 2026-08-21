@@ -247,9 +247,7 @@ class ScanFinalizationService:
                     VerificationLifecycleService,
                 )
 
-                VerificationLifecycleService(session).terminalize_analysis_failure(
-                    verification.id
-                )
+                VerificationLifecycleService(session).terminalize_analysis_failure(verification.id)
                 logger.info(
                     "verification_terminalized_analysis_failed",
                     scan_id=str(scan_id),
@@ -380,9 +378,7 @@ class ScanRecoveryService:
                 VerificationLifecycleService,
             )
 
-            VerificationLifecycleService(self._session).terminalize_failed_scan(
-                verification.id
-            )
+            VerificationLifecycleService(self._session).terminalize_failed_scan(verification.id)
         except Exception:
             logger.error(
                 "verification_terminalize_after_recovery_error",
