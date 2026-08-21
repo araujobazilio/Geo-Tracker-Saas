@@ -83,12 +83,15 @@ def _independent_session_factory(engine: Engine) -> sessionmaker[Session]:
 def _truncate_all(engine: Engine) -> None:
     """Truncate all tables to clean up after concurrent tests that commit."""
     with engine.connect() as conn:
-        # Dynamically truncate all tables in the public schema.
+        # Dynamically truncate all tables in the public schema EXCEPT
+        # alembic_version (which tracks the current migration head).
         conn.execute(
             text(
                 "DO $$ DECLARE r RECORD; "
                 "BEGIN "
-                "  FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP "
+                "  FOR r IN (SELECT tablename FROM pg_tables "
+                "            WHERE schemaname = 'public' "
+                "            AND tablename != 'alembic_version') LOOP "
                 "    EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' CASCADE'; "
                 "  END LOOP; "
                 "END $$;"
