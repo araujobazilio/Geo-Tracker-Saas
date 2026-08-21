@@ -688,7 +688,7 @@ class ConfidenceMetricsService:
             .where(PromptRun.scan_id == scan_id)
             .order_by(PromptRun.observation_index, PromptRun.created_at, PromptRun.id)
         ).all()
-        return list(rows)
+        return [(run, prompt) for run, prompt in rows]  # noqa: C416
 
     def _load_mentions(
         self, analysis_id: uuid.UUID, run_ids: set[uuid.UUID]
