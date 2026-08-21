@@ -172,7 +172,7 @@ class Settings(BaseSettings):
         secret = self.app_secret_key.get_secret_value()
         if not secret:
             raise ValueError(
-                "APP_SECRET_KEY must be set in staging/production " "(it is currently empty)."
+                "APP_SECRET_KEY must be set in staging/production (it is currently empty)."
             )
         if secret.lower() in _INSECURE_PLACEHOLDERS:
             raise ValueError(

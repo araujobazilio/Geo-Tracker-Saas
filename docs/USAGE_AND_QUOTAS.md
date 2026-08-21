@@ -386,6 +386,17 @@ before/after comparison using only persisted evidence. It creates
 provider calls. Only the scan execution costs AI Checks; the outcome
 determination is free.
 
+### Auto-terminalization and quota (Phase 10.3)
+
+When a VERIFICATION scan fails (all runs failed or quota exceeded),
+the `ScanFinalizationService` automatically terminalizes the
+`OpportunityVerification` as `INCONCLUSIVE` /
+`VERIFICATION_SCAN_FAILED`. The quota reservation is released as part
+of the normal scan finalization — no additional quota is consumed by
+the terminalization. If the analysis fails with an unexpected
+exception, the verification is terminalized as `INCONCLUSIVE` /
+`ANALYSIS_NOT_COMPLETED`, again with zero additional quota cost.
+
 ### Entitlement requirement
 
 VERIFICATION scans require the `verification_scans` entitlement flag

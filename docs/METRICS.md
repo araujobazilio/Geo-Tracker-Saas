@@ -425,6 +425,14 @@ produces a `VerificationOutcome` enum value.
 4. **INCONCLUSIVE**: Any coverage gate failure → INCONCLUSIVE with a
    `VerificationReasonCode` explaining why.
 
+   Phase 10.3 adds two additional INCONCLUSIVE paths:
+   - `VERIFICATION_SCAN_FAILED`: the verification scan itself failed
+     (all runs failed or quota exceeded). Auto-terminalized by
+     `ScanFinalizationService`.
+   - `ANALYSIS_NOT_COMPLETED` (extended): the scan completed but
+     analysis failed with an unexpected exception. The durable
+     `ScanAnalysis=FAILED` state triggers auto-terminalization.
+
 ### Stored Values
 
 The `OpportunityVerification` record stores both baseline and

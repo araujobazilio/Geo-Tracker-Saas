@@ -152,7 +152,7 @@ class KeywordService:
             ent = self._entitlement_service.get_effective_entitlements(workspace_id)
             if current_count + new_count > ent.max_keywords_per_project:
                 raise QuotaExceededError(
-                    f"Keyword limit reached ({ent.max_keywords_per_project}) " f"for this project."
+                    f"Keyword limit reached ({ent.max_keywords_per_project}) for this project."
                 )
 
             # Create all keywords.

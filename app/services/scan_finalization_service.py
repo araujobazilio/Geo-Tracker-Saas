@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.core.enums import QuotaReservationStatus, ScanStatus
+from app.core.enums import QuotaReservationStatus, ScanStatus, VerificationOutcome
 from app.core.exceptions import ConflictError, InfrastructureError
 from app.core.logging import get_logger
 from app.models.project import Project
@@ -63,7 +63,7 @@ class ScanFinalizationService:
                 self._reconcile_terminal_scan(scan)
                 self._session.commit()
                 if trigger_analysis:
-                    self._trigger_analysis_if_eligible(scan_id, scan.status)
+                    self._post_finalize_verification_lifecycle(scan_id, scan.status)
                 return scan.status
 
             succeeded, failed, unresolved = self._runs.terminal_counts(scan.id)
@@ -103,7 +103,7 @@ class ScanFinalizationService:
             self._session.commit()
             self._record_audit(scan.id, workspace_id, status)
             if trigger_analysis:
-                self._trigger_analysis_if_eligible(scan_id, status)
+                self._post_finalize_verification_lifecycle(scan_id, status)
             return status
         except Exception:
             self._session.rollback()
@@ -149,25 +149,47 @@ class ScanFinalizationService:
             entity_id=scan_id,
         )
 
-    def _trigger_analysis_if_eligible(self, scan_id: uuid.UUID, status: ScanStatus) -> None:
-        """Auto-trigger deterministic analysis after finalization.
+    def _post_finalize_verification_lifecycle(
+        self, scan_id: uuid.UUID, scan_status: ScanStatus
+    ) -> None:
+        """Centralized post-finalization verification lifecycle.
 
-        Analysis runs in a fresh session. Analysis failure MUST NOT
-        rollback scan completion, change quota, or repeat providers.
-        The scan remains terminal regardless of analysis outcome.
-        The failure session factory is passed to ScanAnalysisService so
-        that unexpected exceptions persist a FAILED record in a separate
-        transaction.
+        Called AFTER the Scan terminal state and quota reconciliation
+        are durably committed. If this method fails, the already-durable
+        Scan/quota state is NOT rolled back — the failure is logged and
+        can be reconciled later. Never replays providers.
 
-        Phase 10.1: For VERIFICATION scans, after analysis completes
-        successfully, automatically trigger verification evaluation.
-        Evaluation failure MUST NOT rollback scan completion, change
-        quota, or repeat providers — it is logged and swallowed, just
-        like analysis failure.  The verification record remains PENDING
-        and can be evaluated manually later.
+        FAILED (VERIFICATION scan):
+            Terminalize the PENDING OpportunityVerification as
+            INCONCLUSIVE / VERIFICATION_SCAN_FAILED.
+            No analysis, no AI Checks, no provider calls.
+
+        COMPLETED / PARTIAL (any scan type):
+            Run deterministic analysis in a fresh session.
+            For VERIFICATION scans, auto-evaluate or terminalize based
+            on the durable analysis result.
+
+            If analysis raises an unexpected exception, the
+            ScanAnalysisService persists a FAILED record in its separate
+            failure transaction. We then load the durable analysis state
+            from a FRESH session and, if it is definitively FAILED,
+            terminalize the PENDING verification as INCONCLUSIVE /
+            ANALYSIS_NOT_COMPLETED.
+
+            If analysis COMPLETED but evaluation raises an ephemeral
+            software/database error, the verification MAY remain PENDING
+            for local retry — we do NOT mark it INCONCLUSIVE merely
+            because application code had a temporary exception.
+
+        STANDARD / CONFIDENCE scans: unchanged behavior (analysis only).
         """
-        if status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
+        if scan_status == ScanStatus.FAILED:
+            self._terminalize_failed_verification(scan_id)
             return
+
+        if scan_status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
+            return
+
         try:
             from app.services.scan_analysis_service import ScanAnalysisService
 
@@ -178,7 +200,6 @@ class ScanFinalizationService:
                         analysis_session,
                         failure_session_factory=self._analysis_session_factory,
                     ).analyze(scan_id)
-                    # Phase 10.1: auto-evaluate VERIFICATION scans.
                     self._maybe_auto_evaluate_verification(
                         analysis_session, scan_id, analysis.status
                     )
@@ -191,7 +212,6 @@ class ScanFinalizationService:
                         analysis_session,
                         failure_session_factory=factory,
                     ).analyze(scan_id)
-                    # Phase 10.1: auto-evaluate VERIFICATION scans.
                     self._maybe_auto_evaluate_verification(
                         analysis_session, scan_id, analysis.status
                     )
@@ -199,6 +219,140 @@ class ScanFinalizationService:
             logger.error(
                 "auto_analysis_failed",
                 scan_id=str(scan_id),
+                exc_info=True,
+            )
+            # Phase 10.3: The analysis service persists a FAILED
+            # ScanAnalysis record in its separate failure transaction
+            # before re-raising. Load the durable analysis state from a
+            # FRESH session and terminalize the PENDING verification if
+            # the analysis is definitively FAILED.
+            self._reconcile_analysis_failure(scan_id)
+
+    def _terminalize_failed_verification(self, scan_id: uuid.UUID) -> None:
+        """Terminalize a PENDING verification whose scan is FAILED.
+
+        Works for both fresh finalization and idempotent re-finalization
+        of an already-terminal FAILED scan (self-healing).
+        Zero AI Checks, zero provider calls.
+        """
+        from sqlalchemy import select
+
+        from app.core.enums import ScanType
+        from app.models.opportunity import OpportunityVerification
+
+        scan = self._session.get(Scan, scan_id)
+        if scan is None or scan.scan_type != ScanType.VERIFICATION:
+            return
+        if scan.status != ScanStatus.FAILED:
+            return
+        verification = self._session.execute(
+            select(OpportunityVerification).where(
+                OpportunityVerification.verification_scan_id == scan_id
+            )
+        ).scalar_one_or_none()
+        if verification is None:
+            return
+        if verification.outcome != VerificationOutcome.PENDING:
+            return
+        try:
+            from app.services.verification_lifecycle_service import (
+                VerificationLifecycleService,
+            )
+
+            VerificationLifecycleService(self._session).terminalize_failed_scan(verification.id)
+            logger.info(
+                "verification_terminalized_failed_scan",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
+            )
+        except Exception:
+            logger.error(
+                "verification_terminalize_failed_scan_error",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
+                exc_info=True,
+            )
+
+    def _reconcile_analysis_failure(self, scan_id: uuid.UUID) -> None:
+        """After an analysis exception, inspect durable analysis state.
+
+        The ScanAnalysisService persists a FAILED record in its own
+        failure transaction before re-raising. Using a FRESH session,
+        load the durable ScanAnalysis. If it is definitively FAILED and
+        the scan is a VERIFICATION scan, terminalize the PENDING
+        verification as INCONCLUSIVE / ANALYSIS_NOT_COMPLETED.
+
+        This does NOT replay providers or consume AI Checks.
+        """
+        from app.core.enums import ScanAnalysisStatus, ScanType
+        from app.models.analysis import ANALYSIS_VERSION
+        from app.repositories.analysis_repository import ScanAnalysisRepository
+
+        scan = self._session.get(Scan, scan_id)
+        if scan is None or scan.scan_type != ScanType.VERIFICATION:
+            return
+        if scan.status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
+            return
+
+        # Use a fresh session to read the durable analysis state.
+        try:
+            if self._analysis_session_factory is not None:
+                ctx = self._analysis_session_factory
+                with ctx() as fresh_session:
+                    analysis = ScanAnalysisRepository(fresh_session).get_by_scan_and_version(
+                        scan_id, ANALYSIS_VERSION
+                    )
+            else:
+                from app.db.session import get_session_factory
+
+                factory = get_session_factory()
+                with factory() as fresh_session:
+                    analysis = ScanAnalysisRepository(fresh_session).get_by_scan_and_version(
+                        scan_id, ANALYSIS_VERSION
+                    )
+        except Exception:
+            logger.error(
+                "reconcile_analysis_failure_read_error",
+                scan_id=str(scan_id),
+                exc_info=True,
+            )
+            return
+
+        if analysis is None or analysis.status != ScanAnalysisStatus.FAILED:
+            return
+
+        # Durable analysis is FAILED → terminalize the PENDING verification.
+        from sqlalchemy import select
+
+        from app.models.opportunity import OpportunityVerification
+
+        verification = self._session.execute(
+            select(OpportunityVerification).where(
+                OpportunityVerification.verification_scan_id == scan_id
+            )
+        ).scalar_one_or_none()
+        if verification is None:
+            return
+        if verification.outcome != VerificationOutcome.PENDING:
+            return
+        try:
+            from app.services.verification_lifecycle_service import (
+                VerificationLifecycleService,
+            )
+
+            VerificationLifecycleService(self._session).terminalize_analysis_failure(
+                verification.id
+            )
+            logger.info(
+                "verification_terminalized_analysis_failure_reconciled",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
+            )
+        except Exception:
+            logger.error(
+                "verification_terminalize_analysis_failure_reconciled_error",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
                 exc_info=True,
             )
 
@@ -344,45 +498,7 @@ class ScanRecoveryService:
             error_message="Worker stopped before evidence was durably recorded.",
         )
         self._session.commit()
+        # Phase 10.3: finalize() now centralizes all post-finalization
+        # verification lifecycle, including FAILED scan terminalization.
         self._finalizer.finalize(scan.id, trigger_analysis=False)
-
-        # Phase 10.2: if the recovered scan is a VERIFICATION scan that
-        # became FAILED, terminalize the PENDING verification so it does
-        # not block the implementation cycle forever.
-        self._maybe_terminalize_verification_after_recovery(scan.id)
         return True
-
-    def _maybe_terminalize_verification_after_recovery(self, scan_id: uuid.UUID) -> None:
-        """Phase 10.2: terminalize a PENDING verification if its scan FAILED."""
-        from sqlalchemy import select
-
-        from app.core.enums import ScanType
-        from app.models.opportunity import OpportunityVerification
-
-        scan = self._session.get(Scan, scan_id)
-        if scan is None or scan.scan_type != ScanType.VERIFICATION:
-            return
-        if scan.status != ScanStatus.FAILED:
-            return
-        verification = self._session.execute(
-            select(OpportunityVerification).where(
-                OpportunityVerification.verification_scan_id == scan_id
-            )
-        ).scalar_one_or_none()
-        if verification is None:
-            return
-        if verification.outcome != "PENDING":
-            return
-        try:
-            from app.services.verification_lifecycle_service import (
-                VerificationLifecycleService,
-            )
-
-            VerificationLifecycleService(self._session).terminalize_failed_scan(verification.id)
-        except Exception:
-            logger.error(
-                "verification_terminalize_after_recovery_error",
-                scan_id=str(scan_id),
-                verification_id=str(verification.id),
-                exc_info=True,
-            )

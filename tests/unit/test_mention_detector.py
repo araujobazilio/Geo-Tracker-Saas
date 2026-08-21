@@ -27,7 +27,7 @@ def _snapshots(
     for i, comp in enumerate(competitors or []):
         snaps.append(
             {
-                "entity_snapshot_id": f"comp-{i+1}",
+                "entity_snapshot_id": f"comp-{i + 1}",
                 "name": comp["name"],
                 "domain": comp["domain"],
                 "aliases": comp.get("aliases", []),

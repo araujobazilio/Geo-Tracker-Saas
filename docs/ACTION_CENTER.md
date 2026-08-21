@@ -268,7 +268,7 @@ Forbidden:
 - Any → VERIFIED (Phase 9 cannot verify).
 - VERIFIED → anything (read-only).
 
-`VERIFIED` is reserved for Phase 10 + 10.1 Verification Scans.
+`VERIFIED` is reserved for Phase 10 + 10.1 + 10.3 Verification Scans.
 
 ### Status Preservation Across Refreshes
 

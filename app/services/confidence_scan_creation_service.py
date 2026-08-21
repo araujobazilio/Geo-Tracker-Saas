@@ -369,7 +369,7 @@ class ConfidenceScanCreationService:
             ):
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider}' does not support " f"MODEL_ONLY mode."
+                    f"Provider '{target.provider}' does not support MODEL_ONLY mode."
                 )
             if (
                 target.mode == ProviderExecutionMode.WEB_GROUNDED
@@ -377,7 +377,7 @@ class ConfidenceScanCreationService:
             ):
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider}' does not support " f"WEB_GROUNDED mode."
+                    f"Provider '{target.provider}' does not support WEB_GROUNDED mode."
                 )
 
         return targets

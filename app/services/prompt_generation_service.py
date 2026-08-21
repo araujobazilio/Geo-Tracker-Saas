@@ -253,7 +253,7 @@ def _validate_non_branded_safety(
             label = normalize_text_for_comparison(parts[0])
             if label and label in text_lower:
                 raise ValidationError(
-                    f"NON_BRANDED prompt contains competitor domain label " f"'{parts[0]}': {text}"
+                    f"NON_BRANDED prompt contains competitor domain label '{parts[0]}': {text}"
                 )
 
 

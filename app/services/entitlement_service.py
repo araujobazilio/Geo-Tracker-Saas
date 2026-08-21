@@ -172,7 +172,7 @@ class EntitlementService:
         ent = self.get_effective_entitlements(workspace_id)
         if current_count >= ent.max_keywords_per_project:
             raise QuotaExceededError(
-                f"Keyword limit reached ({ent.max_keywords_per_project}) " f"for this project."
+                f"Keyword limit reached ({ent.max_keywords_per_project}) for this project."
             )
 
     def require_keyword_total_within_limit(
@@ -206,8 +206,7 @@ class EntitlementService:
         ent = self.get_effective_entitlements(workspace_id)
         if current_count >= ent.max_competitors_per_project:
             raise QuotaExceededError(
-                f"Competitor limit reached ({ent.max_competitors_per_project}) "
-                f"for this project."
+                f"Competitor limit reached ({ent.max_competitors_per_project}) for this project."
             )
 
     def require_competitor_total_within_limit(

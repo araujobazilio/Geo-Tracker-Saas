@@ -90,6 +90,4 @@ class PromptSet(UUIDPrimaryKey, TimestampMixin, Base):
     )
 
     def __repr__(self) -> str:  # pragma: no cover
-        return (
-            f"<PromptSet project={self.project_id} " f"version={self.version} status={self.status}>"
-        )
+        return f"<PromptSet project={self.project_id} version={self.version} status={self.status}>"

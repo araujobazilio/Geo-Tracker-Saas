@@ -43,7 +43,6 @@ from app.models import (
     Scan,
 )
 from app.services.opportunity_workflow_service import OpportunityWorkflowService
-from app.services.verification_lifecycle_service import VerificationLifecycleService
 
 # Re-export the fake adapters and helpers from test_verification_phase10
 from tests.integration.test_verification_phase10 import (
@@ -612,6 +611,11 @@ def test_quota_failure_retry_with_new_key(
 def test_manual_evaluate_failed_scan_graceful(db_session: Session) -> None:
     """Manually evaluating a FAILED scan returns INCONCLUSIVE gracefully
     instead of raising ValidationError.
+
+    Phase 10.3: finalization now automatically terminalizes the
+    PENDING verification when the scan is FAILED. This test asserts
+    the automatic behavior without manually calling the lifecycle
+    service.
     """
     ws, user, project, _ps, _prompts = _seed(
         db_session,
@@ -655,18 +659,18 @@ def test_manual_evaluate_failed_scan_graceful(db_session: Session) -> None:
     assert ver_scan is not None
     assert ver_scan.status == ScanStatus.FAILED
 
-    # The auto-terminalization in _check_no_pending_verification or
-    # finalization may have already terminalized it.  If not, manual
-    # evaluate should handle it gracefully.
+    # Phase 10.3: finalization MUST automatically terminalize the
+    # PENDING verification. No manual lifecycle call needed.
     ver = db_session.get(OpportunityVerification, result.verification.id)
     assert ver is not None
-    if ver.outcome == VerificationOutcome.PENDING:
-        eval_result = _evaluate_verification(db_session, result.verification.id)
-        assert eval_result.outcome == VerificationOutcome.INCONCLUSIVE
-        assert eval_result.reason_code == VerificationReasonCode.VERIFICATION_SCAN_FAILED
-    else:
-        # Already terminalized by the lifecycle service.
-        assert ver.outcome == VerificationOutcome.INCONCLUSIVE
+    assert ver.outcome == VerificationOutcome.INCONCLUSIVE
+    assert ver.reason_code == VerificationReasonCode.VERIFICATION_SCAN_FAILED
+    assert ver.evaluated_at is not None
+
+    # Opportunity remains IMPLEMENTED (not VERIFIED).
+    opp = db_session.get(Opportunity, opp.id)
+    assert opp is not None
+    assert opp.status == OpportunityStatus.IMPLEMENTED
 
 
 # ----------------------------------------------------------------------
@@ -951,8 +955,11 @@ def test_targeted_scope_prompt_exact_prompt_only(db_session: Session) -> None:
 
 
 def test_lifecycle_service_terminalizes_failed_scan(db_session: Session) -> None:
-    """VerificationLifecycleService.terminalize_failed_scan transitions
-    a PENDING verification to INCONCLUSIVE when its scan is FAILED.
+    """Finalization automatically terminalizes a PENDING verification
+    when its scan is FAILED (all runs failed).
+
+    Phase 10.3: this test asserts the automatic behavior without
+    manually calling VerificationLifecycleService.
     """
     ws, user, project, _ps, _prompts = _seed(
         db_session,
@@ -994,17 +1001,14 @@ def test_lifecycle_service_terminalizes_failed_scan(db_session: Session) -> None
     assert ver_scan is not None
     assert ver_scan.status == ScanStatus.FAILED
 
-    # If not already terminalized, use the lifecycle service.
+    # Phase 10.3: finalization MUST automatically terminalize.
     ver = db_session.get(OpportunityVerification, result.verification.id)
     assert ver is not None
-    if ver.outcome == VerificationOutcome.PENDING:
-        terminalized = VerificationLifecycleService(db_session).terminalize_failed_scan(ver.id)
-        assert terminalized is True
-        db_session.expire_all()
-        ver = db_session.get(OpportunityVerification, result.verification.id)
-        assert ver is not None
-        assert ver.outcome == VerificationOutcome.INCONCLUSIVE
-        assert ver.reason_code == VerificationReasonCode.VERIFICATION_SCAN_FAILED
-    else:
-        # Already terminalized by auto-lifecycle.
-        assert ver.outcome == VerificationOutcome.INCONCLUSIVE
+    assert ver.outcome == VerificationOutcome.INCONCLUSIVE
+    assert ver.reason_code == VerificationReasonCode.VERIFICATION_SCAN_FAILED
+    assert ver.evaluated_at is not None
+
+    # Opportunity remains IMPLEMENTED.
+    opp = db_session.get(Opportunity, opp.id)
+    assert opp is not None
+    assert opp.status == OpportunityStatus.IMPLEMENTED

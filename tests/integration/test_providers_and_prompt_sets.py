@@ -170,8 +170,7 @@ class TestProjectProviders:
         # Delete ANTHROPIC from plan.
         db_session.execute(
             __import__("sqlalchemy", fromlist=["text"]).text(
-                f"DELETE FROM plan_providers WHERE plan_id = '{plan.id}' "
-                f"AND provider = 'ANTHROPIC'"
+                f"DELETE FROM plan_providers WHERE plan_id = '{plan.id}' AND provider = 'ANTHROPIC'"
             )
         )
         db_session.flush()

@@ -181,8 +181,7 @@ class ProjectOnboardingService:
             for comp_input in normalized.competitors:
                 if comp_input.domain == normalized.domain:
                     raise ValidationError(
-                        f"Competitor domain '{comp_input.domain}' cannot "
-                        f"match the project domain."
+                        f"Competitor domain '{comp_input.domain}' cannot match the project domain."
                     )
                 if comp_input.domain in seen_domains:
                     raise ValidationError(f"Duplicate competitor domain: {comp_input.domain}")

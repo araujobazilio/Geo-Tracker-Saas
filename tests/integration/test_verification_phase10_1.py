@@ -636,9 +636,9 @@ def test_idempotency_baseline_conflict(db_session: Session) -> None:
     # Verify the baseline has actually changed.
     new_baseline_occ_id = opp.implementation_baseline_occurrence_id
     assert new_baseline_occ_id is not None, "New baseline occurrence not frozen"
-    assert (
-        new_baseline_occ_id != old_baseline_occ_id
-    ), "Baseline did not change after re-implementation"
+    assert new_baseline_occ_id != old_baseline_occ_id, (
+        "Baseline did not change after re-implementation"
+    )
 
     # Reuse the same idempotency key — should raise ConflictError
     # because the baseline has changed.

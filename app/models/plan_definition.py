@@ -57,7 +57,7 @@ class PlanDefinition(UUIDPrimaryKey, TimestampMixin, Base):
         # Scheduled scan interval: NULL means no scheduled scans allowed.
         # If set, must be positive.
         CheckConstraint(
-            "min_scheduled_scan_interval_hours IS NULL " "OR min_scheduled_scan_interval_hours > 0",
+            "min_scheduled_scan_interval_hours IS NULL OR min_scheduled_scan_interval_hours > 0",
             name="ck_plan_definitions_scan_interval_positive",
         ),
     )

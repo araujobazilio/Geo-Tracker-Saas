@@ -430,6 +430,27 @@ the verification scope, outcome integrity, and automatic evaluation.
 - **Idempotency hardening**: same key + different baseline =
   ConflictError.
 
+### Phase 10.3 hardening
+
+- **Auto-terminalization**: `ScanFinalizationService` now guarantees
+  that a `PENDING` `OpportunityVerification` is never left stranded
+  after its scan reaches a terminal state. A centralized
+  `_post_finalize_verification_lifecycle` helper handles all paths.
+- **FAILED scan → INCONCLUSIVE**: when a VERIFICATION scan is FAILED
+  (all runs failed or quota exceeded), the verification is
+  automatically terminalized as `INCONCLUSIVE` /
+  `VERIFICATION_SCAN_FAILED`.
+- **Analysis exception → INCONCLUSIVE**: when
+  `ScanAnalysisService.analyze()` raises after persisting
+  `ScanAnalysis=FAILED`, the verification is terminalized as
+  `INCONCLUSIVE` / `ANALYSIS_NOT_COMPLETED`.
+- **Evaluation exception → PENDING**: ephemeral evaluation errors
+  leave the verification `PENDING` for manual retry (no provider
+  replay).
+- **Idempotent self-healing**: re-calling `finalize()` on an
+  already-terminal FAILED scan reconciles any stranded PENDING
+  verification.
+
 See `docs/VERIFICATION_SCANS.md` for full details.
 
 ## Technology stack

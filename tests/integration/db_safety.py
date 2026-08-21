@@ -57,7 +57,7 @@ def assert_test_database_safe(url: str, app_env: str | None = None) -> None:
 
     if not db_name:
         raise TestDatabaseSafetyError(
-            "Refusing destructive test database operation: " "target database name is empty."
+            "Refusing destructive test database operation: target database name is empty."
         )
 
     if db_name != ALLOWED_TEST_DB_NAME:

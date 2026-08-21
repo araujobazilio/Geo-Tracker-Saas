@@ -1,4 +1,4 @@
-# Verification Scans and Opportunity Outcome Tracking (Phase 10 + 10.1)
+# Verification Scans and Opportunity Outcome Tracking (Phase 10 + 10.1 + 10.3)
 
 ## Overview
 
@@ -322,3 +322,61 @@ automatically triggered by the `ScanFinalizationService`.
   the analysis, replay providers, or change quota. The verification
   remains PENDING and can be evaluated manually.
 - The scan remains terminal regardless of evaluation outcome.
+
+## Auto-Terminalization (Phase 10.3)
+
+The `ScanFinalizationService` now guarantees that a `PENDING`
+`OpportunityVerification` is never left stranded after its scan
+reaches a terminal state. A centralized post-finalization helper
+handles all terminal paths:
+
+### FAILED Verification Scan (all runs failed)
+
+When a `VERIFICATION` scan's `ScanStatus` is `FAILED` (all `PromptRuns`
+failed), the finalization service automatically terminalizes the
+associated `OpportunityVerification` as:
+
+- **Outcome**: `INCONCLUSIVE`
+- **Reason Code**: `VERIFICATION_SCAN_FAILED`
+- **evaluated_at**: set to the finalization timestamp
+
+No manual lifecycle call is needed. The opportunity remains
+`IMPLEMENTED`.
+
+### Analysis Exception (durable `ScanAnalysis=FAILED`)
+
+When `ScanAnalysisService.analyze()` raises an unexpected exception
+after persisting `ScanAnalysis=FAILED` in its failure transaction, the
+post-finalization helper detects the durable `FAILED` analysis state
+and terminalizes the `OpportunityVerification` as:
+
+- **Outcome**: `INCONCLUSIVE`
+- **Reason Code**: `ANALYSIS_NOT_COMPLETED`
+- **evaluated_at**: set to the reconciliation timestamp
+
+No provider replay occurs. The scan remains `COMPLETED`/`PARTIAL`.
+
+### Evaluation Exception (ephemeral)
+
+When `VerificationEvaluationService.evaluate()` raises an unexpected
+exception after `ScanAnalysis=COMPLETED`, the verification remains
+`PENDING` for local retry. This is an ephemeral error — the analysis
+is durable and the scan is terminal. Manual evaluation can be called
+to complete the evaluation without provider replay.
+
+### Idempotent Self-Healing
+
+Re-calling `finalize()` on an already-terminal `FAILED` verification
+scan reconciles any stranded `PENDING` verification. This makes the
+finalization service idempotent and self-healing — operators can
+safely re-run finalization to repair inconsistent state.
+
+### `VERIFICATION_SCAN_FAILED` Reason Code (Phase 10.3)
+
+| Code | Meaning |
+|------|---------|
+| `VERIFICATION_SCAN_FAILED` | The verification scan itself failed (all runs failed or quota exceeded). |
+
+This is distinct from `ANALYSIS_NOT_COMPLETED` (the scan completed but
+analysis failed) and `INSUFFICIENT_COVERAGE` (the scan and analysis
+succeeded but coverage was too low).
