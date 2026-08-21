@@ -1,4 +1,4 @@
-# Action Center (Phase 9)
+# Action Center (Phase 9 + Phase 10)
 
 ## Overview
 
@@ -10,6 +10,16 @@ completed STANDARD Scan's immutable evidence and upserts logical
 
 It does NOT perform any AI Checks, provider calls, or UsageEvents. It
 uses only evidence already persisted from prior scans.
+
+**Phase 10** adds Verification Scans and Opportunity Outcome Tracking.
+See [VERIFICATION_SCANS.md](VERIFICATION_SCANS.md) for full details.
+The key addition is:
+- `IMPLEMENTED` now freezes the latest `OpportunityOccurrence` as the
+  implementation baseline.
+- A VERIFICATION scan can be created from the frozen baseline to
+  re-measure the same cells.
+- Deterministic evaluation produces a `VerificationOutcome`; only
+  `RESOLVED` transitions the Opportunity to `VERIFIED`.
 
 ## Key Principles
 

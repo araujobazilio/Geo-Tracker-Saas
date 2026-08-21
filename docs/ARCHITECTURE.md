@@ -72,9 +72,11 @@ single responsibility boundary consumed by routers and other services.
 | `ScanFinalizationService` / `ScanRecoveryService` | Atomic terminal classification + unused quota release (single commit), idempotent reconciliation, run-count invariant, stale PENDING/RUNNING recovery without provider replay |
 | `ConfidenceScanCreationService` | Clones a baseline STANDARD scan's methodology to create a CONFIDENCE scan with repeated observations (Phase 8) |
 | `ConfidenceMetricsService` | Computes reliability metrics (measurement coverage, mention stability, confidence level) from repeated CONFIDENCE observations (Phase 8) |
-| `CompetitorExplanationService` | Computes evidence-based brand vs competitor explanations from persisted Scan analysis evidence (Phase 9) |
+| `CompetitorExplanationService` | Computes evidence-based brand vs competitor explanations from persisted Scan analysis evidence (Phase 9); extended for VERIFICATION scans in Phase 10 |
 | `ActionGenerationService` | Deterministic opportunity generation from completed STANDARD scan evidence; fingerprint-based cross-scan dedup; status-preserving upsert (Phase 9) |
-| `OpportunityWorkflowService` | Opportunity status transitions with audit timestamps; VERIFIED is read-only in Phase 9 (Phase 9) |
+| `VerificationScanCreationService` | Clones a frozen implementation baseline STANDARD scan's methodology to create a single-repeat VERIFICATION scan (Phase 10) |
+| `VerificationEvaluationService` | Deterministic before/after comparison producing VerificationOutcome; zero AI Checks; system-only VERIFIED transition on RESOLVED (Phase 10) |
+| `OpportunityWorkflowService` | Opportunity status transitions with audit timestamps; freezes implementation baseline on IMPLEMENTED, clears on IN_PROGRESS, system-only VERIFIED transition on RESOLVED outcome (Phase 9 + Phase 10) |
 | `PricingService` / `ProviderCostCalculator` | Exact effective price resolution and Decimal/null-safe cost calculation |
 
 ### Entitlement resolution
@@ -354,6 +356,57 @@ See `docs/ACTION_CENTER.md` and `docs/COMPETITOR_EXPLANATIONS.md`.
   `deterministic-actions-v1.1`. `OpportunityOccurrence.action_engine_version_at_detection`
   records the engine version at detection time.
 
+## Phase 10: Verification Scans and Opportunity Outcome Tracking
+
+Phase 10 introduces **Verification Scans** and **Opportunity Outcome
+Tracking** — a deterministic, zero-AI-Check before/after comparison
+that measures whether a user's implementation work resolved a
+previously detected Action Center Opportunity.
+
+### Key concepts
+
+- **Implementation baseline freezing**: When an Opportunity transitions
+  to `IMPLEMENTED`, the latest eligible `OpportunityOccurrence` is
+  frozen as `implementation_baseline_occurrence_id`. Returning to
+  `IN_PROGRESS` clears it.
+- **Methodology cloning**: `VerificationScanCreationService` clones the
+  frozen baseline STANDARD scan's exact prompts, providers, surfaces,
+  execution modes, requested models, and entity snapshots. Current
+  project configuration cannot alter the cloned methodology.
+- **Deterministic evaluation**: `VerificationEvaluationService`
+  computes the verification metrics via `CompetitorExplanationService`,
+  compares to the frozen baseline, and persists a
+  `VerificationOutcome`. Zero AI Checks, zero provider calls.
+- **VERIFIED status**: Only a `RESOLVED` outcome transitions the
+  Opportunity to `VERIFIED` via the system-only
+  `mark_verified_from_verification()` method. `VERIFIED` is read-only.
+- **No causal claims**: `VERIFIED` does NOT prove the user's
+  implementation caused the improvement. It means the originally
+  measured issue is no longer present under the verification
+  methodology.
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `app/core/verification_engine.py` | Constants for verification thresholds and methodology version |
+| `app/models/opportunity.py` (extended) | `OpportunityVerification` model, `implementation_baseline_occurrence_id` on `Opportunity` |
+| `app/services/verification_scan_creation_service.py` | Clones baseline methodology, creates VERIFICATION scan + OpportunityVerification record |
+| `app/services/verification_evaluation_service.py` | Deterministic before/after comparison, persists outcome, system-only VERIFIED transition |
+| `app/schemas/verification.py` | Pydantic schemas for verification API |
+| `app/routers/api/verification.py` | Verification API endpoints (create, list, detail, evaluate, summary) |
+
+### Service extensions
+
+- **`OpportunityWorkflowService`** — `transition()` now freezes the
+  baseline occurrence on IMPLEMENTED and clears it on IN_PROGRESS.
+  `mark_verified_from_verification()` provides the system-only path to
+  VERIFIED. Direct manual transitions to VERIFIED are forbidden.
+- **`CompetitorExplanationService`** — `_require_standard_scan()`
+  extended to accept VERIFICATION scans (same methodology).
+
+See `docs/VERIFICATION_SCANS.md` for full details.
+
 ## Technology stack
 
 | Layer | Technology |
@@ -406,7 +459,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Brand / citation detection | IMPLEMENTED (Phase 7) |
 | Confidence Scans | IMPLEMENTED (Phase 8) |
 | Action Center | IMPLEMENTED (Phase 9) |
-| Verification system | PLANNED (Phase 10) |
+| Verification system | IMPLEMENTED (Phase 10) |
 | Scheduling / email reports | PLANNED (Phase 11) |
 | Dashboard / UI | PLANNED (Phase 12) |
 | Agency dashboard / white-label | PLANNED (Phase 13) |

@@ -26,6 +26,7 @@ from app.routers.api import entitlements as entitlements_router
 from app.routers.api import opportunities as opportunities_router
 from app.routers.api import projects as projects_router
 from app.routers.api import scans as scans_router
+from app.routers.api import verification as verification_router
 from app.routers.api import workspaces as workspaces_router
 
 
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(competitor_explanation_router.router)
     app.include_router(opportunities_router.router)
     app.include_router(opportunities_router.scan_router)
+    app.include_router(verification_router.router)
     return app
 
 

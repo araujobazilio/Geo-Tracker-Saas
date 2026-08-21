@@ -192,6 +192,7 @@ class OpportunityResponse(BaseModel):
     dismissed_at: datetime | None
     verified_at: datetime | None
     dismissal_reason: str | None
+    implementation_baseline_occurrence_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
 

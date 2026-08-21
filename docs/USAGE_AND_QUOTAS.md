@@ -358,6 +358,37 @@ workspace's effective plan. A workspace without this entitlement cannot create
 CONFIDENCE scans; the creation endpoint returns a 403/entitlement error before
 any quota is reserved.
 
+## Verification scan quota economics (Phase 10)
+
+A `VERIFICATION` scan is a single-repeat clone of the frozen
+implementation baseline STANDARD scan. It re-measures the exact same
+Prompt × Provider cells once (`repeat_count = 1`):
+
+```
+planned_ai_checks = prompt_count × provider_count × 1
+```
+
+This equals the baseline scan's `planned_ai_checks`. As with STANDARD
+and CONFIDENCE scans, **all** planned AI Checks are reserved before
+any provider call is dispatched. If the workspace cannot reserve the
+full amount, the verification scan is rejected with
+`QuotaExceededError` and zero checks are consumed.
+
+### Evaluation is zero-cost
+
+`VerificationEvaluationService.evaluate()` performs a deterministic
+before/after comparison using only persisted evidence. It creates
+**zero** UsageEvents, consumes **zero** AI Checks, and makes **zero**
+provider calls. Only the scan execution costs AI Checks; the outcome
+determination is free.
+
+### Entitlement requirement
+
+VERIFICATION scans require the `verification_scans` entitlement flag
+on the workspace's effective plan. A workspace without this
+entitlement cannot create verification scans; the creation endpoint
+returns a 403/entitlement error before any quota is reserved.
+
 ## API endpoints
 
 | Method | Path | Description |

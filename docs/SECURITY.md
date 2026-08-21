@@ -6,7 +6,8 @@ Phases 0–6 establish the implemented application, tenant, quota, provider, and
 Scan Engine security boundaries described below. Phase 7 adds analysis
 endpoint security. Phase 8 adds confidence scan tenant isolation. Phase 9
 adds Action Center and Competitor Explanation zero-cost endpoint security.
-Additional launch hardening is Phase 17.
+Phase 10 adds Verification Scan tenant isolation, role enforcement, and
+VERIFIED status protection. Additional launch hardening is Phase 17.
 
 ## Implemented
 
@@ -244,12 +245,60 @@ Security properties:
   `Project`/`Competitor` state. A user cannot rename a brand or
   competitor after scan creation to influence explanation results.
 - **VERIFIED status protection:** the `VERIFIED` opportunity status is
-  read-only in Phase 9. No API endpoint or service can transition an
-  Opportunity to `VERIFIED`. This status is reserved for Phase 10
-  Verification Scans.
+  read-only. No API endpoint can manually transition an Opportunity to
+  `VERIFIED`. Only the system-only
+  `OpportunityWorkflowService.mark_verified_from_verification()` method
+  can set it, and only when a Verification evaluation produces a
+  `RESOLVED` outcome. See Phase 10 below.
 - **Cross-project isolation:** accessing an Opportunity from a different
   project (within the same workspace) returns 404. Opportunity queries
   are scoped to `(workspace_id, project_id)`.
+
+## Phase 10: Verification Scan security
+
+Phase 10 adds Verification Scan endpoints that create VERIFICATION
+scans, list verification records, and trigger deterministic
+evaluation.
+
+Security properties:
+
+- **Verification scan tenant isolation:** a VERIFICATION scan can only
+  be created from an Opportunity that belongs to the caller's
+  workspace. The baseline scan, baseline occurrence, and parent
+  Opportunity must all belong to the same workspace. Cross-tenant
+  access returns 404.
+- **Verification record tenant isolation:** verification records are
+  scoped to `(workspace_id, project_id, opportunity_id)`. Cross-tenant
+  access returns 404.
+- **Role enforcement:** creating a verification scan and triggering
+  evaluation require `OWNER`/`ADMIN` role. Listing and reading
+  verification records require `MEMBER` role (read-only).
+- **Entitlement enforcement:** verification scan creation requires the
+  `verification_scans` entitlement flag on the workspace's effective
+  plan. A workspace without this entitlement cannot create verification
+  scans; the endpoint returns a 403/entitlement error before any quota
+  is reserved.
+- **Methodology cloning integrity:** the VERIFICATION scan clones the
+  frozen baseline's exact prompts, providers, surfaces, execution
+  modes, requested models, and entity snapshots. Current project
+  configuration cannot alter the cloned methodology. This prevents a
+  user from weakening the verification measurement by changing project
+  settings after implementation.
+- **VERIFIED status is system-only:** no API endpoint can manually
+  transition an Opportunity to `VERIFIED`. Only
+  `mark_verified_from_verification()` can set it, and only when the
+  evaluation produces `RESOLVED`. `VERIFIED` is read-only — no
+  transitions away from it are allowed.
+- **Concurrency safety:** `OpportunityWorkflowService.transition()`
+  acquires a row-level lock on the Opportunity.
+  `VerificationEvaluationService.evaluate()` acquires a row-level lock
+  on the `OpportunityVerification` record.
+  `mark_verified_from_verification()` re-checks the Opportunity status
+  under lock before transitioning, preventing race conditions where
+  the user changes the status while the verification is in flight.
+- **Zero-cost evaluation:** `VerificationEvaluationService.evaluate()`
+  creates zero UsageEvents, consumes zero AI Checks, and makes zero
+  provider calls. Only the scan execution costs AI Checks.
 
 ## Planned (later phases)
 

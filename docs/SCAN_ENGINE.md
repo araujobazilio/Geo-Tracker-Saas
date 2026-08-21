@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-**IMPLEMENTED (Phase 6 + Phase 8).** The Scan Engine executes reproducible `STANDARD` scans and repeated `CONFIDENCE` scans. A customer requests a scan; GEO Tracker fixes its plan before any provider call, reserves the entire customer AI Check budget, dispatches one Celery task, executes each planned `PromptRun` at most once, records evidence and accounting atomically, and classifies the scan from terminal run states. Phase 8 adds `CONFIDENCE` scans that repeat the same cells to measure reliability (see "CONFIDENCE methodology" below).
+**IMPLEMENTED (Phase 6 + Phase 8 + Phase 10).** The Scan Engine executes reproducible `STANDARD` scans, repeated `CONFIDENCE` scans, and single-repeat `VERIFICATION` scans. A customer requests a scan; GEO Tracker fixes its plan before any provider call, reserves the entire customer AI Check budget, dispatches one Celery task, executes each planned `PromptRun` at most once, records evidence and accounting atomically, and classifies the scan from terminal run states. Phase 8 adds `CONFIDENCE` scans that repeat the same cells to measure reliability (see "CONFIDENCE methodology" below). Phase 10 adds `VERIFICATION` scans that re-measure an Opportunity's implementation baseline to determine whether the issue is resolved (see [VERIFICATION_SCANS.md](VERIFICATION_SCANS.md)).
 
 Phase 6 does not perform brand/mention detection. That is Phase 7. A valid provider answer containing no tracked-brand mention is a successful measurement (`SUCCEEDED`), not an execution failure.
 
@@ -62,6 +62,22 @@ One run = one provider call. There is no retry, no `autoretry_for`, and no `self
 ### ScanExecutionService for CONFIDENCE
 
 `ScanExecutionService` is extended to handle the round-by-round execution model for `CONFIDENCE` scans. It groups `PromptRun` rows by `observation_index`, executes each round fully before advancing to the next, and uses the same atomic result recording, finalization, and stale-recovery machinery as STANDARD scans.
+
+## VERIFICATION methodology (Phase 10)
+
+**IMPLEMENTED (Phase 10).** A `VERIFICATION` scan is a single-repeat clone of a frozen implementation baseline `STANDARD` scan. It re-measures the exact same Prompt × Provider cells once (`repeat_count = 1`) to determine whether a previously detected Action Center Opportunity has been resolved.
+
+### Creation
+
+`VerificationScanCreationService` clones the baseline STANDARD scan's methodology: it copies the snapshotted prompt set, provider targets, execution modes, model IDs, and entity snapshots, then creates `prompt_count × provider_count` `PromptRun` rows with `observation_index = 1`. The baseline scan must be terminal (`COMPLETED` or `PARTIAL`), belong to the same workspace, and have a COMPLETED `ScanAnalysis`. The parent Opportunity must be in `IMPLEMENTED` status with a frozen `implementation_baseline_occurrence_id`.
+
+### Execution
+
+`ScanExecutionService` handles `VERIFICATION` scans identically to `STANDARD` scans (single round, bounded async concurrency, one session per run, no retries). The `repeat_count = 1` value routes them through `_execute_standard_round`.
+
+### Evaluation
+
+`VerificationEvaluationService` performs a deterministic before/after comparison using `CompetitorExplanationService` to compute the verification metrics. Zero AI Checks, zero provider calls. See [VERIFICATION_SCANS.md](VERIFICATION_SCANS.md) for the full decision logic.
 
 ## Immutable execution snapshot
 

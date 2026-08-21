@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    Index,
     Numeric,
     String,
     Text,
@@ -41,6 +42,8 @@ from app.core.enums import (
     OpportunityStatus,
     OpportunityType,
     PromptType,
+    VerificationOutcome,
+    VerificationReasonCode,
 )
 from app.db.base import Base, TimestampMixin
 from app.db.mixins import UUIDPrimaryKey
@@ -111,9 +114,20 @@ class Opportunity(UUIDPrimaryKey, TimestampMixin, Base):
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dismissal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Phase 10: frozen baseline occurrence for verification.
+    # Set when transitioning to IMPLEMENTED; cleared when returning to
+    # IN_PROGRESS.  ON DELETE RESTRICT prevents accidental loss.
+    implementation_baseline_occurrence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType,
+        ForeignKey("opportunity_occurrences.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
     # Relationships
     occurrences: Mapped[list[OpportunityOccurrence]] = relationship(
-        back_populates="opportunity", cascade="all, delete-orphan"
+        back_populates="opportunity",
+        cascade="all, delete-orphan",
+        foreign_keys="OpportunityOccurrence.opportunity_id",
     )
 
     # Type-ignore for SQLAlchemy typed relationship resolution
@@ -180,7 +194,10 @@ class OpportunityOccurrence(UUIDPrimaryKey, Base):
     )
 
     # Relationships
-    opportunity: Mapped[Opportunity] = relationship(back_populates="occurrences")
+    opportunity: Mapped[Opportunity] = relationship(
+        back_populates="occurrences",
+        foreign_keys="OpportunityOccurrence.opportunity_id",
+    )
     evidence: Mapped[list[OpportunityEvidence]] = relationship(
         back_populates="occurrence", cascade="all, delete-orphan"
     )
@@ -233,3 +250,94 @@ class OpportunityEvidence(UUIDPrimaryKey, Base):
 
     # Relationships
     occurrence: Mapped[OpportunityOccurrence] = relationship(back_populates="evidence")
+
+
+class OpportunityVerification(UUIDPrimaryKey, TimestampMixin, Base):
+    """Phase 10 — one verification comparison record for an Opportunity.
+
+    Links a frozen implementation baseline occurrence + baseline STANDARD
+    scan to a targeted VERIFICATION scan.  Stores the deterministic
+    before/after metric comparison and the resulting VerificationOutcome.
+
+    Key invariants:
+    - One active verification per Opportunity implementation cycle.
+    - Multiple completed verifications may coexist (history).
+    - The verification_scan_id is UNIQUE — one scan per verification.
+    - Idempotency: (workspace_id, idempotency_key) is unique.
+    - Outcome is PENDING until deterministic evaluation completes.
+    - Only RESOLVED may transition the parent Opportunity to VERIFIED.
+    - VERIFIED does NOT prove causation — it means the originally
+      measured issue is no longer present under the verification
+      methodology.
+    """
+
+    __tablename__ = "opportunity_verifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "idempotency_key",
+            name="uq_opportunity_verifications_workspace_idempotency",
+        ),
+        UniqueConstraint(
+            "verification_scan_id",
+            name="uq_opportunity_verifications_verification_scan",
+        ),
+        Index(
+            "ix_opportunity_verifications_opportunity_created",
+            "opportunity_id",
+            "created_at",
+        ),
+    )
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType,
+        ForeignKey("opportunities.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+
+    baseline_occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType,
+        ForeignKey("opportunity_occurrences.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    baseline_scan_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("scans.id", ondelete="RESTRICT"), nullable=False
+    )
+    verification_scan_id: Mapped[uuid.UUID] = mapped_column(
+        UUIDType, ForeignKey("scans.id", ondelete="RESTRICT"), nullable=False
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    verification_methodology_version: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    outcome: Mapped[VerificationOutcome] = mapped_column(
+        String(20), nullable=False, default=VerificationOutcome.PENDING, index=True
+    )
+    reason_code: Mapped[VerificationReasonCode | None] = mapped_column(String(50), nullable=True)
+    evaluation_message: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    metric_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    baseline_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    verification_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    delta_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+
+    baseline_brand_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    verification_brand_value: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+
+    baseline_coverage: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    verification_coverage: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+
+    resolution_threshold: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    meaningful_improvement_threshold: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 4), nullable=True
+    )
+
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

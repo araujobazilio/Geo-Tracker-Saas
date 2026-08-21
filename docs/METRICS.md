@@ -371,3 +371,48 @@ no SUCCEEDED runs exist (denominator is zero). This distinction is
 preserved in all competitor explanation metrics.
 
 See `docs/COMPETITOR_EXPLANATIONS.md` for full details.
+
+## Verification Outcome Metrics (Phase 10)
+
+**IMPLEMENTED (Phase 10).** `VerificationEvaluationService` computes a
+deterministic before/after comparison using the same
+`CompetitorExplanationService` metrics described above. The comparison
+produces a `VerificationOutcome` enum value.
+
+### Compared Metrics by Opportunity Type
+
+| Opportunity Type | Metric | Resolution Threshold | Meaningful Improvement |
+|-----------------|--------|---------------------|----------------------|
+| `DISCOVERY_VISIBILITY_GAP` | `visibility_gap_pp` | ≥ 10pp | ≥ 5pp |
+| `PROVIDER_VISIBILITY_GAP` | `visibility_gap_pp` | ≥ 15pp | ≥ 5pp |
+| `OWNED_CITATION_GAP` | `citation_gap_pp` | ≥ 20pp | ≥ 5pp |
+| `PROMPT_COMPETITOR_GAP` | `competitor_only_count` | == 0 | ≥ 10 |
+
+### Outcome Decision Logic
+
+1. **Coverage gates** (applied before metric comparison):
+   - Verification scan analysis must be COMPLETED.
+   - Verification measurement coverage ≥ 75%.
+   - At least 1 successful observation.
+   - For `OWNED_CITATION_GAP`: citation-eligible observations ≥
+     `MIN_CITATION_ELIGIBLE_OBSERVATIONS`.
+
+2. **Metric comparison** (after coverage gates pass):
+   - If `verification_value < resolution_threshold` → **RESOLVED**
+   - Else if `delta = baseline - verification ≥ improvement_threshold` → **IMPROVED**
+   - Else if `-delta ≥ improvement_threshold` → **REGRESSED**
+   - Else → **NOT_IMPROVED**
+
+3. **INCONCLUSIVE**: Any coverage gate failure → INCONCLUSIVE with a
+   `VerificationReasonCode` explaining why.
+
+### Stored Values
+
+The `OpportunityVerification` record stores both baseline and
+verification values for full auditability:
+- `baseline_value`, `verification_value`, `delta_value`
+- `baseline_brand_value`, `verification_brand_value`
+- `baseline_coverage`, `verification_coverage`
+- `resolution_threshold`, `meaningful_improvement_threshold`
+
+See `docs/VERIFICATION_SCANS.md` for full details.

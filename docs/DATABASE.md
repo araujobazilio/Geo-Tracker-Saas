@@ -597,10 +597,19 @@ SHA-256 fingerprint for cross-scan deduplication.
 | `dismissed_at` | TIMESTAMPTZ | NULLABLE |
 | `verified_at` | TIMESTAMPTZ | NULLABLE |
 | `dismissal_reason` | TEXT | NULLABLE |
+| `implementation_baseline_occurrence_id` | UUID FK → `opportunity_occurrences.id` | NULLABLE (Phase 10). Frozen on IMPLEMENTED transition; cleared on IN_PROGRESS. |
 | `created_at` / `updated_at` | TIMESTAMPTZ | TimestampMixin |
 
 Unique constraint: `(project_id, fingerprint)` — `uq_opportunities_project_fingerprint`.
 Foreign keys use `ON DELETE RESTRICT`.
+
+> **Note (Phase 10):** `opportunities` and `opportunity_occurrences`
+> now have a mutually-referential FK cycle
+> (`opportunities.implementation_baseline_occurrence_id` →
+> `opportunity_occurrences.id` and
+> `opportunity_occurrences.opportunity_id` → `opportunities.id`).
+> SQLAlchemy relationships on these models specify `foreign_keys` to
+> disambiguate.
 
 ### `opportunity_occurrences`
 
@@ -652,6 +661,48 @@ evidence (PromptRun, ResponseSource, metric gap).
 Unique constraint: `(occurrence_id, evidence_key)` — `uq_opportunity_evidence_occ_key`.
 Foreign keys use `ON DELETE RESTRICT`.
 
+### `opportunity_verifications` (Phase 10)
+
+One record per Verification Scan comparison. Created when a
+VERIFICATION scan is dispatched; outcome is `PENDING` until
+`VerificationEvaluationService.evaluate()` is called.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID PK | |
+| `workspace_id` | UUID FK → `workspaces.id` | NOT NULL, indexed |
+| `project_id` | UUID FK → `projects.id` | NOT NULL, indexed |
+| `opportunity_id` | UUID FK → `opportunities.id` | NOT NULL, indexed |
+| `baseline_occurrence_id` | UUID FK → `opportunity_occurrences.id` | NOT NULL |
+| `baseline_scan_id` | UUID FK → `scans.id` | NOT NULL |
+| `verification_scan_id` | UUID FK → `scans.id` | NOT NULL, UNIQUE |
+| `idempotency_key` | VARCHAR(255) | NOT NULL |
+| `verification_methodology_version` | VARCHAR(50) | NOT NULL |
+| `outcome` | VARCHAR(20) | NOT NULL, default `PENDING` |
+| `reason_code` | VARCHAR(50) | NULLABLE (INCONCLUSIVE only) |
+| `evaluation_message` | VARCHAR(1000) | NULLABLE |
+| `metric_name` | VARCHAR(100) | NULLABLE |
+| `baseline_value` | NUMERIC(10,4) | NULLABLE |
+| `verification_value` | NUMERIC(10,4) | NULLABLE |
+| `delta_value` | NUMERIC(10,4) | NULLABLE |
+| `baseline_brand_value` | NUMERIC(10,4) | NULLABLE |
+| `verification_brand_value` | NUMERIC(10,4) | NULLABLE |
+| `baseline_coverage` | NUMERIC(10,4) | NULLABLE |
+| `verification_coverage` | NUMERIC(10,4) | NULLABLE |
+| `resolution_threshold` | NUMERIC(10,4) | NULLABLE |
+| `meaningful_improvement_threshold` | NUMERIC(10,4) | NULLABLE |
+| `evaluated_at` | TIMESTAMPTZ | NULLABLE |
+| `created_at` / `updated_at` | TIMESTAMPTZ | TimestampMixin |
+
+Unique constraints:
+- `(workspace_id, idempotency_key)` — `uq_opportunity_verifications_ws_idem`.
+- `verification_scan_id` — `uq_opportunity_verifications_scan` (one scan per verification).
+
+Indexes: `workspace_id`, `project_id`, `opportunity_id`, `outcome`,
+`(opportunity_id, created_at)` for history queries.
+
+Foreign keys use `ON DELETE RESTRICT`.
+
 ## Indexes
 
 Indexed columns: all foreign keys, `users.email`, `users.is_admin`,
@@ -683,6 +734,12 @@ Phase 9 Action Center indexes: `opportunities.workspace_id`,
 `opportunities.prompt_id`, `opportunity_occurrences.opportunity_id`,
 `opportunity_occurrences.scan_id`, `opportunity_occurrences.scan_analysis_id`,
 `opportunity_evidence.occurrence_id`.
+
+Phase 10 Verification indexes: `opportunity_verifications.workspace_id`,
+`opportunity_verifications.project_id`, `opportunity_verifications.opportunity_id`,
+`opportunity_verifications.outcome`,
+`opportunity_verifications (opportunity_id, created_at)` composite
+for history queries.
 
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`

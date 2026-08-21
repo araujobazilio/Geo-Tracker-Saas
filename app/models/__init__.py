@@ -18,6 +18,7 @@ from app.models.opportunity import (
     Opportunity,
     OpportunityEvidence,
     OpportunityOccurrence,
+    OpportunityVerification,
 )
 from app.models.plan_definition import PlanDefinition
 from app.models.plan_provider import PlanProvider
@@ -42,6 +43,7 @@ __all__ = [
     "Opportunity",
     "OpportunityEvidence",
     "OpportunityOccurrence",
+    "OpportunityVerification",
     "PlanDefinition",
     "PlanProvider",
     "Project",

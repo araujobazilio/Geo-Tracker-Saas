@@ -240,3 +240,45 @@ class OpportunityEvidenceType(str, Enum):
     METRIC_GAP = "METRIC_GAP"
     PROMPT_RUN = "PROMPT_RUN"
     OWNED_SOURCE = "OWNED_SOURCE"
+
+
+class VerificationOutcome(str, Enum):
+    """Deterministic outcome of an Opportunity verification comparison.
+
+    PENDING: verification exists but evaluation has not completed.
+    RESOLVED: the original measured issue falls below its Action Engine
+        trigger threshold and passes verification quality gates.
+    IMPROVED: the issue materially improved but is still above its
+        resolution threshold.
+    NOT_IMPROVED: change is smaller than the configured meaningful-
+        improvement threshold.
+    REGRESSED: the measured issue materially worsened.
+    INCONCLUSIVE: the new measurement cannot support a reliable
+        comparison because of coverage, analysis, missing eligible
+        evidence, or another evidence-quality condition.
+
+    SUCCESS and FAILURE are intentionally NOT included — they imply a
+    stronger causal interpretation than the deterministic before/after
+    comparison supports.
+    """
+
+    PENDING = "PENDING"
+    RESOLVED = "RESOLVED"
+    IMPROVED = "IMPROVED"
+    NOT_IMPROVED = "NOT_IMPROVED"
+    REGRESSED = "REGRESSED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class VerificationReasonCode(str, Enum):
+    """Bounded deterministic reason codes for INCONCLUSIVE outcomes.
+
+    These are customer-safe codes — never store raw stack traces in
+    customer-facing fields.
+    """
+
+    INSUFFICIENT_COVERAGE = "INSUFFICIENT_COVERAGE"
+    ANALYSIS_NOT_COMPLETED = "ANALYSIS_NOT_COMPLETED"
+    NO_SUCCESSFUL_OBSERVATIONS = "NO_SUCCESSFUL_OBSERVATIONS"
+    INSUFFICIENT_CITATION_EVIDENCE = "INSUFFICIENT_CITATION_EVIDENCE"
+    BASELINE_EVIDENCE_UNAVAILABLE = "BASELINE_EVIDENCE_UNAVAILABLE"

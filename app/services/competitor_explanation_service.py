@@ -496,8 +496,13 @@ class CompetitorExplanationService:
         return scan
 
     def _require_standard_scan(self, scan: Scan) -> None:
-        if scan.scan_type != ScanType.STANDARD:
-            raise ValidationError("Competitor explanation requires a STANDARD scan.")
+        # Phase 10: VERIFICATION scans use the same methodology as
+        # STANDARD scans (cloned prompts, providers, snapshots) and are
+        # eligible for competitor explanation / metric computation.
+        if scan.scan_type not in (ScanType.STANDARD, ScanType.VERIFICATION):
+            raise ValidationError(
+                "Competitor explanation requires a STANDARD or VERIFICATION scan."
+            )
 
     def _require_terminal_scan(self, scan: Scan) -> None:
         if scan.status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
