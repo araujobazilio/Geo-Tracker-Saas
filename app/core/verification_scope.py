@@ -212,10 +212,7 @@ class VerificationScopeResolver:
 
         if opp_type == OpportunityType.PROMPT_COMPETITOR_GAP:
             # Exact prompt_id only, across all providers for that prompt.
-            return (
-                opportunity.prompt_id is not None
-                and run.prompt_id == opportunity.prompt_id
-            )
+            return opportunity.prompt_id is not None and run.prompt_id == opportunity.prompt_id
 
         # Fallback: include all NON_BRANDED cells.
         return prompt.prompt_type == PromptType.NON_BRANDED

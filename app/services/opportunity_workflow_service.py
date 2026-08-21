@@ -288,9 +288,7 @@ class OpportunityWorkflowService:
                 continue
             if scan.status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
                 continue
-            analysis = analysis_repo.get_by_scan_and_version(
-                occ.scan_id, "deterministic-entity-v1"
-            )
+            analysis = analysis_repo.get_by_scan_and_version(occ.scan_id, "deterministic-entity-v1")
             if analysis is None or analysis.status != ScanAnalysisStatus.COMPLETED:
                 continue
             eligible = occ

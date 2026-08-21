@@ -308,9 +308,7 @@ class VerificationEvaluationService:
         delta = self._compute_delta(baseline_value, verification_value)
 
         # Phase 10.1: Brand-side resolution safeguard.
-        brand_safeguard_passes = self._brand_safeguard_passes(
-            opportunity, verification_explanation
-        )
+        brand_safeguard_passes = self._brand_safeguard_passes(opportunity, verification_explanation)
 
         # Decide the outcome.
         outcome, message = self._decide_outcome(

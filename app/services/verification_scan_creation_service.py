@@ -161,9 +161,7 @@ class VerificationScanCreationService:
         # Idempotency: existing verification with same key.
         existing_verification = self._find_existing_verification(workspace_id, key)
         if existing_verification is not None:
-            self._validate_existing_verification(
-                existing_verification, project_id, opportunity_id
-            )
+            self._validate_existing_verification(existing_verification, project_id, opportunity_id)
             existing_scan = self._scans.get_by_id(existing_verification.verification_scan_id)
             if existing_scan is None:
                 self._session.rollback()
@@ -176,8 +174,7 @@ class VerificationScanCreationService:
         if opp.status != OpportunityStatus.IMPLEMENTED:
             self._session.rollback()
             raise ValidationError(
-                "Opportunity must be in IMPLEMENTED status to create a "
-                "verification scan."
+                "Opportunity must be in IMPLEMENTED status to create a verification scan."
             )
         if opp.implementation_baseline_occurrence_id is None:
             self._session.rollback()
@@ -279,9 +276,7 @@ class VerificationScanCreationService:
             existing_verification = self._find_existing_verification(workspace_id, key)
             if existing_verification is None:
                 raise
-            self._validate_existing_verification(
-                existing_verification, project_id, opportunity_id
-            )
+            self._validate_existing_verification(existing_verification, project_id, opportunity_id)
             existing_scan = self._scans.get_by_id(existing_verification.verification_scan_id)
             if existing_scan is None:
                 raise InfrastructureError(
@@ -491,9 +486,7 @@ class VerificationScanCreationService:
                 and not capabilities.supports_model_only
             ):
                 self._session.rollback()
-                raise ConflictError(
-                    f"Provider '{cell.provider}' does not support MODEL_ONLY mode."
-                )
+                raise ConflictError(f"Provider '{cell.provider}' does not support MODEL_ONLY mode.")
             if (
                 cell.execution_mode == ProviderExecutionMode.WEB_GROUNDED
                 and not capabilities.supports_web_grounded

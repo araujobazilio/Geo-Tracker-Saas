@@ -16,104 +16,39 @@ Tests cover:
 
 from __future__ import annotations
 
-import asyncio
-import uuid
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal
-
 import pytest
-from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
-from app.config import Settings
 from app.core.enums import (
-    BillingAccountStatus,
-    BillingSource,
-    FunnelStage,
     LLMProvider,
     OpportunityStatus,
     OpportunityType,
-    ProjectStatus,
-    PromptSetStatus,
-    PromptType,
-    ProviderExecutionMode,
-    ProviderSurface,
     ScanStatus,
-    ScanType,
     VerificationOutcome,
-    VerificationReasonCode,
-    WorkspaceRole,
-    WorkspaceType,
 )
-from app.core.exceptions import ConflictError, ValidationError
+from app.core.exceptions import ConflictError
 from app.core.verification_scope import VerificationScopeResolver
 from app.models import (
-    BillingAccount,
-    Competitor,
     Opportunity,
-    OpportunityOccurrence,
     OpportunityVerification,
-    PlanDefinition,
-    PlanProvider,
-    Project,
-    ProjectKeyword,
-    ProjectProvider,
-    Prompt,
-    PromptSet,
-    ProviderPriceRule,
     Scan,
-    ScanAnalysis,
-    ScanEntitySnapshot,
-    User,
-    Workspace,
-    WorkspaceMember,
 )
-from app.providers.base import (
-    ProviderCapabilities,
-    ProviderCitation,
-    ProviderRequest,
-    ProviderResult,
-    ProviderUsage,
-)
-from app.services.action_generation_service import ActionGenerationService
 from app.services.opportunity_workflow_service import OpportunityWorkflowService
-from app.services.prompt_generation_service import GENERATOR_KEY
-from app.services.scan_analysis_service import ScanAnalysisService
-from app.services.scan_creation_service import ScanCreationResult, ScanCreationService
-from app.services.scan_execution_service import ScanExecutionService
-from app.services.scan_finalization_service import ScanFinalizationService
-from app.services.verification_evaluation_service import VerificationEvaluationService
-from app.services.verification_scan_creation_service import (
-    VerificationScanCreationResult,
-    VerificationScanCreationService,
-)
 
 # Re-export the fake adapters and helpers from test_verification_phase10
 from tests.integration.test_verification_phase10 import (
-    MODELS,
-    SURFACES,
     FakeDispatcher,
-    ScriptedAdapter,
-    ScriptedRegistry,
-    _adapter,
     _add_prices,
     _analyze,
-    _connection_factory,
-    _create_scan,
     _create_verification,
     _evaluate_verification,
     _execute,
-    _factory,
     _finalize,
     _full_pipeline,
-    _get_first_occurrence,
     _get_first_opportunity,
     _refresh_actions,
     _registry,
     _seed,
-    _settings,
 )
 
 pytestmark = pytest.mark.integration
@@ -557,7 +492,9 @@ def test_one_pending_verification_per_cycle(db_session: Session) -> None:
 
     baseline_registry = _registry([LLMProvider.OPENAI], mention_mode="competitor")
     dispatcher = FakeDispatcher()
-    scan = _full_pipeline(db_session, ws, user, project, baseline_registry, dispatcher, key="bl-1pv")
+    scan = _full_pipeline(
+        db_session, ws, user, project, baseline_registry, dispatcher, key="bl-1pv"
+    )
     _refresh_actions(db_session, ws, project, scan.id)
 
     opp = _get_first_opportunity(db_session, project.id, OpportunityType.DISCOVERY_VISIBILITY_GAP)
@@ -567,13 +504,13 @@ def test_one_pending_verification_per_cycle(db_session: Session) -> None:
     db_session.expire_all()
 
     # Create first verification (PENDING).
-    result1 = _create_verification(
+    _create_verification(
         db_session, ws, user, project, opp.id, baseline_registry, dispatcher, key="ver-1pv-a"
     )
 
     # Attempt to create a second verification with a DIFFERENT key.
     # This should fail because the first is still PENDING.
-    with pytest.raises(ConflictError, match="active verification scan|pending verification"):
+    with pytest.raises(ConflictError, match=r"active verification scan|pending verification"):
         _create_verification(
             db_session, ws, user, project, opp.id, baseline_registry, dispatcher, key="ver-1pv-b"
         )
@@ -649,7 +586,9 @@ def test_idempotency_baseline_conflict(db_session: Session) -> None:
 
     baseline_registry = _registry([LLMProvider.OPENAI], mention_mode="competitor")
     dispatcher = FakeDispatcher()
-    scan1 = _full_pipeline(db_session, ws, user, project, baseline_registry, dispatcher, key="bl-ic-1")
+    scan1 = _full_pipeline(
+        db_session, ws, user, project, baseline_registry, dispatcher, key="bl-ic-1"
+    )
     _refresh_actions(db_session, ws, project, scan1.id)
 
     opp = _get_first_opportunity(db_session, project.id, OpportunityType.DISCOVERY_VISIBILITY_GAP)
@@ -684,7 +623,9 @@ def test_idempotency_baseline_conflict(db_session: Session) -> None:
     db_session.expire_all()
 
     # Run a new baseline scan.
-    scan2 = _full_pipeline(db_session, ws, user, project, baseline_registry, dispatcher, key="bl-ic-2")
+    scan2 = _full_pipeline(
+        db_session, ws, user, project, baseline_registry, dispatcher, key="bl-ic-2"
+    )
     _refresh_actions(db_session, ws, project, scan2.id)
     db_session.expire_all()
 
@@ -695,7 +636,9 @@ def test_idempotency_baseline_conflict(db_session: Session) -> None:
     # Verify the baseline has actually changed.
     new_baseline_occ_id = opp.implementation_baseline_occurrence_id
     assert new_baseline_occ_id is not None, "New baseline occurrence not frozen"
-    assert new_baseline_occ_id != old_baseline_occ_id, "Baseline did not change after re-implementation"
+    assert new_baseline_occ_id != old_baseline_occ_id, (
+        "Baseline did not change after re-implementation"
+    )
 
     # Reuse the same idempotency key — should raise ConflictError
     # because the baseline has changed.
