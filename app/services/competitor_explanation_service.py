@@ -201,6 +201,8 @@ class CompetitorExplanationService:
         competitor_snapshot_id: uuid.UUID,
         prompt_type: PromptType = PromptType.NON_BRANDED,
         provider: LLMProvider | None = None,
+        prompt_id: uuid.UUID | None = None,
+        execution_mode: ProviderExecutionMode | None = None,
     ) -> CompetitorExplanation:
         scan = self._load_scoped_scan(workspace_id, project_id, scan_id)
         self._require_standard_scan(scan)
@@ -226,12 +228,18 @@ class CompetitorExplanationService:
         scoped_succeeded = [
             r
             for r in succeeded
-            if r[1].prompt_type == prompt_type and (provider is None or r[0].provider == provider)
+            if r[1].prompt_type == prompt_type
+            and (provider is None or r[0].provider == provider)
+            and (prompt_id is None or r[0].prompt_id == prompt_id)
+            and (execution_mode is None or r[0].execution_mode == execution_mode)
         ]
         scoped_planned = [
             r
             for r in runs_with_prompts
-            if r[1].prompt_type == prompt_type and (provider is None or r[0].provider == provider)
+            if r[1].prompt_type == prompt_type
+            and (provider is None or r[0].provider == provider)
+            and (prompt_id is None or r[0].prompt_id == prompt_id)
+            and (execution_mode is None or r[0].execution_mode == execution_mode)
         ]
 
         successful_count = len(scoped_succeeded)

@@ -1,4 +1,4 @@
-# Verification Scans and Opportunity Outcome Tracking (Phase 10)
+# Verification Scans and Opportunity Outcome Tracking (Phase 10 + 10.1)
 
 ## Overview
 
@@ -50,16 +50,25 @@ OPEN → IN_PROGRESS → IMPLEMENTED → [Verification Scan] → VERIFIED
    Requires `verification_scans` entitlement.
 
 3. **Verification Scan executes**: repeats the baseline's exact
-   Prompt × Provider measurement cells once (repeat_count=1). Same
-   bounded async execution as STANDARD scans.
+   targeted measurement cells once (repeat_count=1). Same bounded
+   async execution as STANDARD scans.
 
-4. **User triggers evaluation**: `POST
-   /api/v1/workspaces/{wid}/projects/{pid}/opportunities/{oid}/verifications/{vid}/evaluate`.
-   Computes the verification metrics via
+4. **Automatic evaluation (Phase 10.1)**: after the verification scan
+   is finalized and its analysis completes, the
+   `VerificationEvaluationService` is automatically triggered. The
+   evaluation computes the verification metrics via
    `CompetitorExplanationService`, compares to the frozen baseline,
-   and persists the `VerificationOutcome`. Zero AI Checks.
+   and persists the `VerificationOutcome`. Zero AI Checks. If
+   automatic evaluation fails, the verification remains PENDING and
+   can be evaluated manually.
 
-5. **If RESOLVED**: the parent Opportunity transitions to `VERIFIED`
+5. **Manual evaluation (fallback)**: `POST
+   /api/v1/workspaces/{wid}/projects/{pid}/opportunities/{oid}/verifications/{vid}/evaluate`.
+   Can be called if automatic evaluation failed or was not triggered.
+   Idempotent — re-calling on an already-evaluated verification
+   returns the existing result.
+
+6. **If RESOLVED**: the parent Opportunity transitions to `VERIFIED`
    via the system-only `mark_verified_from_verification()` method.
    `VERIFIED` is read-only — no further transitions are allowed.
 
@@ -83,9 +92,10 @@ comparison supports.
 | Code | Meaning |
 |------|---------|
 | `INSUFFICIENT_COVERAGE` | Verification measurement coverage < 75%. |
+| `INSUFFICIENT_BASELINE_COVERAGE` | Baseline measurement coverage < 75% (Phase 10.1). |
 | `ANALYSIS_NOT_COMPLETED` | Verification scan analysis is not COMPLETED. |
-| `NO_SUCCESSFUL_OBSERVATIONS` | Verification scan has zero successful observations. |
-| `INSUFFICIENT_CITATION_EVIDENCE` | Citation-eligible observations < MIN_CITATION_ELIGIBLE_OBSERVATIONS. |
+| `NO_SUCCESSFUL_OBSERVATIONS` | Baseline or verification scan has zero successful observations. |
+| `INSUFFICIENT_CITATION_EVIDENCE` | Citation-eligible observations < MIN_CITATION_ELIGIBLE_OBSERVATIONS (baseline or verification). |
 | `BASELINE_EVIDENCE_UNAVAILABLE` | Frozen baseline occurrence or scan not found. |
 
 ## Decision Logic
@@ -98,9 +108,28 @@ comparison supports.
    (`INSUFFICIENT_COVERAGE`).
 3. Verification scan must have ≥ 1 successful observation → else
    INCONCLUSIVE (`NO_SUCCESSFUL_OBSERVATIONS`).
-4. For `OWNED_CITATION_GAP`: citation-eligible observations ≥
-   `MIN_CITATION_ELIGIBLE_OBSERVATIONS` → else INCONCLUSIVE
-   (`INSUFFICIENT_CITATION_EVIDENCE`).
+4. Baseline scan must have ≥ 1 successful observation → else
+   INCONCLUSIVE (`NO_SUCCESSFUL_OBSERVATIONS`). (Phase 10.1)
+5. Baseline measurement coverage ≥ 75% → else INCONCLUSIVE
+   (`INSUFFICIENT_BASELINE_COVERAGE`). (Phase 10.1)
+6. For `OWNED_CITATION_GAP`: BOTH baseline AND verification
+   citation-eligible observations ≥ `MIN_CITATION_ELIGIBLE_OBSERVATIONS`
+   → else INCONCLUSIVE (`INSUFFICIENT_CITATION_EVIDENCE`). (Phase 10.1)
+
+### Brand-Side Resolution Safeguards (Phase 10.1)
+
+A gap closing to 0 because the **brand disappeared** (not because the
+issue was resolved) is NOT a resolution. The following safeguards
+prevent false RESOLVED outcomes:
+
+- `DISCOVERY_VISIBILITY_GAP` / `PROVIDER_VISIBILITY_GAP`: brand
+  visibility rate must be > 0 in the verification scan.
+- `OWNED_CITATION_GAP`: brand owned citation rate must be > 0.
+- `PROMPT_COMPETITOR_GAP`: brand must appear in at least one
+  verification observation.
+
+If the safeguard fails, the outcome is `NOT_IMPROVED` with a message
+explaining that the gap closed because the brand disappeared.
 
 ### Metric Comparison
 
@@ -109,16 +138,23 @@ comparison supports.
 | `DISCOVERY_VISIBILITY_GAP` | `visibility_gap_pp` | ≥ 10pp | ≥ 5pp |
 | `PROVIDER_VISIBILITY_GAP` | `visibility_gap_pp` | ≥ 15pp | ≥ 5pp |
 | `OWNED_CITATION_GAP` | `citation_gap_pp` | ≥ 20pp | ≥ 5pp |
-| `PROMPT_COMPETITOR_GAP` | `competitor_only_count` | == 0 | ≥ 10 |
+| `PROMPT_COMPETITOR_GAP` | `competitor_only_rate` | == 0% | ≥ 10pp |
 
-**Decision tree** (after coverage gates pass):
+**Phase 10.1 change**: `PROMPT_COMPETITOR_GAP` now uses
+`competitor_only_rate` (percentage points) instead of
+`competitor_only_count` (integer count), making the comparison
+consistent with other percentage-point metrics.
 
-1. If `verification_value < resolution_threshold` → **RESOLVED**
+**Decision tree** (after coverage gates + brand safeguards pass):
+
+1. If `verification_value < resolution_threshold` AND brand safeguard
+   passes → **RESOLVED**
 2. Else if `delta = baseline - verification ≥ improvement_threshold` → **IMPROVED**
 3. Else if `-delta ≥ improvement_threshold` → **REGRESSED**
 4. Else → **NOT_IMPROVED**
 
-For `PROMPT_COMPETITOR_GAP`: `RESOLVED` when `competitor_only_count == 0`.
+For `PROMPT_COMPETITOR_GAP`: `RESOLVED` when `competitor_only_rate == 0`
+AND the brand appears in the verification scan.
 
 ## Methodology Version
 
@@ -133,8 +169,10 @@ Future methodology changes require a version bump.
 - `verification_scans_enabled` on the plan controls access.
 - `require_feature(workspace_id, "verification_scans")` is called
   during verification scan creation.
-- All baseline providers must still be allowed by the current plan and
-  enabled for the project.
+- Phase 10.1: only providers in the **selected scope** must be allowed
+  by the current plan and enabled for the project. An unrelated
+  baseline provider that is currently unavailable does NOT block a
+  provider-specific verification.
 
 ## API Endpoints
 
@@ -210,8 +248,11 @@ returning to IN_PROGRESS.
 
 ## Quota
 
-- Verification scan creation reserves `prompt_count × provider_count`
-  AI Checks (repeat_count=1).
+- Phase 10.1: verification scan creation reserves `planned_ai_checks`
+  (= number of exact target cells) AI Checks (repeat_count=1). This
+  may be less than `prompt_count × provider_count` for non-rectangular
+  scopes (e.g., PROVIDER_VISIBILITY_GAP selects only one provider's
+  cells).
 - Evaluation costs zero AI Checks.
 - Quota failure marks the scan as FAILED with `QUOTA_EXCEEDED`.
 
@@ -221,15 +262,63 @@ returning to IN_PROGRESS.
   on the Opportunity (`SELECT ... FOR UPDATE`).
 - `VerificationEvaluationService.evaluate()` acquires a row-level lock
   on the `OpportunityVerification` record.
-- `mark_verified_from_verification()` acquires a row-level lock on the
-  Opportunity and checks that it is still IMPLEMENTED before
-  transitioning. If the user changed the status while the verification
-  was in flight, the result is preserved as historical evidence but
-  the Opportunity is NOT forced to VERIFIED.
+- `mark_verified_from_verification()` (Phase 10.1) independently
+  validates that the verification record exists, belongs to this
+  Opportunity, and has outcome RESOLVED before transitioning. It
+  acquires a row-level lock on the Opportunity and checks that it is
+  still IMPLEMENTED. If the user changed the status while the
+  verification was in flight, the result is preserved as historical
+  evidence but the Opportunity is NOT forced to VERIFIED.
 
 ## Idempotency
 
 - Verification scan creation is idempotent via
   `(workspace_id, idempotency_key)`.
+- Phase 10.1: reusing the same idempotency key after a re-implementation
+  cycle (different baseline occurrence) raises `ConflictError`.
 - Re-calling `evaluate()` on an already-evaluated verification returns
   the existing result without re-computing.
+
+## One Pending Verification Per Cycle (Phase 10.1)
+
+- At most one PENDING verification may exist per implementation cycle
+  (opportunity + baseline occurrence).
+- The service-level check in `VerificationScanCreationService` blocks
+  creation of a second PENDING verification.
+- A partial unique index on `opportunity_verifications(opportunity_id,
+  baseline_occurrence_id) WHERE outcome = 'PENDING'` enforces this at
+  the database level.
+- After a verification is evaluated (terminal outcome), a new
+  verification can be created for the same cycle.
+
+## Targeted Scope (Phase 10.1)
+
+The `VerificationScopeResolver` determines the exact historical
+baseline cells to re-measure based on the Opportunity type:
+
+| Opportunity Type | Scope Rule |
+|-----------------|------------|
+| `DISCOVERY_VISIBILITY_GAP` | All NON_BRANDED cells across all providers. |
+| `PROVIDER_VISIBILITY_GAP` | NON_BRANDED cells for the Opportunity's provider only. |
+| `OWNED_CITATION_GAP` | NON_BRANDED cells with WEB_GROUNDED execution mode only. |
+| `PROMPT_COMPETITOR_GAP` | Exact prompt_id cells across all providers. |
+
+The same scope drives BOTH the provider execution plan AND the
+baseline/verification evaluation, ensuring that the comparison is
+performed on corresponding methodological cells.
+
+`planned_ai_checks = len(target_cells)`, NOT
+`prompt_count × provider_count`. This correctly handles
+non-rectangular plans where not all prompts run on all providers.
+
+## Automatic Evaluation (Phase 10.1)
+
+After a VERIFICATION scan is finalized and its `ScanAnalysis` completes
+successfully, the `VerificationEvaluationService.evaluate()` is
+automatically triggered by the `ScanFinalizationService`.
+
+- Evaluation runs in the same session as the analysis.
+- Evaluation failure is logged and swallowed — it MUST NOT rollback
+  the analysis, replay providers, or change quota. The verification
+  remains PENDING and can be evaluated manually.
+- The scan remains terminal regardless of evaluation outcome.

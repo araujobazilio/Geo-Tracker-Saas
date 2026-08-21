@@ -117,9 +117,46 @@ class OpportunityWorkflowService:
         historical evidence but the Opportunity is NOT forced to
         VERIFIED.
 
+        Phase 10.1 hardening: independently validates that the
+        verification record exists, belongs to this Opportunity, and
+        has outcome RESOLVED.  This prevents a corrupted or stale
+        verification_id from triggering an invalid transition.
+
         Returns the final status (VERIFIED if transitioned, or the
         current status if the user changed it).
         """
+        # Independent validation: verify the verification record is RESOLVED.
+        from app.core.enums import VerificationOutcome
+        from app.models.opportunity import OpportunityVerification
+
+        verification = self._session.execute(
+            select(OpportunityVerification).where(
+                OpportunityVerification.id == verification_id,
+                OpportunityVerification.opportunity_id == opportunity_id,
+                OpportunityVerification.workspace_id == workspace_id,
+            )
+        ).scalar_one_or_none()
+        if verification is None:
+            logger.warning(
+                "verification_not_found_for_mark_verified",
+                opportunity_id=str(opportunity_id),
+                verification_id=str(verification_id),
+            )
+            self._session.commit()
+            # Return current status without transitioning.
+            opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
+            return opp.status
+        if verification.outcome != VerificationOutcome.RESOLVED:
+            logger.warning(
+                "verification_not_resolved_for_mark_verified",
+                opportunity_id=str(opportunity_id),
+                verification_id=str(verification_id),
+                outcome=verification.outcome.value,
+            )
+            self._session.commit()
+            opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
+            return opp.status
+
         opp = self._load_opportunity_for_update(workspace_id, project_id, opportunity_id)
         if opp.status != OpportunityStatus.IMPLEMENTED:
             logger.info(
@@ -192,8 +229,14 @@ class OpportunityWorkflowService:
                 opp.implementation_baseline_occurrence_id = None
 
     def _freeze_implementation_baseline(self, opp: Opportunity) -> None:
-        """Freeze the latest eligible OpportunityOccurrence as the
+        """Freeze the latest ELIGIBLE OpportunityOccurrence as the
         implementation baseline.
+
+        Phase 10.1 hardening: instead of taking the latest occurrence
+        and then validating it, we filter for eligible occurrences first
+        and select the latest among those.  This prevents freezing an
+        ineligible occurrence (e.g., from a CONFIDENCE scan or a
+        non-completed analysis) when an earlier eligible one exists.
 
         Eligibility:
         - belongs to this Opportunity
@@ -208,48 +251,56 @@ class OpportunityWorkflowService:
             # Already frozen for this implementation cycle.
             return
 
-        latest = (
+        from app.models.scan import Scan
+        from app.repositories.analysis_repository import ScanAnalysisRepository
+
+        # Join with Scan to order by scan completion time (more reliable
+        # than occurrence.created_at which can have identical timestamps
+        # when multiple occurrences are created in quick succession).
+        occurrences = list(
             self._session.execute(
                 select(OpportunityOccurrence)
+                .join(Scan, Scan.id == OpportunityOccurrence.scan_id)
                 .where(OpportunityOccurrence.opportunity_id == opp.id)
-                .order_by(OpportunityOccurrence.created_at.desc())
-            )
-            .scalars()
-            .first()
+                .order_by(
+                    Scan.completed_at.desc().nulls_last(),
+                    OpportunityOccurrence.created_at.desc(),
+                )
+            ).scalars()
         )
 
-        if latest is None:
+        if not occurrences:
             raise ValidationError(
                 "Cannot transition to IMPLEMENTED: no OpportunityOccurrence "
                 "exists to use as the verification baseline."
             )
 
-        # Validate the occurrence's scan is STANDARD and terminal.
-        from app.models.scan import Scan
+        analysis_repo = ScanAnalysisRepository(self._session)
 
-        scan = self._session.get(Scan, latest.scan_id)
-        if scan is None or scan.scan_type != ScanType.STANDARD:
-            raise ValidationError(
-                "Cannot transition to IMPLEMENTED: the latest occurrence's "
-                "source scan is not a STANDARD scan."
+        # Filter for eligible occurrences: STANDARD scan, terminal status,
+        # COMPLETED analysis.  Select the latest eligible one.
+        eligible: OpportunityOccurrence | None = None
+        for occ in occurrences:  # already ordered by created_at DESC
+            scan = self._session.get(Scan, occ.scan_id)
+            if scan is None:
+                continue
+            if scan.scan_type != ScanType.STANDARD:
+                continue
+            if scan.status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
+                continue
+            analysis = analysis_repo.get_by_scan_and_version(
+                occ.scan_id, "deterministic-entity-v1"
             )
-        if scan.status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
+            if analysis is None or analysis.status != ScanAnalysisStatus.COMPLETED:
+                continue
+            eligible = occ
+            break
+
+        if eligible is None:
             raise ValidationError(
-                "Cannot transition to IMPLEMENTED: the latest occurrence's "
-                "source scan is not terminal."
+                "Cannot transition to IMPLEMENTED: no eligible "
+                "OpportunityOccurrence exists (STANDARD scan, terminal "
+                "status, completed analysis)."
             )
 
-        # Validate the scan analysis is COMPLETED.
-        from app.repositories.analysis_repository import ScanAnalysisRepository
-
-        analysis = ScanAnalysisRepository(self._session).get_by_scan_and_version(
-            latest.scan_id,
-            "deterministic-entity-v1",
-        )
-        if analysis is None or analysis.status != ScanAnalysisStatus.COMPLETED:
-            raise ValidationError(
-                "Cannot transition to IMPLEMENTED: the latest occurrence's "
-                "scan analysis is not completed."
-            )
-
-        opp.implementation_baseline_occurrence_id = latest.id
+        opp.implementation_baseline_occurrence_id = eligible.id

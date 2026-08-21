@@ -254,11 +254,12 @@ Security properties:
   project (within the same workspace) returns 404. Opportunity queries
   are scoped to `(workspace_id, project_id)`.
 
-## Phase 10: Verification Scan security
+## Phase 10 + 10.1: Verification Scan security
 
 Phase 10 adds Verification Scan endpoints that create VERIFICATION
 scans, list verification records, and trigger deterministic
-evaluation.
+evaluation. Phase 10.1 hardens the scope, outcome integrity, and
+automatic evaluation.
 
 Security properties:
 
@@ -289,6 +290,26 @@ Security properties:
   `mark_verified_from_verification()` can set it, and only when the
   evaluation produces `RESOLVED`. `VERIFIED` is read-only — no
   transitions away from it are allowed.
+- **Targeted scope integrity (Phase 10.1):** the
+  `VerificationScopeResolver` selects the exact historical baseline
+  cells per OpportunityType. The same scope drives BOTH the provider
+  execution plan AND the baseline/verification evaluation, ensuring
+  that the comparison is performed on corresponding methodological
+  cells. This prevents a user from altering the scope by changing
+  project settings after implementation.
+- **One pending verification per cycle (Phase 10.1):** at most one
+  PENDING verification may exist per implementation cycle. Enforced at
+  the service level AND the database level (partial unique index on
+  `opportunity_verifications(opportunity_id, baseline_occurrence_id)
+  WHERE outcome = 'PENDING'`).
+- **Idempotency key conflict detection (Phase 10.1):** reusing the
+  same idempotency key after a re-implementation cycle (different
+  baseline occurrence) raises `ConflictError`, preventing accidental
+  cross-cycle idempotency collisions.
+- **Automatic evaluation safety (Phase 10.1):** automatic evaluation
+  after ScanAnalysis failure is logged and swallowed — it MUST NOT
+  rollback the analysis, replay providers, or change quota. The
+  verification remains PENDING and can be evaluated manually.
 - **Concurrency safety:** `OpportunityWorkflowService.transition()`
   acquires a row-level lock on the Opportunity.
   `VerificationEvaluationService.evaluate()` acquires a row-level lock

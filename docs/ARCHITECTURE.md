@@ -74,9 +74,9 @@ single responsibility boundary consumed by routers and other services.
 | `ConfidenceMetricsService` | Computes reliability metrics (measurement coverage, mention stability, confidence level) from repeated CONFIDENCE observations (Phase 8) |
 | `CompetitorExplanationService` | Computes evidence-based brand vs competitor explanations from persisted Scan analysis evidence (Phase 9); extended for VERIFICATION scans in Phase 10 |
 | `ActionGenerationService` | Deterministic opportunity generation from completed STANDARD scan evidence; fingerprint-based cross-scan dedup; status-preserving upsert (Phase 9) |
-| `VerificationScanCreationService` | Clones a frozen implementation baseline STANDARD scan's methodology to create a single-repeat VERIFICATION scan (Phase 10) |
-| `VerificationEvaluationService` | Deterministic before/after comparison producing VerificationOutcome; zero AI Checks; system-only VERIFIED transition on RESOLVED (Phase 10) |
-| `OpportunityWorkflowService` | Opportunity status transitions with audit timestamps; freezes implementation baseline on IMPLEMENTED, clears on IN_PROGRESS, system-only VERIFIED transition on RESOLVED outcome (Phase 9 + Phase 10) |
+| `VerificationScanCreationService` | Clones a frozen implementation baseline STANDARD scan's methodology to create a single-repeat VERIFICATION scan with targeted scope (Phase 10 + 10.1) |
+| `VerificationEvaluationService` | Deterministic before/after comparison producing VerificationOutcome; zero AI Checks; system-only VERIFIED transition on RESOLVED; automatic evaluation after analysis (Phase 10 + 10.1) |
+| `OpportunityWorkflowService` | Opportunity status transitions with audit timestamps; freezes implementation baseline on IMPLEMENTED, clears on IN_PROGRESS, system-only VERIFIED transition on RESOLVED outcome (Phase 9 + Phase 10 + 10.1) |
 | `PricingService` / `ProviderCostCalculator` | Exact effective price resolution and Decimal/null-safe cost calculation |
 
 ### Entitlement resolution
@@ -356,12 +356,13 @@ See `docs/ACTION_CENTER.md` and `docs/COMPETITOR_EXPLANATIONS.md`.
   `deterministic-actions-v1.1`. `OpportunityOccurrence.action_engine_version_at_detection`
   records the engine version at detection time.
 
-## Phase 10: Verification Scans and Opportunity Outcome Tracking
+## Phase 10 + 10.1: Verification Scans and Opportunity Outcome Tracking
 
 Phase 10 introduces **Verification Scans** and **Opportunity Outcome
 Tracking** — a deterministic, zero-AI-Check before/after comparison
 that measures whether a user's implementation work resolved a
-previously detected Action Center Opportunity.
+previously detected Action Center Opportunity. Phase 10.1 hardens
+the verification scope, outcome integrity, and automatic evaluation.
 
 ### Key concepts
 
@@ -390,9 +391,10 @@ previously detected Action Center Opportunity.
 | File | Purpose |
 |------|---------|
 | `app/core/verification_engine.py` | Constants for verification thresholds and methodology version |
+| `app/core/verification_scope.py` | `VerificationScope`, `VerificationTargetCell`, `VerificationScopeResolver` — targeted scope per OpportunityType (Phase 10.1) |
 | `app/models/opportunity.py` (extended) | `OpportunityVerification` model, `implementation_baseline_occurrence_id` on `Opportunity` |
-| `app/services/verification_scan_creation_service.py` | Clones baseline methodology, creates VERIFICATION scan + OpportunityVerification record |
-| `app/services/verification_evaluation_service.py` | Deterministic before/after comparison, persists outcome, system-only VERIFIED transition |
+| `app/services/verification_scan_creation_service.py` | Clones baseline methodology with targeted scope, creates VERIFICATION scan + OpportunityVerification record |
+| `app/services/verification_evaluation_service.py` | Deterministic before/after comparison, persists outcome, system-only VERIFIED transition, automatic evaluation |
 | `app/schemas/verification.py` | Pydantic schemas for verification API |
 | `app/routers/api/verification.py` | Verification API endpoints (create, list, detail, evaluate, summary) |
 
@@ -401,9 +403,32 @@ previously detected Action Center Opportunity.
 - **`OpportunityWorkflowService`** — `transition()` now freezes the
   baseline occurrence on IMPLEMENTED and clears it on IN_PROGRESS.
   `mark_verified_from_verification()` provides the system-only path to
-  VERIFIED. Direct manual transitions to VERIFIED are forbidden.
+  VERIFIED with independent validation. Direct manual transitions to
+  VERIFIED are forbidden.
 - **`CompetitorExplanationService`** — `_require_standard_scan()`
-  extended to accept VERIFICATION scans (same methodology).
+  extended to accept VERIFICATION scans (same methodology). Phase 10.1
+  adds `prompt_id` and `execution_mode` filters for scoped evaluation.
+- **`ScanFinalizationService`** — Phase 10.1: automatically triggers
+  `VerificationEvaluationService.evaluate()` after a VERIFICATION
+  scan's analysis completes.
+
+### Phase 10.1 hardening
+
+- **Targeted scope**: `VerificationScopeResolver` selects exact
+  historical baseline cells per OpportunityType (not the full
+  Cartesian product). `planned_ai_checks = len(target_cells)`.
+- **Brand-side safeguards**: gap closing to 0 because the brand
+  disappeared is NOT a resolution.
+- **Baseline coverage gate**: baseline coverage < 75% → INCONCLUSIVE.
+- **Two-sided citation sufficiency**: both baseline AND verification
+  must have sufficient citation-eligible observations.
+- **PROMPT_COMPETITOR_GAP**: uses `competitor_only_rate` (pp) not
+  `competitor_only_count` (integer).
+- **Automatic evaluation**: triggered after ScanAnalysis completes.
+- **One pending verification per cycle**: enforced at service + DB
+  level (partial unique index).
+- **Idempotency hardening**: same key + different baseline =
+  ConflictError.
 
 See `docs/VERIFICATION_SCANS.md` for full details.
 
@@ -459,7 +484,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Brand / citation detection | IMPLEMENTED (Phase 7) |
 | Confidence Scans | IMPLEMENTED (Phase 8) |
 | Action Center | IMPLEMENTED (Phase 9) |
-| Verification system | IMPLEMENTED (Phase 10) |
+| Verification system | IMPLEMENTED (Phase 10 + 10.1) |
 | Scheduling / email reports | PLANNED (Phase 11) |
 | Dashboard / UI | PLANNED (Phase 12) |
 | Agency dashboard / white-label | PLANNED (Phase 13) |

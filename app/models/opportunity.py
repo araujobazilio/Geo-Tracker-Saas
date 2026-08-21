@@ -32,6 +32,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -286,6 +287,20 @@ class OpportunityVerification(UUIDPrimaryKey, TimestampMixin, Base):
             "ix_opportunity_verifications_opportunity_created",
             "opportunity_id",
             "created_at",
+        ),
+        # Phase 10.1: Partial unique index — only one PENDING verification
+        # per (opportunity_id, baseline_occurrence_id) implementation cycle.
+        # Enforced at the DB level on PostgreSQL/SQLite >= 3.8.0 via the
+        # Alembic migration d9e0f1a2b3c4.  The Index here documents the
+        # constraint for SQLAlchemy metadata; the actual partial WHERE
+        # clause is applied by the migration.
+        Index(
+            "uq_opportunity_verifications_pending_per_cycle",
+            "opportunity_id",
+            "baseline_occurrence_id",
+            unique=True,
+            postgresql_where=text("outcome = 'PENDING'"),
+            sqlite_where=text("outcome = 'PENDING'"),
         ),
     )
 

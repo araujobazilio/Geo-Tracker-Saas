@@ -741,6 +741,13 @@ Phase 10 Verification indexes: `opportunity_verifications.workspace_id`,
 `opportunity_verifications (opportunity_id, created_at)` composite
 for history queries.
 
+Phase 10.1 partial unique index:
+`uq_opportunity_verifications_pending_per_cycle` on
+`(opportunity_id, baseline_occurrence_id)` where `outcome = 'PENDING'` —
+at most one PENDING verification per implementation cycle. Enforced at
+the database level (PostgreSQL/SQLite >= 3.8.0) via migration
+`d9e0f1a2b3c4`.
+
 Composite indexes on `audit_logs`:
 - `(workspace_id, action, created_at)`
 - `(user_id, action, created_at)`

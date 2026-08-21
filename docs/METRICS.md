@@ -386,24 +386,43 @@ produces a `VerificationOutcome` enum value.
 | `DISCOVERY_VISIBILITY_GAP` | `visibility_gap_pp` | ≥ 10pp | ≥ 5pp |
 | `PROVIDER_VISIBILITY_GAP` | `visibility_gap_pp` | ≥ 15pp | ≥ 5pp |
 | `OWNED_CITATION_GAP` | `citation_gap_pp` | ≥ 20pp | ≥ 5pp |
-| `PROMPT_COMPETITOR_GAP` | `competitor_only_count` | == 0 | ≥ 10 |
+| `PROMPT_COMPETITOR_GAP` | `competitor_only_rate` | == 0% | ≥ 10pp |
+
+> **Phase 10.1 change**: `PROMPT_COMPETITOR_GAP` now uses
+> `competitor_only_rate` (percentage points) instead of
+> `competitor_only_count` (integer count), making the comparison
+> consistent with other percentage-point metrics.
 
 ### Outcome Decision Logic
 
 1. **Coverage gates** (applied before metric comparison):
    - Verification scan analysis must be COMPLETED.
    - Verification measurement coverage ≥ 75%.
-   - At least 1 successful observation.
+   - Baseline measurement coverage ≥ 75% (Phase 10.1).
+   - At least 1 successful observation in BOTH baseline and verification (Phase 10.1).
    - For `OWNED_CITATION_GAP`: citation-eligible observations ≥
-     `MIN_CITATION_ELIGIBLE_OBSERVATIONS`.
+     `MIN_CITATION_ELIGIBLE_OBSERVATIONS` in BOTH baseline and
+     verification (Phase 10.1 — two-sided gate).
 
-2. **Metric comparison** (after coverage gates pass):
-   - If `verification_value < resolution_threshold` → **RESOLVED**
+2. **Brand-side resolution safeguards** (Phase 10.1, applied before
+   metric comparison):
+   - `DISCOVERY_VISIBILITY_GAP` / `PROVIDER_VISIBILITY_GAP`: brand
+     visibility rate must be > 0 in the verification scan.
+   - `OWNED_CITATION_GAP`: brand owned citation rate must be > 0.
+   - `PROMPT_COMPETITOR_GAP`: brand must appear in at least one
+     verification observation.
+   - If the safeguard fails, the outcome is `NOT_IMPROVED` (not
+     `RESOLVED`), because the gap closed because the brand
+     disappeared, not because the issue was resolved.
+
+3. **Metric comparison** (after coverage gates + brand safeguards pass):
+   - If `verification_value < resolution_threshold` AND brand safeguard
+     passes → **RESOLVED**
    - Else if `delta = baseline - verification ≥ improvement_threshold` → **IMPROVED**
    - Else if `-delta ≥ improvement_threshold` → **REGRESSED**
    - Else → **NOT_IMPROVED**
 
-3. **INCONCLUSIVE**: Any coverage gate failure → INCONCLUSIVE with a
+4. **INCONCLUSIVE**: Any coverage gate failure → INCONCLUSIVE with a
    `VerificationReasonCode` explaining why.
 
 ### Stored Values

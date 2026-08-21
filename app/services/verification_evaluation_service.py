@@ -5,6 +5,24 @@ the verification scan's freshly computed metrics for the same Opportunity
 scope. Produces a VerificationOutcome and persists it on the
 OpportunityVerification record.
 
+Phase 10.1 hardening:
+- Uses the same scope filters (prompt_id, execution_mode, provider) as
+  the VerificationScopeResolver so baseline and verification are compared
+  on corresponding methodological cells.
+- Baseline coverage gate: baseline measurement coverage must also meet
+  MIN_VERIFICATION_COVERAGE_PCT, otherwise INCONCLUSIVE.
+- Zero-success-observations gate applies to BOTH baseline and
+  verification.
+- Brand-side resolution safeguards:
+  - DISCOVERY/PROVIDER: brand_visibility_rate must be > 0 for RESOLVED.
+  - OWNED_CITATION_GAP: brand_owned_citation_rate must be > 0 for RESOLVED.
+  - PROMPT_COMPETITOR_GAP: brand must appear in at least one verification
+    observation for RESOLVED.
+- PROMPT_COMPETITOR_GAP now uses competitor_only_rate (percentage points)
+  instead of competitor_only_count (integer count).
+- Two-sided citation sufficiency gate: both baseline and verification
+  must have >= MIN_CITATION_ELIGIBLE_OBSERVATIONS for OWNED_CITATION_GAP.
+
 Key principles:
 - Zero AI Checks, zero provider calls, zero UsageEvents.
 - Uses CompetitorExplanationService for both baseline and verification
@@ -22,17 +40,23 @@ Outcome decision tree:
    → INCONCLUSIVE (INSUFFICIENT_COVERAGE).
 3. If verification has zero successful observations → INCONCLUSIVE
    (NO_SUCCESSFUL_OBSERVATIONS).
-4. For OWNED_CITATION_GAP: if citation_eligible_observations <
-   MIN_CITATION_ELIGIBLE_OBSERVATIONS → INCONCLUSIVE
-   (INSUFFICIENT_CITATION_EVIDENCE).
-5. Compute the verification metric value and compare to the baseline:
-   - If verification value < resolution_threshold → RESOLVED.
+4. If baseline has zero successful observations → INCONCLUSIVE
+   (NO_SUCCESSFUL_OBSERVATIONS).
+5. If baseline measurement coverage < MIN_VERIFICATION_COVERAGE_PCT
+   → INCONCLUSIVE (INSUFFICIENT_BASELINE_COVERAGE).
+6. For OWNED_CITATION_GAP: if either baseline or verification
+   citation_eligible_observations < MIN_CITATION_ELIGIBLE_OBSERVATIONS
+   → INCONCLUSIVE (INSUFFICIENT_CITATION_EVIDENCE).
+7. Compute the verification metric value and compare to the baseline:
+   - If verification value < resolution_threshold AND brand-side
+     safeguard passes → RESOLVED.
    - Else if (baseline - verification) >= meaningful_improvement_threshold
      → IMPROVED.
    - Else if (verification - baseline) >= meaningful_improvement_threshold
      → REGRESSED.
    - Else → NOT_IMPROVED.
-6. For PROMPT_COMPETITOR_GAP: competitor_only_count == 0 → RESOLVED.
+8. For PROMPT_COMPETITOR_GAP: competitor_only_rate == 0 AND brand
+   appears → RESOLVED.
 """
 
 from __future__ import annotations
@@ -49,6 +73,7 @@ from app.core.enums import (
     LLMProvider,
     OpportunityType,
     PromptType,
+    ProviderExecutionMode,
     ScanAnalysisStatus,
     ScanStatus,
     ScanType,
@@ -165,7 +190,7 @@ class VerificationEvaluationService:
                 "Verification scan analysis is not completed.",
             )
 
-        # Compute the verification explanation.
+        # Compute the verification explanation (scope-aware).
         verification_explanation = self._compute_explanation(
             verification_scan.workspace_id,
             verification_scan.project_id,
@@ -174,7 +199,7 @@ class VerificationEvaluationService:
             baseline_occurrence,
         )
 
-        # Coverage gate.
+        # Coverage gate (verification).
         verification_coverage = verification_explanation.measurement_coverage
         if verification_coverage is None or verification_coverage < MIN_VERIFICATION_COVERAGE_PCT:
             return self._persist_inconclusive(
@@ -185,7 +210,7 @@ class VerificationEvaluationService:
                 verification_coverage=verification_coverage,
             )
 
-        # Zero successful observations gate.
+        # Zero successful observations gate (verification).
         if verification_explanation.successful_observations == 0:
             return self._persist_inconclusive(
                 verification,
@@ -212,25 +237,61 @@ class VerificationEvaluationService:
             baseline_occurrence,
         )
 
+        # Phase 10.1: Zero successful observations gate (baseline).
+        if baseline_explanation.successful_observations == 0:
+            return self._persist_inconclusive(
+                verification,
+                VerificationReasonCode.NO_SUCCESSFUL_OBSERVATIONS,
+                "Baseline scan has no successful observations for this scope.",
+                verification_coverage=verification_coverage,
+                baseline_coverage=baseline_explanation.measurement_coverage,
+            )
+
+        # Phase 10.1: Baseline coverage gate.
+        baseline_coverage = baseline_explanation.measurement_coverage
+        if baseline_coverage is None or baseline_coverage < MIN_VERIFICATION_COVERAGE_PCT:
+            return self._persist_inconclusive(
+                verification,
+                VerificationReasonCode.INSUFFICIENT_BASELINE_COVERAGE,
+                f"Baseline measurement coverage ({baseline_coverage}) "
+                f"is below the minimum threshold ({MIN_VERIFICATION_COVERAGE_PCT}%).",
+                verification_coverage=verification_coverage,
+                baseline_coverage=baseline_coverage,
+            )
+
         # Determine the metric and thresholds based on opportunity type.
         metric_name, resolution_threshold, improvement_threshold = self._resolve_metric_config(
             opportunity, baseline_explanation
         )
 
-        # Citation-specific gate.
-        if (
-            opportunity.opportunity_type == OpportunityType.OWNED_CITATION_GAP
-            and verification_explanation.citation_eligible_observations
-            < MIN_CITATION_ELIGIBLE_OBSERVATIONS
-        ):
-            return self._persist_inconclusive(
-                verification,
-                VerificationReasonCode.INSUFFICIENT_CITATION_EVIDENCE,
-                f"Verification citation-eligible observations "
-                f"({verification_explanation.citation_eligible_observations}) "
-                f"is below the minimum ({MIN_CITATION_ELIGIBLE_OBSERVATIONS}).",
-                verification_coverage=verification_coverage,
-            )
+        # Phase 10.1: Two-sided citation sufficiency gate.
+        if opportunity.opportunity_type == OpportunityType.OWNED_CITATION_GAP:
+            if (
+                baseline_explanation.citation_eligible_observations
+                < MIN_CITATION_ELIGIBLE_OBSERVATIONS
+            ):
+                return self._persist_inconclusive(
+                    verification,
+                    VerificationReasonCode.INSUFFICIENT_CITATION_EVIDENCE,
+                    f"Baseline citation-eligible observations "
+                    f"({baseline_explanation.citation_eligible_observations}) "
+                    f"is below the minimum ({MIN_CITATION_ELIGIBLE_OBSERVATIONS}).",
+                    verification_coverage=verification_coverage,
+                    baseline_coverage=baseline_coverage,
+                )
+            if (
+                verification_explanation.citation_eligible_observations
+                < MIN_CITATION_ELIGIBLE_OBSERVATIONS
+            ):
+                return self._persist_inconclusive(
+                    verification,
+                    VerificationReasonCode.INSUFFICIENT_CITATION_EVIDENCE,
+                    f"Verification citation-eligible observations "
+                    f"({verification_explanation.citation_eligible_observations}) "
+                    f"is below the minimum ({MIN_CITATION_ELIGIBLE_OBSERVATIONS}).",
+                    verification_coverage=verification_coverage,
+                    baseline_coverage=baseline_coverage,
+                )
 
         # Extract the baseline and verification metric values.
         baseline_value = self._extract_metric_value(
@@ -246,6 +307,11 @@ class VerificationEvaluationService:
         # Compute the delta (baseline - verification; positive = improvement).
         delta = self._compute_delta(baseline_value, verification_value)
 
+        # Phase 10.1: Brand-side resolution safeguard.
+        brand_safeguard_passes = self._brand_safeguard_passes(
+            opportunity, verification_explanation
+        )
+
         # Decide the outcome.
         outcome, message = self._decide_outcome(
             metric_name,
@@ -255,6 +321,8 @@ class VerificationEvaluationService:
             resolution_threshold,
             improvement_threshold,
             opportunity.opportunity_type,
+            brand_safeguard_passes,
+            verification_explanation,
         )
 
         # Persist the evaluation.
@@ -346,10 +414,11 @@ class VerificationEvaluationService:
         baseline_occurrence: OpportunityOccurrence,
     ) -> CompetitorExplanation:
         """Compute the CompetitorExplanation for the scan, scoped to the
-        Opportunity's competitor and provider.
+        Opportunity's competitor, provider, prompt_id, and execution_mode.
 
-        For PROVIDER_VISIBILITY_GAP, the provider filter is applied.
-        For other types, no provider filter.
+        Phase 10.1: The scope filters mirror the VerificationScopeResolver
+        so baseline and verification are compared on corresponding
+        methodological cells.
         """
         # Find the competitor snapshot for this scan.
         snapshots = list(
@@ -368,8 +437,16 @@ class VerificationEvaluationService:
         competitor_snapshot_id = snapshots[0].id
 
         provider_filter: LLMProvider | None = None
-        if opportunity.opportunity_type == OpportunityType.PROVIDER_VISIBILITY_GAP:
+        prompt_id_filter: uuid.UUID | None = None
+        execution_mode_filter: ProviderExecutionMode | None = None
+
+        opp_type = opportunity.opportunity_type
+        if opp_type == OpportunityType.PROVIDER_VISIBILITY_GAP:
             provider_filter = opportunity.provider
+        if opp_type == OpportunityType.OWNED_CITATION_GAP:
+            execution_mode_filter = ProviderExecutionMode.WEB_GROUNDED
+        if opp_type == OpportunityType.PROMPT_COMPETITOR_GAP:
+            prompt_id_filter = opportunity.prompt_id
 
         return self._explanation_service.get_explanation(
             workspace_id,
@@ -378,6 +455,8 @@ class VerificationEvaluationService:
             competitor_snapshot_id,
             prompt_type=PromptType.NON_BRANDED,
             provider=provider_filter,
+            prompt_id=prompt_id_filter,
+            execution_mode=execution_mode_filter,
         )
 
     def _resolve_metric_config(
@@ -387,6 +466,9 @@ class VerificationEvaluationService:
     ) -> tuple[str, Decimal, Decimal]:
         """Resolve the metric name, resolution threshold, and meaningful
         improvement threshold based on the Opportunity type.
+
+        Phase 10.1: PROMPT_COMPETITOR_GAP now uses competitor_only_rate
+        (percentage points) instead of competitor_only_count (integer).
         """
         opp_type = opportunity.opportunity_type
         if opp_type == OpportunityType.DISCOVERY_VISIBILITY_GAP:
@@ -408,9 +490,11 @@ class VerificationEvaluationService:
                 MIN_CITATION_IMPROVEMENT_PP,
             )
         if opp_type == OpportunityType.PROMPT_COMPETITOR_GAP:
+            # Phase 10.1: use competitor_only_rate (pp) not count.
+            # Resolution: competitor_only_rate == 0 (no competitor-only obs).
             return (
-                "competitor_only_count",
-                Decimal(1),  # resolution: competitor_only_count == 0
+                "competitor_only_rate",
+                Decimal(1),  # any rate > 0 means the gap still exists
                 MIN_PROMPT_GAP_IMPROVEMENT_PP,
             )
         # Fallback (should not happen).
@@ -429,15 +513,17 @@ class VerificationEvaluationService:
     ) -> Decimal | None:
         """Extract the metric value from the explanation.
 
-        For visibility_gap_pp and citation_gap_pp, uses the explanation's
-        gap. For competitor_only_count (PROMPT_COMPETITOR_GAP), uses the
-        overlap matrix's competitor_only_runs.
+        Phase 10.1: PROMPT_COMPETITOR_GAP now uses competitor_only_rate
+        (percentage points) instead of competitor_only_count (integer).
         """
         if metric_name == "visibility_gap_pp":
             return explanation.visibility_gap_pp
         if metric_name == "citation_gap_pp":
             return explanation.citation_gap_pp
+        if metric_name == "competitor_only_rate":
+            return explanation.overlap.competitor_only_rate
         if metric_name == "competitor_only_count":
+            # Legacy fallback for older verification records.
             return Decimal(explanation.overlap.competitor_only_runs)
         return None
 
@@ -449,7 +535,7 @@ class VerificationEvaluationService:
             return explanation.brand_visibility_rate
         if metric_name == "citation_gap_pp":
             return explanation.brand_owned_citation_rate
-        if metric_name == "competitor_only_count":
+        if metric_name in ("competitor_only_rate", "competitor_only_count"):
             return explanation.brand_visibility_rate
         return None
 
@@ -461,6 +547,44 @@ class VerificationEvaluationService:
             return None
         return baseline - verification
 
+    def _brand_safeguard_passes(
+        self,
+        opportunity: Opportunity,
+        verification_explanation: CompetitorExplanation,
+    ) -> bool:
+        """Phase 10.1: Brand-side resolution safeguard.
+
+        For RESOLVED to be valid, the brand must actually appear in the
+        verification scan.  A gap of 0 because the brand disappeared
+        entirely is NOT a resolution — it's a measurement artifact.
+
+        - DISCOVERY_VISIBILITY_GAP: brand_visibility_rate > 0
+        - PROVIDER_VISIBILITY_GAP: brand_visibility_rate > 0
+        - OWNED_CITATION_GAP: brand_owned_citation_rate > 0
+        - PROMPT_COMPETITOR_GAP: brand must appear in at least one
+          observation (brand_visibility_rate > 0 OR brand appears in
+          overlap.both_runs > 0)
+        """
+        opp_type = opportunity.opportunity_type
+
+        if opp_type in (
+            OpportunityType.DISCOVERY_VISIBILITY_GAP,
+            OpportunityType.PROVIDER_VISIBILITY_GAP,
+        ):
+            brand_vis = verification_explanation.brand_visibility_rate
+            return brand_vis is not None and brand_vis > 0
+
+        if opp_type == OpportunityType.OWNED_CITATION_GAP:
+            brand_cit = verification_explanation.brand_owned_citation_rate
+            return brand_cit is not None and brand_cit > 0
+
+        if opp_type == OpportunityType.PROMPT_COMPETITOR_GAP:
+            # Brand must appear in at least one observation.
+            brand_vis = verification_explanation.brand_visibility_rate
+            return brand_vis is not None and brand_vis > 0
+
+        return True
+
     def _decide_outcome(
         self,
         metric_name: str,
@@ -470,19 +594,27 @@ class VerificationEvaluationService:
         resolution_threshold: Decimal,
         improvement_threshold: Decimal,
         opp_type: OpportunityType,
+        brand_safeguard_passes: bool,
+        verification_explanation: CompetitorExplanation,
     ) -> tuple[VerificationOutcome, str]:
         """Decide the verification outcome.
 
+        Phase 10.1:
+        - Brand-side safeguard: if the safeguard fails, a would-be
+          RESOLVED becomes NOT_RESOLVED_BRAND_ABSENT (still NOT_IMPROVED
+          outcome, but with a specific message).
+        - PROMPT_COMPETITOR_GAP uses competitor_only_rate (pp).
+
         For gap-based metrics (visibility_gap_pp, citation_gap_pp):
-        - RESOLVED: verification_value < resolution_threshold
+        - RESOLVED: verification_value < resolution_threshold AND safeguard
         - IMPROVED: delta >= improvement_threshold (and not RESOLVED)
         - REGRESSED: -delta >= improvement_threshold
         - NOT_IMPROVED: otherwise
 
-        For competitor_only_count (PROMPT_COMPETITOR_GAP):
-        - RESOLVED: verification_value == 0
-        - IMPROVED: delta >= improvement_threshold (count dropped)
-        - REGRESSED: -delta >= improvement_threshold (count grew)
+        For competitor_only_rate (PROMPT_COMPETITOR_GAP):
+        - RESOLVED: verification_value == 0 AND brand appears
+        - IMPROVED: delta >= improvement_threshold (rate dropped)
+        - REGRESSED: -delta >= improvement_threshold (rate grew)
         - NOT_IMPROVED: otherwise
         """
         if verification_value is None:
@@ -492,19 +624,36 @@ class VerificationEvaluationService:
             )
 
         # Resolution check.
-        if metric_name == "competitor_only_count":
+        resolved = False
+        if metric_name in ("competitor_only_rate", "competitor_only_count"):
             if verification_value == 0:
-                return (
-                    VerificationOutcome.RESOLVED,
-                    "Competitor-only observations dropped to zero for this prompt.",
-                )
+                resolved = True
         else:
             if verification_value < resolution_threshold:
+                resolved = True
+
+        if resolved:
+            if not brand_safeguard_passes:
+                return (
+                    VerificationOutcome.NOT_IMPROVED,
+                    f"Verification {metric_name} ({verification_value}) is below "
+                    f"the resolution threshold ({resolution_threshold}), but the "
+                    f"brand does not appear in the verification scan. "
+                    f"The gap closed because the brand disappeared, not because "
+                    f"the issue was resolved.",
+                )
+            if metric_name in ("competitor_only_rate", "competitor_only_count"):
                 return (
                     VerificationOutcome.RESOLVED,
-                    f"Verification {metric_name} ({verification_value}) is below "
-                    f"the resolution threshold ({resolution_threshold}).",
+                    "Competitor-only observation rate dropped to zero for this "
+                    "prompt, and the brand appears in the verification scan.",
                 )
+            return (
+                VerificationOutcome.RESOLVED,
+                f"Verification {metric_name} ({verification_value}) is below "
+                f"the resolution threshold ({resolution_threshold}), and the "
+                f"brand appears in the verification scan.",
+            )
 
         if delta is None or baseline_value is None:
             return (
@@ -536,6 +685,8 @@ class VerificationEvaluationService:
     def _resolve_reason_code(self, message: str) -> VerificationReasonCode:
         """Map an INCONCLUSIVE message to a bounded reason code."""
         lower = message.lower()
+        if "baseline" in lower and "coverage" in lower:
+            return VerificationReasonCode.INSUFFICIENT_BASELINE_COVERAGE
         if "coverage" in lower:
             return VerificationReasonCode.INSUFFICIENT_COVERAGE
         if "analysis" in lower:
@@ -553,6 +704,7 @@ class VerificationEvaluationService:
         message: str,
         *,
         verification_coverage: Decimal | None = None,
+        baseline_coverage: Decimal | None = None,
     ) -> VerificationEvaluationResult:
         """Persist an INCONCLUSIVE outcome and return the result."""
         now = datetime.now(UTC)
@@ -562,6 +714,8 @@ class VerificationEvaluationService:
         verification.evaluated_at = now
         if verification_coverage is not None:
             verification.verification_coverage = verification_coverage
+        if baseline_coverage is not None:
+            verification.baseline_coverage = baseline_coverage
         self._session.commit()
         return VerificationEvaluationResult(
             verification_id=verification.id,

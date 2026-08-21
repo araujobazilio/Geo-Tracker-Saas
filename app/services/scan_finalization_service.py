@@ -158,6 +158,13 @@ class ScanFinalizationService:
         The failure session factory is passed to ScanAnalysisService so
         that unexpected exceptions persist a FAILED record in a separate
         transaction.
+
+        Phase 10.1: For VERIFICATION scans, after analysis completes
+        successfully, automatically trigger verification evaluation.
+        Evaluation failure MUST NOT rollback scan completion, change
+        quota, or repeat providers — it is logged and swallowed, just
+        like analysis failure.  The verification record remains PENDING
+        and can be evaluated manually later.
         """
         if status not in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
             return
@@ -167,23 +174,88 @@ class ScanFinalizationService:
             if self._analysis_session_factory is not None:
                 ctx = self._analysis_session_factory
                 with ctx() as analysis_session:
-                    ScanAnalysisService(
+                    analysis = ScanAnalysisService(
                         analysis_session,
                         failure_session_factory=self._analysis_session_factory,
                     ).analyze(scan_id)
+                    # Phase 10.1: auto-evaluate VERIFICATION scans.
+                    self._maybe_auto_evaluate_verification(
+                        analysis_session, scan_id, analysis.status
+                    )
             else:
                 from app.db.session import get_session_factory
 
                 factory = get_session_factory()
                 with factory() as analysis_session:
-                    ScanAnalysisService(
+                    analysis = ScanAnalysisService(
                         analysis_session,
                         failure_session_factory=factory,
                     ).analyze(scan_id)
+                    # Phase 10.1: auto-evaluate VERIFICATION scans.
+                    self._maybe_auto_evaluate_verification(
+                        analysis_session, scan_id, analysis.status
+                    )
         except Exception:
             logger.error(
                 "auto_analysis_failed",
                 scan_id=str(scan_id),
+                exc_info=True,
+            )
+
+    def _maybe_auto_evaluate_verification(
+        self, session: Session, scan_id: uuid.UUID, analysis_status: str
+    ) -> None:
+        """Phase 10.1: Auto-evaluate a VERIFICATION scan after analysis.
+
+        If the scan is a VERIFICATION scan and the analysis is COMPLETED,
+        find the corresponding OpportunityVerification record and
+        evaluate it.  Evaluation failure is logged and swallowed — it
+        MUST NOT rollback the analysis or repeat providers.  The
+        verification record remains PENDING and can be evaluated
+        manually later.
+        """
+        from sqlalchemy import select
+
+        from app.core.enums import ScanAnalysisStatus, ScanType
+        from app.models.opportunity import OpportunityVerification
+
+        if analysis_status != ScanAnalysisStatus.COMPLETED:
+            return
+
+        scan = session.get(Scan, scan_id)
+        if scan is None or scan.scan_type != ScanType.VERIFICATION:
+            return
+
+        verification = session.execute(
+            select(OpportunityVerification).where(
+                OpportunityVerification.verification_scan_id == scan_id
+            )
+        ).scalar_one_or_none()
+        if verification is None:
+            logger.warning(
+                "auto_evaluation_no_verification_record",
+                scan_id=str(scan_id),
+            )
+            return
+        if verification.outcome != "PENDING":
+            return
+
+        try:
+            from app.services.verification_evaluation_service import (
+                VerificationEvaluationService,
+            )
+
+            VerificationEvaluationService(session).evaluate(verification.id)
+            logger.info(
+                "auto_evaluation_completed",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
+            )
+        except Exception:
+            logger.error(
+                "auto_evaluation_failed",
+                scan_id=str(scan_id),
+                verification_id=str(verification.id),
                 exc_info=True,
             )
 

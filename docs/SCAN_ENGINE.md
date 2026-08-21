@@ -63,13 +63,19 @@ One run = one provider call. There is no retry, no `autoretry_for`, and no `self
 
 `ScanExecutionService` is extended to handle the round-by-round execution model for `CONFIDENCE` scans. It groups `PromptRun` rows by `observation_index`, executes each round fully before advancing to the next, and uses the same atomic result recording, finalization, and stale-recovery machinery as STANDARD scans.
 
-## VERIFICATION methodology (Phase 10)
+## VERIFICATION methodology (Phase 10 + 10.1)
 
-**IMPLEMENTED (Phase 10).** A `VERIFICATION` scan is a single-repeat clone of a frozen implementation baseline `STANDARD` scan. It re-measures the exact same Prompt × Provider cells once (`repeat_count = 1`) to determine whether a previously detected Action Center Opportunity has been resolved.
+**IMPLEMENTED (Phase 10 + 10.1).** A `VERIFICATION` scan is a single-repeat clone of a frozen implementation baseline `STANDARD` scan. It re-measures the exact targeted Prompt × Provider cells once (`repeat_count = 1`) to determine whether a previously detected Action Center Opportunity has been resolved.
 
 ### Creation
 
-`VerificationScanCreationService` clones the baseline STANDARD scan's methodology: it copies the snapshotted prompt set, provider targets, execution modes, model IDs, and entity snapshots, then creates `prompt_count × provider_count` `PromptRun` rows with `observation_index = 1`. The baseline scan must be terminal (`COMPLETED` or `PARTIAL`), belong to the same workspace, and have a COMPLETED `ScanAnalysis`. The parent Opportunity must be in `IMPLEMENTED` status with a frozen `implementation_baseline_occurrence_id`.
+`VerificationScanCreationService` clones the baseline STANDARD scan's methodology. Phase 10.1 introduces `VerificationScopeResolver` which selects the exact historical baseline cells relevant to the Opportunity type (not the full Cartesian product). It copies the snapshotted prompt set, targeted provider cells, execution modes, model IDs, and entity snapshots, then creates `planned_ai_checks = len(target_cells)` `PromptRun` rows with `observation_index = 1`. The baseline scan must be terminal (`COMPLETED` or `PARTIAL`), belong to the same workspace, and have a COMPLETED `ScanAnalysis`. The parent Opportunity must be in `IMPLEMENTED` status with a frozen `implementation_baseline_occurrence_id`.
+
+Phase 10.1 hardening:
+- Only providers in the selected scope are validated (not all baseline providers).
+- Pricing preflight runs only against exact selected cells.
+- One PENDING verification per implementation cycle is enforced (service + DB partial unique index).
+- Idempotency key reuse across different baselines raises `ConflictError`.
 
 ### Execution
 
@@ -77,7 +83,17 @@ One run = one provider call. There is no retry, no `autoretry_for`, and no `self
 
 ### Evaluation
 
-`VerificationEvaluationService` performs a deterministic before/after comparison using `CompetitorExplanationService` to compute the verification metrics. Zero AI Checks, zero provider calls. See [VERIFICATION_SCANS.md](VERIFICATION_SCANS.md) for the full decision logic.
+Phase 10.1: `VerificationEvaluationService` is **automatically triggered** after the verification scan's `ScanAnalysis` completes. The evaluation runs in the same session as the analysis. Evaluation failure is logged and swallowed — it MUST NOT rollback the analysis, replay providers, or change quota. The verification remains PENDING and can be evaluated manually.
+
+`VerificationEvaluationService` performs a deterministic before/after comparison using `CompetitorExplanationService` to compute the verification metrics, scoped to the same cells as the execution plan. Zero AI Checks, zero provider calls. See [VERIFICATION_SCANS.md](VERIFICATION_SCANS.md) for the full decision logic.
+
+Phase 10.1 hardening:
+- Baseline coverage gate (INSUFFICIENT_BASELINE_COVERAGE if baseline < 75%).
+- Zero-success-observations gate applies to BOTH baseline and verification.
+- Brand-side resolution safeguards prevent false RESOLVED when the brand disappears.
+- Two-sided citation sufficiency gate for OWNED_CITATION_GAP.
+- PROMPT_COMPETITOR_GAP uses `competitor_only_rate` (pp) not `competitor_only_count` (integer).
+- `mark_verified_from_verification` independently validates the verification record.
 
 ## Immutable execution snapshot
 

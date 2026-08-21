@@ -1,10 +1,23 @@
 """Verification Scan creation — clone a baseline STANDARD scan's methodology
-for Opportunity verification (Phase 10).
+for Opportunity verification (Phase 10 + Phase 10.1).
 
 A Verification Scan repeats the SAME immutable measurement cells (Prompt x
 Provider) as the frozen implementation baseline STANDARD scan, exactly
 once (repeat_count=1). The resulting evidence is compared deterministically
 against the baseline by VerificationEvaluationService.
+
+Phase 10.1 hardening:
+- Targeted scope: only the exact historical baseline cells relevant to
+  the Opportunity type are re-measured (not a full Cartesian product).
+- planned_ai_checks = len(target_cells), NOT prompt_count * provider_count.
+- Only providers in the selected scope are validated (not all baseline
+  providers).
+- Pricing preflight runs only against the exact selected cells.
+- One active (PENDING) verification per implementation cycle is enforced
+  at the service level and via a partial unique index.
+- Idempotency key reuse across different implementation baselines raises
+  ConflictError.
+- The same scope drives BOTH execution and evaluation.
 
 Key invariants:
 - The Opportunity must be in IMPLEMENTED status with a frozen
@@ -16,15 +29,9 @@ Key invariants:
 - The baseline's exact prompt_set_id, prompt IDs, provider surfaces,
   execution modes, requested models, and entity snapshots are cloned.
 - Current project configuration must NOT alter the cloned methodology.
-- Current entitlements and provider configuration must still allow ALL
-  baseline providers.
 - The verification_scans entitlement must be enabled.
-- Quota is reserved for prompt_count x provider_count AI Checks
-  (repeat_count=1) before dispatch.
-- One active verification per Opportunity implementation cycle is
-  enforced via the unique (workspace_id, idempotency_key) constraint
-  and the unique verification_scan_id constraint on
-  OpportunityVerification.
+- Quota is reserved for planned_ai_checks (= len(target_cells)) before
+  dispatch.
 """
 
 from __future__ import annotations
@@ -44,9 +51,11 @@ from app.core.enums import (
     ProjectStatus,
     PromptRunStatus,
     ProviderExecutionMode,
+    ProviderSurface,
     ScanAnalysisStatus,
     ScanStatus,
     ScanType,
+    VerificationOutcome,
 )
 from app.core.exceptions import (
     ConflictError,
@@ -59,6 +68,7 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger
 from app.core.verification_engine import VERIFICATION_METHODOLOGY_VERSION
+from app.core.verification_scope import VerificationScope, VerificationScopeResolver
 from app.models.analysis import ScanEntitySnapshot
 from app.models.opportunity import (
     Opportunity,
@@ -66,7 +76,6 @@ from app.models.opportunity import (
     OpportunityVerification,
 )
 from app.models.scan import PromptRun, Scan
-from app.models.tracking import Prompt
 from app.providers.registry import ProviderRegistry
 from app.repositories.analysis_repository import (
     ScanAnalysisRepository,
@@ -80,14 +89,12 @@ from app.repositories.tracking_repository import (
 )
 from app.services.audit_service import AuditService
 from app.services.confidence_scan_creation_service import (
-    BaselineProviderTarget,
     ScanCreationServiceIdempotencyHelper,
 )
 from app.services.entitlement_service import EntitlementService
 from app.services.pricing_service import PricingService
 from app.services.quota_service import QuotaService
 from app.services.scanning.dispatcher import ScanDispatcher
-from app.services.scanning.policy import PROVIDER_ORDER
 
 logger = get_logger("app.verification_scan_creation")
 
@@ -104,7 +111,12 @@ _BASELINE_ELIGIBLE_STATUSES = (ScanStatus.COMPLETED, ScanStatus.PARTIAL)
 
 
 class VerificationScanCreationService:
-    """Create a VERIFICATION scan from an Opportunity's frozen baseline."""
+    """Create a VERIFICATION scan from an Opportunity's frozen baseline.
+
+    Phase 10.1: uses VerificationScopeResolver to select the exact
+    historical baseline cells relevant to the Opportunity type, rather
+    than cloning the full Cartesian product.
+    """
 
     def __init__(
         self,
@@ -130,6 +142,7 @@ class VerificationScanCreationService:
         self._entitlements = EntitlementService(session)
         self._pricing = PricingService(session)
         self._quota = QuotaService(session, audit_service=audit_service)
+        self._scope_resolver = VerificationScopeResolver(session)
 
     def create_verification_scan(
         self,
@@ -148,7 +161,9 @@ class VerificationScanCreationService:
         # Idempotency: existing verification with same key.
         existing_verification = self._find_existing_verification(workspace_id, key)
         if existing_verification is not None:
-            self._validate_existing_verification(existing_verification, project_id, opportunity_id)
+            self._validate_existing_verification(
+                existing_verification, project_id, opportunity_id
+            )
             existing_scan = self._scans.get_by_id(existing_verification.verification_scan_id)
             if existing_scan is None:
                 self._session.rollback()
@@ -161,7 +176,8 @@ class VerificationScanCreationService:
         if opp.status != OpportunityStatus.IMPLEMENTED:
             self._session.rollback()
             raise ValidationError(
-                "Opportunity must be in IMPLEMENTED status to create a verification scan."
+                "Opportunity must be in IMPLEMENTED status to create a "
+                "verification scan."
             )
         if opp.implementation_baseline_occurrence_id is None:
             self._session.rollback()
@@ -177,6 +193,10 @@ class VerificationScanCreationService:
 
         baseline_scan_id = baseline_occurrence.scan_id
         baseline = self._load_and_validate_baseline(workspace_id, project_id, baseline_scan_id)
+
+        # Phase 10.1: Check for an existing PENDING verification for the
+        # same implementation cycle (opportunity + baseline_occurrence).
+        self._check_no_pending_verification(opp.id, baseline_occurrence.id)
 
         # Validate the project is still ACTIVE.
         project = self._projects.get_in_workspace_for_update(project_id, workspace_id)
@@ -194,14 +214,14 @@ class VerificationScanCreationService:
             self._session.rollback()
             raise
 
-        # Validate all baseline providers are still allowed + configured.
-        baseline_targets = self._validate_baseline_providers(workspace_id, project_id, baseline)
+        # Phase 10.1: Resolve the exact targeted scope.
+        scope = self._scope_resolver.resolve(opp, baseline)
 
-        # Pricing preflight.
-        self._pricing_preflight(baseline_targets)
+        # Phase 10.1: Validate only the providers in the selected scope.
+        self._validate_scope_providers(workspace_id, project_id, scope)
 
-        # Load baseline prompts.
-        baseline_prompts = self._load_baseline_prompts(baseline)
+        # Phase 10.1: Pricing preflight only against exact selected cells.
+        self._pricing_preflight_scope(scope)
 
         # Load baseline entity snapshots.
         baseline_snapshots = self._snapshots.list_by_scan(baseline.id)
@@ -209,10 +229,10 @@ class VerificationScanCreationService:
             self._session.rollback()
             raise ConflictError("Baseline scan has no entity snapshots.")
 
-        # Compute planned AI checks (repeat_count=1).
-        prompt_count = len(baseline_prompts)
-        provider_count = len(baseline_targets)
-        planned_ai_checks = prompt_count * provider_count
+        # Phase 10.1: planned_ai_checks = len(target_cells).
+        prompt_count = scope.prompt_count
+        provider_count = scope.provider_count
+        planned_ai_checks = scope.planned_ai_checks
 
         try:
             scan = Scan(
@@ -233,9 +253,7 @@ class VerificationScanCreationService:
             )
             self._scans.create(scan)
 
-            planned_runs = self._create_verification_runs(
-                scan.id, baseline_prompts, baseline_targets
-            )
+            planned_runs = self._create_verification_runs(scan.id, scope)
             self._runs.create_batch(planned_runs)
 
             self._clone_entity_snapshots(scan.id, baseline_snapshots)
@@ -261,7 +279,9 @@ class VerificationScanCreationService:
             existing_verification = self._find_existing_verification(workspace_id, key)
             if existing_verification is None:
                 raise
-            self._validate_existing_verification(existing_verification, project_id, opportunity_id)
+            self._validate_existing_verification(
+                existing_verification, project_id, opportunity_id
+            )
             existing_scan = self._scans.get_by_id(existing_verification.verification_scan_id)
             if existing_scan is None:
                 raise InfrastructureError(
@@ -319,18 +339,22 @@ class VerificationScanCreationService:
         return opp
 
     def _derive_metric_name(self, opp: Opportunity) -> str:
-        """Derive the metric name for the verification comparison."""
+        """Derive the metric name for the verification comparison.
+
+        Phase 10.1: PROMPT_COMPETITOR_GAP now uses competitor_only_rate
+        (percentage points) instead of competitor_only_count (integer).
+        """
+        opp_type_str = (
+            opp.opportunity_type.value
+            if hasattr(opp.opportunity_type, "value")
+            else str(opp.opportunity_type)
+        )
         return {
             "DISCOVERY_VISIBILITY_GAP": "visibility_gap_pp",
             "PROVIDER_VISIBILITY_GAP": "visibility_gap_pp",
             "OWNED_CITATION_GAP": "citation_gap_pp",
-            "PROMPT_COMPETITOR_GAP": "competitor_only_count",
-        }.get(
-            opp.opportunity_type.value
-            if hasattr(opp.opportunity_type, "value")
-            else str(opp.opportunity_type),
-            "visibility_gap_pp",
-        )
+            "PROMPT_COMPETITOR_GAP": "competitor_only_rate",
+        }.get(opp_type_str, "visibility_gap_pp")
 
     # ------------------------------------------------------------------
     # Baseline validation
@@ -377,85 +401,130 @@ class VerificationScanCreationService:
         return baseline
 
     # ------------------------------------------------------------------
-    # Provider validation
+    # Phase 10.1: One pending verification per implementation cycle
     # ------------------------------------------------------------------
 
-    def _validate_baseline_providers(
+    def _check_no_pending_verification(
+        self, opportunity_id: uuid.UUID, baseline_occurrence_id: uuid.UUID
+    ) -> None:
+        """Check that no PENDING verification exists for the same
+        implementation cycle (opportunity + baseline_occurrence).
+
+        Also checks for verifications whose scan is still PENDING or
+        RUNNING, as those represent active provider-spending cycles.
+        """
+        existing = list(
+            self._session.execute(
+                select(OpportunityVerification).where(
+                    OpportunityVerification.opportunity_id == opportunity_id,
+                    OpportunityVerification.baseline_occurrence_id == baseline_occurrence_id,
+                )
+            ).scalars()
+        )
+        for ver in existing:
+            if ver.outcome == VerificationOutcome.PENDING:
+                # Check if the scan is still active (PENDING or RUNNING).
+                scan = self._session.get(Scan, ver.verification_scan_id)
+                if scan is not None and scan.status in (ScanStatus.PENDING, ScanStatus.RUNNING):
+                    self._session.rollback()
+                    raise ConflictError(
+                        "An active verification scan is already in progress "
+                        "for this implementation cycle. Wait for it to complete "
+                        "or evaluate it before creating a new one."
+                    )
+                # If the scan is terminal but evaluation hasn't run, the
+                # verification is still PENDING.  Block creation to prevent
+                # double spend.
+                self._session.rollback()
+                raise ConflictError(
+                    "A pending verification exists for this implementation "
+                    "cycle. Evaluate it before creating a new one."
+                )
+
+    # ------------------------------------------------------------------
+    # Phase 10.1: Scoped provider validation
+    # ------------------------------------------------------------------
+
+    def _validate_scope_providers(
         self,
         workspace_id: uuid.UUID,
         project_id: uuid.UUID,
-        baseline: Scan,
-    ) -> list[BaselineProviderTarget]:
-        baseline_runs = self._runs.list_by_scan(baseline.id)
-        seen: dict[LLMProvider, BaselineProviderTarget] = {}
-        for run in baseline_runs:
-            if run.provider not in seen:
-                seen[run.provider] = BaselineProviderTarget(
-                    provider=run.provider,
-                    surface=run.provider_surface,
-                    mode=run.execution_mode,
-                    requested_model=run.requested_model,
-                )
-        targets = [seen[p] for p in PROVIDER_ORDER if p in seen]
-        if not targets:
-            self._session.rollback()
-            raise ValidationError("Baseline scan has no provider targets.")
+        scope: VerificationScope,
+    ) -> None:
+        """Validate only the providers in the selected scope.
 
+        An unrelated baseline provider that is currently unavailable
+        does NOT block a provider-specific verification.
+        """
         entitlements = self._entitlements.get_effective_entitlements(workspace_id)
         configured = {
             row.provider for row in self._project_providers.list_enabled_by_project(project_id)
         }
-        for target in targets:
-            if target.provider not in entitlements.allowed_providers:
+
+        for provider in scope.providers:
+            if provider not in entitlements.allowed_providers:
                 self._session.rollback()
                 raise EntitlementDeniedError(
-                    f"Provider '{target.provider}' is no longer allowed "
-                    f"by the current plan. Verification Scan requires all "
-                    f"baseline providers to remain allowed."
+                    f"Provider '{provider}' is no longer allowed "
+                    f"by the current plan. Verification Scan requires "
+                    f"all in-scope providers to remain allowed."
                 )
-            if target.provider not in configured:
+            if provider not in configured:
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider}' is no longer enabled "
-                    f"for this project. Verification Scan requires all "
-                    f"baseline providers to remain enabled."
+                    f"Provider '{provider}' is no longer enabled "
+                    f"for this project. Verification Scan requires "
+                    f"all in-scope providers to remain enabled."
                 )
-            adapter = self._registry.get(target.provider)
+
+        # Validate adapter capabilities for each unique (provider, mode) in scope.
+        seen_caps: set[tuple[LLMProvider, ProviderExecutionMode]] = set()
+        for cell in scope.target_cells:
+            cap_key = (cell.provider, cell.execution_mode)
+            if cap_key in seen_caps:
+                continue
+            seen_caps.add(cap_key)
+            adapter = self._registry.get(cell.provider)
             capabilities = adapter.capabilities()
             if (
-                target.mode == ProviderExecutionMode.MODEL_ONLY
+                cell.execution_mode == ProviderExecutionMode.MODEL_ONLY
                 and not capabilities.supports_model_only
             ):
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider}' does not support MODEL_ONLY mode."
+                    f"Provider '{cell.provider}' does not support MODEL_ONLY mode."
                 )
             if (
-                target.mode == ProviderExecutionMode.WEB_GROUNDED
+                cell.execution_mode == ProviderExecutionMode.WEB_GROUNDED
                 and not capabilities.supports_web_grounded
             ):
                 self._session.rollback()
                 raise ConflictError(
-                    f"Provider '{target.provider}' does not support WEB_GROUNDED mode."
+                    f"Provider '{cell.provider}' does not support WEB_GROUNDED mode."
                 )
-        return targets
 
     # ------------------------------------------------------------------
-    # Pricing preflight
+    # Phase 10.1: Scoped pricing preflight
     # ------------------------------------------------------------------
 
-    def _pricing_preflight(self, targets: list[BaselineProviderTarget]) -> None:
+    def _pricing_preflight_scope(self, scope: VerificationScope) -> None:
+        """Run pricing preflight only against exact selected cells."""
         if not self._settings.pricing_require_rule_for_execution:
             return
         now = datetime.now(UTC)
-        for target in targets:
-            if target.provider == LLMProvider.PERPLEXITY:
+        seen: set[tuple[LLMProvider, ProviderSurface, str]] = set()
+        for cell in scope.target_cells:
+            if cell.provider == LLMProvider.PERPLEXITY:
                 continue
+            price_key = (cell.provider, cell.provider_surface, cell.requested_model)
+            if price_key in seen:
+                continue
+            seen.add(price_key)
             try:
                 self._pricing.resolve(
-                    target.provider,
-                    target.surface,
-                    target.requested_model,
+                    cell.provider,
+                    cell.provider_surface,
+                    cell.requested_model,
                     now,
                 )
             except PricingRuleNotFoundError as exc:
@@ -463,53 +532,29 @@ class VerificationScanCreationService:
                 raise ConflictError(str(exc)) from exc
 
     # ------------------------------------------------------------------
-    # Baseline prompts
-    # ------------------------------------------------------------------
-
-    def _load_baseline_prompts(self, baseline: Scan) -> list[Prompt]:
-        baseline_runs = self._runs.list_by_scan(baseline.id)
-        seen_ids: set[uuid.UUID] = set()
-        prompt_ids: list[uuid.UUID] = []
-        for run in baseline_runs:
-            if run.prompt_id not in seen_ids:
-                seen_ids.add(run.prompt_id)
-                prompt_ids.append(run.prompt_id)
-        prompts: list[Prompt] = []
-        for pid in prompt_ids:
-            prompt = self._session.get(Prompt, pid)
-            if prompt is None:
-                self._session.rollback()
-                raise ValidationError("Baseline prompt is no longer available.")
-            prompts.append(prompt)
-        return prompts
-
-    # ------------------------------------------------------------------
-    # PromptRun creation (single observation)
+    # PromptRun creation (single observation, exact target cells)
     # ------------------------------------------------------------------
 
     def _create_verification_runs(
         self,
         scan_id: uuid.UUID,
-        prompts: list[Prompt],
-        targets: list[BaselineProviderTarget],
+        scope: VerificationScope,
     ) -> list[PromptRun]:
-        runs: list[PromptRun] = []
-        for prompt in prompts:
-            for target in targets:
-                runs.append(
-                    PromptRun(
-                        scan_id=scan_id,
-                        prompt_id=prompt.id,
-                        provider=target.provider,
-                        provider_surface=target.surface,
-                        execution_mode=target.mode,
-                        requested_model=target.requested_model,
-                        status=PromptRunStatus.PENDING,
-                        attempt_number=1,
-                        observation_index=1,
-                    )
-                )
-        return runs
+        """Create PromptRun rows for each exact target cell in the scope."""
+        return [
+            PromptRun(
+                scan_id=scan_id,
+                prompt_id=cell.prompt_id,
+                provider=cell.provider,
+                provider_surface=cell.provider_surface,
+                execution_mode=cell.execution_mode,
+                requested_model=cell.requested_model,
+                status=PromptRunStatus.PENDING,
+                attempt_number=1,
+                observation_index=1,
+            )
+            for cell in scope.target_cells
+        ]
 
     # ------------------------------------------------------------------
     # Entity snapshot cloning
@@ -559,6 +604,23 @@ class VerificationScanCreationService:
             raise ConflictError("Idempotency-Key reused for a conflicting verification request.")
         if existing.opportunity_id != opportunity_id:
             raise ConflictError("Idempotency-Key reused for a conflicting verification request.")
+        # Phase 10.1: if the same key is reused but the implementation
+        # baseline has changed (re-implementation cycle), this is a
+        # conflict — the caller should use a new idempotency key.
+        # We check this by loading the current opportunity's frozen
+        # baseline occurrence and comparing it to the existing
+        # verification's baseline_occurrence_id.
+        opp = self._session.get(Opportunity, opportunity_id)
+        if (
+            opp is not None
+            and opp.implementation_baseline_occurrence_id is not None
+            and existing.baseline_occurrence_id != opp.implementation_baseline_occurrence_id
+        ):
+            raise ConflictError(
+                "Idempotency-Key reused but the implementation baseline "
+                "has changed (re-implementation cycle). Use a new "
+                "idempotency key."
+            )
 
     def _resume_dispatch_if_needed(
         self, scan: Scan, verification: OpportunityVerification
