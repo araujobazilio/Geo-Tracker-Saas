@@ -451,3 +451,8 @@ authentication and workspace membership; cross-tenant access returns
     otherwise unused check.
 14. **Stale recovery never retries a provider.** Celery worker-loss ambiguity is
     absorbed by GEO; unresolved work is failed and its customer quota released.
+    For VERIFICATION scans, recovery also reconciles the verification lifecycle
+    (Phase 10.4): FAILED scans terminalize the OpportunityVerification as
+    INCONCLUSIVE (releasing the PENDING slot), PARTIAL scans run local
+    analysis + evaluation on persisted evidence. Zero new UsageEvents from
+    recovery analysis/evaluation.

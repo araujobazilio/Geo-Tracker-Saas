@@ -380,3 +380,50 @@ safely re-run finalization to repair inconsistent state.
 This is distinct from `ANALYSIS_NOT_COMPLETED` (the scan completed but
 analysis failed) and `INSUFFICIENT_COVERAGE` (the scan and analysis
 succeeded but coverage was too low).
+
+### Stale Recovery Lifecycle Closure (Phase 10.4)
+
+`ScanRecoveryService.recover_stale_scans()` previously finalized stale
+scans with `trigger_analysis=False`, which left the
+`OpportunityVerification` stranded `PENDING` for stale `VERIFICATION`
+scans recovered to `FAILED` or `PARTIAL`.
+
+Phase 10.4 closes this gap: after recovering a stale `VERIFICATION`
+scan, `ScanRecoveryService` explicitly calls
+`ScanFinalizationService.reconcile_verification_lifecycle(scan_id)`.
+
+**FAILED recovery** (all runs unresolved):
+
+- Scan → `FAILED`
+- Verification → `INCONCLUSIVE` / `VERIFICATION_SCAN_FAILED`
+- Opportunity remains `IMPLEMENTED`
+- Zero provider replay, zero new AI Checks, zero new UsageEvents
+- PENDING partial-unique slot released for a new attempt
+
+**PARTIAL recovery** (some runs already succeeded durably):
+
+- Unresolved runs → `FAILED`, successful runs unchanged
+- Scan → `PARTIAL`
+- Deterministic analysis + evaluation run locally using only the
+  persisted successful observations
+- Outcome may be `INCONCLUSIVE`, `IMPROVED`, `NOT_IMPROVED`,
+  `REGRESSED`, or `RESOLVED` per existing methodology
+- Low-coverage recovered scans naturally become `INCONCLUSIVE` /
+  `INSUFFICIENT_COVERAGE`
+- Zero provider replay, zero new UsageEvents
+
+**Analysis failure during recovery**: reuses Phase 10.3
+durable-analysis reconciliation — verification terminalized as
+`INCONCLUSIVE` / `ANALYSIS_NOT_COMPLETED`.
+
+**Ephemeral evaluation error during recovery**: if analysis `COMPLETED`
+but evaluation raises a transient error, the verification may remain
+`PENDING` for manual retry — same rule as the normal production path.
+
+**Idempotency**: recovering the same stale scan twice produces the same
+terminal outcome. No duplicate analysis, no duplicate verification, no
+provider calls.
+
+**Retry after recovered FAILED**: a new verification with a different
+idempotency key is allowed — the previous `INCONCLUSIVE` slot does not
+block it.

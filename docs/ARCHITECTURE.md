@@ -69,7 +69,7 @@ single responsibility boundary consumed by routers and other services.
 | `ScanCreationService` | STANDARD preflight, immutable plan creation, full quota reservation, dispatch |
 | `ScanExecutionService` | Duplicate-safe row claims and bounded no-retry PromptRun execution; extended for CONFIDENCE round-by-round execution (Phase 8) |
 | `PromptRunResultRecorder` | Atomic evidence, source, cost, UsageEvent, and one-check commit |
-| `ScanFinalizationService` / `ScanRecoveryService` | Atomic terminal classification + unused quota release (single commit), idempotent reconciliation, run-count invariant, stale PENDING/RUNNING recovery without provider replay |
+| `ScanFinalizationService` / `ScanRecoveryService` | Atomic terminal classification + unused quota release (single commit), idempotent reconciliation, run-count invariant, stale PENDING/RUNNING recovery without provider replay; VERIFICATION lifecycle reconciliation after recovery (Phase 10.4) |
 | `ConfidenceScanCreationService` | Clones a baseline STANDARD scan's methodology to create a CONFIDENCE scan with repeated observations (Phase 8) |
 | `ConfidenceMetricsService` | Computes reliability metrics (measurement coverage, mention stability, confidence level) from repeated CONFIDENCE observations (Phase 8) |
 | `CompetitorExplanationService` | Computes evidence-based brand vs competitor explanations from persisted Scan analysis evidence (Phase 9); extended for VERIFICATION scans in Phase 10 |
@@ -188,7 +188,11 @@ exclude failed runs from metric denominators.
 
 Stale recovery marks unresolved work failed and releases unused reservation; it
 never repeats provider requests, absorbing worker-loss ambiguity as GEO cost.
-Customer Scan APIs expose evidence but deliberately hide internal cost fields.
+For VERIFICATION scans, recovery also reconciles the verification lifecycle
+(Phase 10.4): FAILED scans terminalize the OpportunityVerification as
+INCONCLUSIVE, PARTIAL scans run deterministic analysis + evaluation on the
+persisted successful evidence. Customer Scan APIs expose evidence but
+deliberately hide internal cost fields.
 See `docs/SCAN_ENGINE.md` and `docs/COST_ACCOUNTING.md`.
 
 ## Phase 7: Deterministic visibility analysis

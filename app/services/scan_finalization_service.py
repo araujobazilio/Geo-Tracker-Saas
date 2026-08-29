@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.core.enums import QuotaReservationStatus, ScanStatus, VerificationOutcome
+from app.core.enums import QuotaReservationStatus, ScanStatus, ScanType, VerificationOutcome
 from app.core.exceptions import ConflictError, InfrastructureError
 from app.core.logging import get_logger
 from app.models.project import Project
@@ -148,6 +148,29 @@ class ScanFinalizationService:
             entity_type="scan",
             entity_id=scan_id,
         )
+
+    def reconcile_verification_lifecycle(self, scan_id: uuid.UUID) -> None:
+        """Public entry point for post-finalization verification lifecycle.
+
+        Used by ``ScanRecoveryService`` after recovering a stale
+        VERIFICATION scan with ``trigger_analysis=False``. This method
+        ensures the ``OpportunityVerification`` is not left stranded
+        PENDING after the scan reaches a terminal state via recovery.
+
+        Loads the scan, and if it is a terminal VERIFICATION scan,
+        delegates to the centralized ``_post_finalize_verification_lifecycle``
+        helper. For non-VERIFICATION scans or non-terminal scans, this
+        is a no-op.
+
+        Never replays providers. Never creates new UsageEvents.
+        Idempotent: safe to call multiple times.
+        """
+        scan = self._session.get(Scan, scan_id)
+        if scan is None:
+            return
+        if scan.status not in _TERMINAL_STATUSES:
+            return
+        self._post_finalize_verification_lifecycle(scan_id, scan.status)
 
     def _post_finalize_verification_lifecycle(
         self, scan_id: uuid.UUID, scan_status: ScanStatus
@@ -455,12 +478,17 @@ class ScanRecoveryService:
         *,
         settings: Settings | None = None,
         audit_service: AuditService | None = None,
+        analysis_session_factory: Callable[[], AbstractContextManager[Session]] | None = None,
     ) -> None:
         self._session = session
         self._settings = settings or get_settings()
         self._scans = ScanRepository(session)
         self._runs = PromptRunRepository(session)
-        self._finalizer = ScanFinalizationService(session, audit_service)
+        self._finalizer = ScanFinalizationService(
+            session,
+            audit_service,
+            analysis_session_factory=analysis_session_factory,
+        )
 
     def recover_stale_scans(self, now: datetime | None = None) -> int:
         current = now or datetime.now(UTC)
@@ -498,7 +526,14 @@ class ScanRecoveryService:
             error_message="Worker stopped before evidence was durably recorded.",
         )
         self._session.commit()
-        # Phase 10.3: finalize() now centralizes all post-finalization
-        # verification lifecycle, including FAILED scan terminalization.
+        # Finalize the scan with trigger_analysis=False to preserve the
+        # historical recovery behavior for STANDARD/CONFIDENCE scans.
         self._finalizer.finalize(scan.id, trigger_analysis=False)
+        # Phase 10.4: For VERIFICATION scans, explicitly reconcile the
+        # verification lifecycle so the OpportunityVerification is not
+        # left stranded PENDING after recovery. This runs analysis +
+        # evaluation for PARTIAL scans, and terminalizes FAILED scans.
+        # Zero provider replay, zero new UsageEvents.
+        if scan.scan_type == ScanType.VERIFICATION:
+            self._finalizer.reconcile_verification_lifecycle(scan.id)
         return True
