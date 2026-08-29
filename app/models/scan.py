@@ -101,6 +101,13 @@ class Scan(UUIDPrimaryKey, TimestampMixin, Base):
         nullable=True,
         index=True,
     )
+    scan_schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUIDType,
+        ForeignKey("project_scan_schedules.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped[Project] = relationship()
     prompt_set: Mapped[PromptSet] = relationship()

@@ -404,6 +404,33 @@ on the workspace's effective plan. A workspace without this
 entitlement cannot create verification scans; the creation endpoint
 returns a 403/entitlement error before any quota is reserved.
 
+## Scheduled scans (Phase 11)
+
+Scheduled scans consume AI Checks exactly like manual STANDARD scans —
+one check per scheduled scan execution. The scheduler creates a STANDARD
+scan via `ScanCreationService`, so the normal quota reservation and
+usage accounting applies.
+
+### Entitlement requirement
+
+Scheduled scans require the `min_scheduled_scan_interval_hours`
+entitlement on the workspace's effective plan:
+
+- `NULL` = scheduled scans unavailable on this plan.
+- Positive integer = minimum permitted `interval_hours`.
+
+The entitlement is rechecked at **execution time** (not just at schedule
+creation). If the plan changes or the workspace is downgraded, the
+scheduler skips the due schedule with `SKIPPED_ENTITLEMENT` outcome
+and advances `next_run_at` — no catch-up storm.
+
+### Quota exhaustion
+
+If the workspace has insufficient AI Checks quota when a scheduled scan
+is due, the scheduler skips with `SKIPPED_QUOTA` outcome and advances
+`next_run_at`. The scan is NOT retried — the next scheduled slot will
+attempt again.
+
 ## API endpoints
 
 | Method | Path | Description |

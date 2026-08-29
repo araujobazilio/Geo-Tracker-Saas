@@ -284,3 +284,50 @@ class VerificationReasonCode(str, Enum):
     INSUFFICIENT_CITATION_EVIDENCE = "INSUFFICIENT_CITATION_EVIDENCE"
     BASELINE_EVIDENCE_UNAVAILABLE = "BASELINE_EVIDENCE_UNAVAILABLE"
     VERIFICATION_SCAN_FAILED = "VERIFICATION_SCAN_FAILED"
+
+
+class ScheduledScanOutcome(str, Enum):
+    """Bounded outcome of one scheduler evaluation for a due schedule.
+
+    These describe one scheduler decision, NOT the ScanStatus of the
+    resulting scan.
+    """
+
+    TRIGGERED = "TRIGGERED"
+    SKIPPED_ENTITLEMENT = "SKIPPED_ENTITLEMENT"
+    SKIPPED_PROJECT_INACTIVE = "SKIPPED_PROJECT_INACTIVE"
+    SKIPPED_ACTIVE_SCAN = "SKIPPED_ACTIVE_SCAN"
+    SKIPPED_NOT_READY = "SKIPPED_NOT_READY"
+    SKIPPED_QUOTA = "SKIPPED_QUOTA"
+    DISPATCH_FAILED = "DISPATCH_FAILED"
+
+
+class NotificationType(str, Enum):
+    """Bounded set of product/operational notification types.
+
+    No marketing email types in Phase 11.
+    """
+
+    SCHEDULED_SCAN_COMPLETED = "SCHEDULED_SCAN_COMPLETED"
+    SCHEDULED_SCAN_PARTIAL = "SCHEDULED_SCAN_PARTIAL"
+    SCHEDULED_SCAN_FAILED = "SCHEDULED_SCAN_FAILED"
+    NEW_HIGH_PRIORITY_OPPORTUNITY = "NEW_HIGH_PRIORITY_OPPORTUNITY"
+    VERIFICATION_RESOLVED = "VERIFICATION_RESOLVED"
+    VERIFICATION_IMPROVED = "VERIFICATION_IMPROVED"
+    VERIFICATION_REGRESSED = "VERIFICATION_REGRESSED"
+    VERIFICATION_INCONCLUSIVE = "VERIFICATION_INCONCLUSIVE"
+
+
+class EmailDeliveryStatus(str, Enum):
+    """Lifecycle states for an EmailDelivery outbox row.
+
+    PENDING: created, not yet sent.
+    SENDING: claimed by a worker, in progress.
+    SENT: successfully delivered.
+    FAILED: terminal failure; manual retry may reset to PENDING.
+    """
+
+    PENDING = "PENDING"
+    SENDING = "SENDING"
+    SENT = "SENT"
+    FAILED = "FAILED"

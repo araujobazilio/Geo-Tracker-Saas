@@ -118,6 +118,22 @@ class Settings(BaseSettings):
     # --- Dev only ---
     dev_seed_enabled: bool = False
 
+    # --- Scheduler (Phase 11) ---
+    scheduler_sweep_interval_seconds: int = 60
+
+    # --- Email / SMTP (Phase 11) ---
+    email_enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: SecretStr = SecretStr("")
+    smtp_use_tls: bool = True
+    email_from_address: str = "noreply@geo-tracker.local"
+    email_from_name: str = "GEO Tracker"
+    app_public_base_url: str = "http://localhost:18000"
+    email_stale_sending_threshold_seconds: int = 300
+    email_outbox_sweep_interval_seconds: int = 60
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _normalize_log_level(cls, v: str) -> str:
@@ -148,6 +164,10 @@ class Settings(BaseSettings):
         "scan_stale_after_seconds",
         "confidence_scan_default_repeats",
         "confidence_scan_max_repeats",
+        "scheduler_sweep_interval_seconds",
+        "smtp_port",
+        "email_stale_sending_threshold_seconds",
+        "email_outbox_sweep_interval_seconds",
     )
     @classmethod
     def _validate_positive_integer_setting(cls, v: int) -> int:

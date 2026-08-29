@@ -490,6 +490,65 @@ human-readable in development. Logs never contain secrets.
 
 These endpoints live outside `/api/v1` versioning.
 
+## Phase 11: Scheduled Scans, Notifications, and Email Delivery
+
+Phase 11 introduces **Scheduled Scans** (recurring automatic STANDARD scans),
+**Notifications** (deduplicated user alerts), and **Email Delivery** (SMTP
+outbox pattern). All three features are PostgreSQL-authoritative with Celery
+as transport only.
+
+### Scheduled Scans
+
+- `ProjectScanSchedule` model: per-project schedule with `interval_hours`,
+  `next_run_at`, `enabled`, `last_outcome`.
+- `ScheduledScanService`: claims due schedules with `FOR UPDATE SKIP LOCKED`,
+  rechecks entitlement at execution time, creates STANDARD scans via
+  `ScanCreationService` (no engine duplication), advances `next_run_at` to
+  prevent catch-up storms.
+- `Scan.scan_schedule_id` and `Scan.scheduled_for` columns provide lineage.
+- Celery Beat task `schedule.dispatch_due` sweeps every 60 seconds.
+- Entitlement gate: `PlanDefinition.min_scheduled_scan_interval_hours`.
+- Automatic Action Center refresh after scheduled scan analysis completion
+  via `ScheduledScanNotificationService` (zero AI Checks, best-effort).
+
+### Notifications
+
+- `Notification` model: deduplicated by `dedup_key` (unique per workspace).
+- `NotificationPreference` model: per-user toggle for each notification type.
+- `NotificationService`: dedup, preference filtering, outbox creation.
+- Integration points: `ScanFinalizationService`, `VerificationEvaluationService`,
+  `ScheduledScanNotificationService`.
+- API endpoints: list, unread count, mark-read, preferences.
+
+### Email Delivery
+
+- `EmailDelivery` model: outbox with `PENDING` → `SENT` / `FAILED` lifecycle.
+- `EmailTransport` protocol with `SMTPEmailTransport` and `MemoryEmailTransport`.
+- `email_templates.py`: plain Python functions returning `(subject, html, text)`.
+- Celery task `notification.dispatch_outbox` processes pending emails every
+  30 seconds.
+- Configuration: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USE_TLS`, `EMAIL_ENABLED`.
+
+### Key files
+
+| File | Purpose |
+|------|---------|
+| `app/models/project_scan_schedule.py` | Schedule model |
+| `app/models/notification.py` | Notification + NotificationPreference models |
+| `app/models/email_delivery.py` | Email outbox model |
+| `app/services/scheduled_scan_service.py` | Claim, evaluate, advance schedules |
+| `app/services/scheduled_scan_notification_service.py` | Post-scan notification + Action Center refresh |
+| `app/services/notification_service.py` | Dedup, preferences, outbox dispatch |
+| `app/services/email_transport.py` | SMTP + memory transports |
+| `app/services/email_templates.py` | Email template functions |
+| `app/workers/schedule_tasks.py` | Celery Beat sweep task |
+| `app/workers/notification_tasks.py` | Celery outbox dispatch task |
+| `app/routers/api/schedule.py` | Schedule API endpoints |
+| `app/routers/api/notifications.py` | Notification API endpoints |
+
+See `docs/SCHEDULED_SCANS.md`, `docs/NOTIFICATIONS.md`, and
+`docs/EMAIL_DELIVERY.md` for details.
+
 ## API versioning
 
 Application APIs are namespaced under `/api/v1/` (added in later phases).
@@ -510,7 +569,7 @@ Infrastructure endpoints (`/health`, `/ready`) are unversioned.
 | Confidence Scans | IMPLEMENTED (Phase 8) |
 | Action Center | IMPLEMENTED (Phase 9) |
 | Verification system | IMPLEMENTED (Phase 10 + 10.1) |
-| Scheduling / email reports | PLANNED (Phase 11) |
+| Scheduled scans / notifications / email | IMPLEMENTED (Phase 11) |
 | Dashboard / UI | PLANNED (Phase 12) |
 | Agency dashboard / white-label | PLANNED (Phase 13) |
 | AppSumo licensing | PLANNED (Phase 14) |

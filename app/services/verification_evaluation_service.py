@@ -71,6 +71,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import (
     LLMProvider,
+    NotificationType,
     OpportunityType,
     PromptType,
     ProviderExecutionMode,
@@ -368,6 +369,7 @@ class VerificationEvaluationService:
             )
 
         self._session.commit()
+        self._maybe_generate_verification_notification(verification, outcome, message)
         return VerificationEvaluationResult(
             verification_id=verification.id,
             opportunity_id=verification.opportunity_id,
@@ -392,6 +394,65 @@ class VerificationEvaluationService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _maybe_generate_verification_notification(
+        self,
+        verification: OpportunityVerification,
+        outcome: VerificationOutcome,
+        message: str,
+    ) -> None:
+        """Generate a verification outcome notification (best-effort).
+
+        Does NOT send email while outcome=PENDING. Notification is
+        deduplicated per (user_id, dedup_key). No-causation language is
+        preserved in the notification copy.
+        """
+        if outcome == VerificationOutcome.PENDING:
+            return
+
+        try:
+            from app.services.notification_service import (
+                NotificationInput,
+                NotificationService,
+            )
+
+            type_map = {
+                VerificationOutcome.RESOLVED: NotificationType.VERIFICATION_RESOLVED,
+                VerificationOutcome.IMPROVED: NotificationType.VERIFICATION_IMPROVED,
+                VerificationOutcome.REGRESSED: NotificationType.VERIFICATION_REGRESSED,
+                VerificationOutcome.INCONCLUSIVE: NotificationType.VERIFICATION_INCONCLUSIVE,
+            }
+            ntype = type_map.get(outcome)
+            if ntype is None:
+                return  # NOT_IMPROVED — in-app only, not emailed.
+
+            dedup_key = f"verification:{verification.id}:outcome:{outcome.value}"
+            deep_link = (
+                f"/projects/{verification.project_id}/opportunities/{verification.opportunity_id}"
+            )
+
+            service = NotificationService(self._session)
+            recipients = service.list_active_recipients(verification.workspace_id)
+            for _member, user in recipients:
+                inp = NotificationInput(
+                    workspace_id=verification.workspace_id,
+                    user_id=user.id,
+                    notification_type=ntype,
+                    title=f"Verification {outcome.value.lower()}",
+                    message=message,
+                    dedup_key=dedup_key,
+                    project_id=verification.project_id,
+                    opportunity_id=verification.opportunity_id,
+                    verification_id=verification.id,
+                    deep_link_path=deep_link,
+                )
+                try:
+                    service.create_notification(inp)
+                    self._session.commit()
+                except Exception:
+                    self._session.rollback()
+        except Exception:
+            pass  # Best-effort — do not break evaluation.
 
     def _load_verification_for_update(self, verification_id: uuid.UUID) -> OpportunityVerification:
         verification = self._session.execute(
@@ -744,6 +805,9 @@ class VerificationEvaluationService:
         if baseline_coverage is not None:
             verification.baseline_coverage = baseline_coverage
         self._session.commit()
+        self._maybe_generate_verification_notification(
+            verification, VerificationOutcome.INCONCLUSIVE, message
+        )
         return VerificationEvaluationResult(
             verification_id=verification.id,
             opportunity_id=verification.opportunity_id,

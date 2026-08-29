@@ -64,6 +64,7 @@ class ScanFinalizationService:
                 self._session.commit()
                 if trigger_analysis:
                     self._post_finalize_verification_lifecycle(scan_id, scan.status)
+                self._maybe_generate_scheduled_scan_notifications(scan_id)
                 return scan.status
 
             succeeded, failed, unresolved = self._runs.terminal_counts(scan.id)
@@ -104,6 +105,7 @@ class ScanFinalizationService:
             self._record_audit(scan.id, workspace_id, status)
             if trigger_analysis:
                 self._post_finalize_verification_lifecycle(scan_id, status)
+            self._maybe_generate_scheduled_scan_notifications(scan_id)
             return status
         except Exception:
             self._session.rollback()
@@ -148,6 +150,27 @@ class ScanFinalizationService:
             entity_type="scan",
             entity_id=scan_id,
         )
+
+    def _maybe_generate_scheduled_scan_notifications(self, scan_id: uuid.UUID) -> None:
+        """Generate notifications for scheduled scans after finalization.
+
+        This is a best-effort hook. Failures in notification generation
+        do NOT rollback the scan or analysis. The notification service
+        is idempotent (deduplicated).
+        """
+        try:
+            from app.services.scheduled_scan_notification_service import (
+                ScheduledScanNotificationService,
+            )
+
+            service = ScheduledScanNotificationService(self._session)
+            service.handle_scheduled_scan_terminal(scan_id)
+        except Exception as exc:
+            logger.warning(
+                "scheduled_scan_notification_failed",
+                scan_id=str(scan_id),
+                error=str(exc),
+            )
 
     def reconcile_verification_lifecycle(self, scan_id: uuid.UUID) -> None:
         """Public entry point for post-finalization verification lifecycle.

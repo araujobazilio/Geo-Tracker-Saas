@@ -99,6 +99,9 @@ class ScanCreationService:
         scan_type: ScanType,
         requested_by_user_id: uuid.UUID | None,
         idempotency_key: str,
+        *,
+        scan_schedule_id: uuid.UUID | None = None,
+        scheduled_for: datetime | None = None,
     ) -> ScanCreationResult:
         key = self.normalize_idempotency_key(idempotency_key)
         project = self._projects.get_in_workspace_for_update(project_id, workspace_id)
@@ -128,6 +131,8 @@ class ScanCreationService:
                 successful_runs=0,
                 failed_runs=0,
                 repeat_count=1,
+                scan_schedule_id=scan_schedule_id,
+                scheduled_for=scheduled_for,
             )
             self._scans.create(scan)
             planned_runs = [

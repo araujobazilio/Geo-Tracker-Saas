@@ -14,6 +14,8 @@ from app.models.analysis import (
 )
 from app.models.audit import AuditLog
 from app.models.billing import AppSumoLicense, BillingAccount
+from app.models.email_delivery import EmailDelivery
+from app.models.notification import Notification, NotificationPreference
 from app.models.opportunity import (
     Opportunity,
     OpportunityEvidence,
@@ -24,6 +26,7 @@ from app.models.plan_definition import PlanDefinition
 from app.models.plan_provider import PlanProvider
 from app.models.pricing import ProviderPriceRule
 from app.models.project import Project
+from app.models.project_scan_schedule import ProjectScanSchedule
 from app.models.prompt_set import PromptSet
 from app.models.quota_reservation import QuotaReservation
 from app.models.scan import PromptRun, ResponseSource, Scan
@@ -39,7 +42,10 @@ __all__ = [
     "AuditLog",
     "BillingAccount",
     "Competitor",
+    "EmailDelivery",
     "EntityMention",
+    "Notification",
+    "NotificationPreference",
     "Opportunity",
     "OpportunityEvidence",
     "OpportunityOccurrence",
@@ -49,6 +55,7 @@ __all__ = [
     "Project",
     "ProjectKeyword",
     "ProjectProvider",
+    "ProjectScanSchedule",
     "Prompt",
     "PromptRun",
     "PromptSet",
