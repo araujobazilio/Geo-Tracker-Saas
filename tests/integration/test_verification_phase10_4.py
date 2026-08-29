@@ -1368,15 +1368,15 @@ def test_concurrency_regression_with_economics(engine_factory) -> None:  # type:
     t1.join(timeout=60)
     t2.join(timeout=60)
 
-    assert results["success"] == 1, (
-        f"Expected 1 success, got {results['success']}: {results['errors']}"
-    )
-    assert results["conflict"] == 1, (
-        f"Expected 1 ConflictError, got {results['conflict']}: {results['errors']}"
-    )
-    assert all("IntegrityError" not in e for e in results["errors"]), (
-        f"Raw IntegrityError leaked: {results['errors']}"
-    )
+    assert (
+        results["success"] == 1
+    ), f"Expected 1 success, got {results['success']}: {results['errors']}"
+    assert (
+        results["conflict"] == 1
+    ), f"Expected 1 ConflictError, got {results['conflict']}: {results['errors']}"
+    assert all(
+        "IntegrityError" not in e for e in results["errors"]
+    ), f"Raw IntegrityError leaked: {results['errors']}"
 
     # Verify exactly 1 VERIFICATION Scan exists for the cycle.
     verify_session = factory()
@@ -1406,9 +1406,9 @@ def test_concurrency_regression_with_economics(engine_factory) -> None:  # type:
         assert len(pending) == 1, f"Expected 1 PENDING, got {len(pending)}"
 
         # Exactly 1 logical dispatch.
-        assert recording_dispatcher.dispatch_count == 1, (
-            f"Expected 1 dispatch, got {recording_dispatcher.dispatch_count}"
-        )
+        assert (
+            recording_dispatcher.dispatch_count == 1
+        ), f"Expected 1 dispatch, got {recording_dispatcher.dispatch_count}"
     finally:
         verify_session.close()
 
