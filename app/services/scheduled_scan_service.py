@@ -1,28 +1,40 @@
 """Scheduled scan service — claims due schedules and triggers STANDARD scans.
 
 Responsibilities:
-- List/claim due schedules using FOR UPDATE SKIP LOCKED.
+- List due schedules (no FOR UPDATE during scan creation).
+- Acquire a PostgreSQL advisory lock per schedule for worker ownership.
 - Recheck current entitlement at execution time.
 - Validate Project is active and ready.
 - Detect conflicting active scheduled work.
-- Create STANDARD Scan via ScanCreationService (no engine duplication).
+- Create STANDARD Scan via ScanCreationService (independent session).
 - Record scheduler outcome and advance next_run_at.
 - Preserve idempotency: deterministic slot identity.
 
 PostgreSQL remains authoritative. Redis/Celery is transport only.
 No catch-up storm: at most ONE due slot per scheduler evaluation.
 
-Concurrency architecture (Phase 11.1):
-- The scheduler session (Session A) holds the FOR UPDATE lock on the
-  ProjectScanSchedule row for the entire evaluation.
-- Scan creation runs in an INDEPENDENT session (Session B) via
-  scan_creation_session_factory. Session B may commit freely without
-  releasing the schedule row lock.
-- After scan creation returns, Session A updates last_outcome /
-  next_run_at and commits — only then is the row lock released.
-- process_due_schedules processes ONE schedule at a time: BEGIN ->
-  claim ONE -> evaluate -> commit -> repeat. This avoids holding a batch
-  of 50 locked rows whose locks are released by the first commit.
+Concurrency architecture (Phase 11.2):
+- Scheduler workers list due schedules WITHOUT FOR UPDATE.
+- Worker ownership is established via pg_try_advisory_xact_lock keyed
+  deterministically from ProjectScanSchedule.id. Two workers cannot
+  acquire the same advisory lock for the same schedule.
+- After acquiring the advisory lock, the worker RE-READS the schedule
+  to confirm it is still due (enabled, next_run_at <= now). This handles
+  the race where another worker already processed it.
+- Scan creation runs in an INDEPENDENT session (Session B). Session A
+  does NOT hold FOR UPDATE on the ProjectScanSchedule row during scan
+  creation, so PostgreSQL FK validation (Scan.scan_schedule_id ->
+  project_scan_schedules.id) cannot self-block.
+- After scan creation, Session A briefly locks the schedule row FOR
+  UPDATE to update last_outcome / next_run_at, then commits. The
+  advisory lock is released with the transaction.
+
+Crash recovery:
+- If the worker crashes after Scan creation but before advancing
+  next_run_at, the next sweep finds the same due slot. The deterministic
+  idempotency key (scheduled:{schedule_id}:{scheduled_for_iso}) causes
+  ScanCreationService to find the existing Scan — no duplicate scan,
+  no duplicate quota reservation, no duplicate dispatch.
 """
 
 from __future__ import annotations
@@ -33,7 +45,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.enums import (
@@ -66,6 +78,15 @@ class SchedulerEvaluationResult:
     skip_reason: str | None = None
 
 
+def _advisory_lock_key(schedule_id: uuid.UUID) -> int:
+    """Deterministic 64-bit advisory lock key from schedule UUID.
+
+    Uses the first 8 bytes of the UUID (big-endian, signed) to produce
+    a stable int64. This avoids Python's process-randomized hash().
+    """
+    return int.from_bytes(schedule_id.bytes[:8], byteorder="big", signed=True)
+
+
 class ScheduledScanService:
     """Claim due schedules and trigger STANDARD scans.
 
@@ -90,6 +111,10 @@ class ScheduledScanService:
         self._scans = ScanRepository(session)
         self._projects = ProjectRepository(session)
 
+    # ------------------------------------------------------------------
+    # Orchestration: process_due_schedules
+    # ------------------------------------------------------------------
+
     def process_due_schedules(
         self,
         now: datetime | None = None,
@@ -99,11 +124,12 @@ class ScheduledScanService:
         """Process due schedules ONE AT A TIME.
 
         For each due schedule:
-        1. BEGIN (outer transaction already active).
-        2. Claim ONE due schedule with FOR UPDATE SKIP LOCKED.
-        3. Evaluate that due slot (scan creation uses independent session).
-        4. Commit schedule decision (releases row lock).
-        5. Repeat up to limit times.
+        1. List due schedules (no FOR UPDATE).
+        2. Try pg_try_advisory_xact_lock(schedule_id).
+        3. Re-read schedule to confirm still due.
+        4. Evaluate that due slot (scan creation uses independent session).
+        5. Commit schedule decision (releases advisory lock).
+        6. Repeat up to limit times.
 
         Returns a dict of outcome -> count.
         """
@@ -111,42 +137,68 @@ class ScheduledScanService:
             now = datetime.now(UTC)
 
         results: dict[str, int] = {}
+        processed_ids: set[uuid.UUID] = set()
+
         for _ in range(limit):
-            schedule = self._claim_one_due_schedule(now)
+            schedule = self._find_next_due_schedule(now, exclude_ids=processed_ids)
             if schedule is None:
                 break
 
-            result = self.evaluate_due_schedule(schedule, now=now)
+            # Try to acquire advisory lock for this schedule.
+            if not self._try_advisory_lock(schedule.id):
+                # Another worker owns this schedule — skip.
+                processed_ids.add(schedule.id)
+                continue
+
+            # Re-read schedule after acquiring lock to confirm still due.
+            refreshed = self._session.get(ProjectScanSchedule, schedule.id)
+            if refreshed is None or not refreshed.enabled or refreshed.next_run_at > now:
+                # Schedule was changed or processed by another worker.
+                processed_ids.add(schedule.id)
+                continue
+
+            result = self.evaluate_due_schedule(refreshed, now=now)
             outcome = result.outcome.value
             results[outcome] = results.get(outcome, 0) + 1
+            processed_ids.add(schedule.id)
 
         return results
 
-    def _claim_one_due_schedule(self, now: datetime) -> ProjectScanSchedule | None:
-        """Claim a single due schedule with FOR UPDATE SKIP LOCKED."""
-        rows = (
-            self._session.execute(
-                select(ProjectScanSchedule)
-                .where(
-                    ProjectScanSchedule.enabled.is_(True),
-                    ProjectScanSchedule.next_run_at <= now,
-                )
-                .order_by(ProjectScanSchedule.next_run_at)
-                .limit(1)
-                .with_for_update(skip_locked=True)
-            )
-            .scalars()
-            .all()
+    def _find_next_due_schedule(
+        self, now: datetime, *, exclude_ids: set[uuid.UUID] | None = None
+    ) -> ProjectScanSchedule | None:
+        """Find the next due schedule WITHOUT locking."""
+        stmt = select(ProjectScanSchedule).where(
+            ProjectScanSchedule.enabled.is_(True),
+            ProjectScanSchedule.next_run_at <= now,
         )
-        return rows[0] if rows else None
+        if exclude_ids:
+            stmt = stmt.where(ProjectScanSchedule.id.not_in(exclude_ids))
+        stmt = stmt.order_by(ProjectScanSchedule.next_run_at).limit(1)
+        return self._session.execute(stmt).scalars().first()
+
+    def _try_advisory_lock(self, schedule_id: uuid.UUID) -> bool:
+        """Try to acquire a transaction-scoped advisory lock.
+
+        Uses pg_try_advisory_xact_lock which is released when the
+        current transaction commits or rolls back.
+        """
+        key = _advisory_lock_key(schedule_id)
+        result = self._session.execute(select(func.pg_try_advisory_xact_lock(key))).scalar()
+        return bool(result)
+
+    # ------------------------------------------------------------------
+    # Claim (for backward compat / testing)
+    # ------------------------------------------------------------------
 
     def claim_due_schedules(
         self, now: datetime | None = None, *, limit: int = 50, skip_locked: bool = True
     ) -> list[ProjectScanSchedule]:
         """Claim due schedules using FOR UPDATE SKIP LOCKED.
 
-        Prefer process_due_schedules for production use. This method is
-        kept for testing and backward compatibility.
+        .. deprecated::
+            Prefer ``process_due_schedules`` for production use. This
+            method is kept for testing and backward compatibility.
         """
         if now is None:
             now = datetime.now(UTC)
@@ -167,6 +219,10 @@ class ScheduledScanService:
         )
         return list(rows)
 
+    # ------------------------------------------------------------------
+    # Evaluate one due schedule
+    # ------------------------------------------------------------------
+
     def evaluate_due_schedule(
         self, schedule: ProjectScanSchedule, *, now: datetime | None = None
     ) -> SchedulerEvaluationResult:
@@ -176,9 +232,9 @@ class ScheduledScanService:
         advanced to the first future interval boundary regardless of
         outcome (no catch-up storm).
 
-        The schedule row lock (held on self._session) is preserved
-        throughout. Scan creation runs in an INDEPENDENT session so its
-        commits do not release the schedule lock.
+        The advisory lock is held on self._session throughout. Scan
+        creation runs in an INDEPENDENT session so its commits do not
+        conflict. No FOR UPDATE row lock is held during scan creation.
         """
         if now is None:
             now = datetime.now(UTC)
@@ -227,8 +283,10 @@ class ScheduledScanService:
             )
 
         # 4. Create STANDARD scan via ScanCreationService.
-        # Use an INDEPENDENT session so ScanCreationService commits do
-        # NOT release the schedule row lock held on self._session.
+        # NO FOR UPDATE row lock is held on the schedule during this
+        # insertion. The advisory lock provides worker ownership.
+        # Scan creation runs in an INDEPENDENT session so its commits
+        # do not release the advisory lock or conflict with FK validation.
         schedule_id = schedule.id
         workspace_id = schedule.workspace_id
         project_id = schedule.project_id
@@ -279,20 +337,67 @@ class ScheduledScanService:
                 now,
             )
 
-        # 5. Record success — schedule row lock is still held.
-        schedule.last_triggered_at = now
-        schedule.last_scan_id = result.scan.id
-        schedule.last_outcome = ScheduledScanOutcome.TRIGGERED
-        schedule.last_skip_reason = None
-        self._advance_next_run(schedule, now)
-        self._session.commit()
+        # 5. Recheck schedule state before final update.
+        # The user may have changed the schedule while the due slot was
+        # being processed. We briefly lock FOR UPDATE here (AFTER scan
+        # creation) to safely update schedule state.
+        # If the user changed next_run_at or disabled the schedule,
+        # we preserve the user's explicit configuration and only record
+        # lineage/outcome.
+        refreshed = self._reload_schedule_for_update(schedule_id)
+        if refreshed is None:
+            # Schedule was deleted while we were creating the scan.
+            # The scan still exists (committed in Session B) — log and
+            # return success without advancing next_run_at.
+            logger.warning(
+                "schedule_deleted_during_evaluation",
+                schedule_id=str(schedule_id),
+                scan_id=str(result.scan.id),
+            )
+            return SchedulerEvaluationResult(
+                schedule_id=schedule_id,
+                outcome=ScheduledScanOutcome.TRIGGERED,
+                scan_id=result.scan.id,
+            )
 
-        self._record_audit("SCHEDULE_SCAN_TRIGGERED", schedule)
+        # Record success on the refreshed row.
+        refreshed.last_triggered_at = now
+        refreshed.last_scan_id = result.scan.id
+        refreshed.last_outcome = ScheduledScanOutcome.TRIGGERED
+        refreshed.last_skip_reason = None
+
+        # Advance next_run_at ONLY if the user hasn't changed it.
+        # If the user explicitly set a new next_run_at (e.g. via
+        # create_or_update_schedule with first_run_at), we preserve it.
+        # Heuristic: if next_run_at is still the original scheduled_for,
+        # it hasn't been changed by the user.
+        if refreshed.next_run_at == scheduled_for:
+            self._advance_next_run(refreshed, now)
+        # else: user changed next_run_at — preserve their value.
+
+        self._session.commit()
+        self._record_audit("SCHEDULE_SCAN_TRIGGERED", refreshed)
 
         return SchedulerEvaluationResult(
-            schedule_id=schedule.id,
+            schedule_id=refreshed.id,
             outcome=ScheduledScanOutcome.TRIGGERED,
             scan_id=result.scan.id,
+        )
+
+    def _reload_schedule_for_update(self, schedule_id: uuid.UUID) -> ProjectScanSchedule | None:
+        """Reload the schedule row with FOR UPDATE for final state update.
+
+        This lock is held ONLY for the brief final update, NOT during
+        scan creation. This avoids the FK self-block issue.
+        """
+        return (
+            self._session.execute(
+                select(ProjectScanSchedule)
+                .where(ProjectScanSchedule.id == schedule_id)
+                .with_for_update()
+            )
+            .scalars()
+            .first()
         )
 
     def _create_scan_in_independent_session(
@@ -419,6 +524,10 @@ class ScheduledScanService:
             entity_type="schedule",
             entity_id=schedule.id,
         )
+
+    # ------------------------------------------------------------------
+    # Schedule CRUD — tenant-scoped
+    # ------------------------------------------------------------------
 
     def create_or_update_schedule(
         self,

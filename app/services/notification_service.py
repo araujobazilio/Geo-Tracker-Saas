@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.enums import (
@@ -71,7 +70,13 @@ class NotificationService:
     def get_or_create_preference(
         self, workspace_id: uuid.UUID, user_id: uuid.UUID
     ) -> NotificationPreference:
-        """Get or create default preferences for a user in a workspace."""
+        """Get or create default preferences for a user in a workspace.
+
+        Uses ON CONFLICT DO NOTHING to handle concurrent creation races
+        without leaking IntegrityError. If two concurrent notifications
+        for the same user trigger preference creation simultaneously,
+        only one row is created and both callers get a usable preference.
+        """
         pref = (
             self._session.execute(
                 select(NotificationPreference).where(
@@ -86,16 +91,41 @@ class NotificationService:
         if pref is not None:
             return pref
 
-        pref = NotificationPreference(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            email_enabled=True,
-            scheduled_scan_summary=True,
-            high_priority_opportunities=True,
-            verification_outcomes=True,
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(NotificationPreference)
+            .values(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                email_enabled=True,
+                scheduled_scan_summary=True,
+                high_priority_opportunities=True,
+                verification_outcomes=True,
+            )
+            .on_conflict_do_nothing(constraint="uq_notification_preferences_workspace_user")
+            .returning(NotificationPreference.id)
         )
-        self._session.add(pref)
-        self._session.flush()
+        result = self._session.execute(stmt)
+        row = result.first()
+
+        if row is not None:
+            # We created it.
+            return self._session.get(NotificationPreference, row.id)  # type: ignore[return-value]
+
+        # Concurrent insert won — reload.
+        pref = (
+            self._session.execute(
+                select(NotificationPreference).where(
+                    NotificationPreference.workspace_id == workspace_id,
+                    NotificationPreference.user_id == user_id,
+                )
+            )
+            .scalars()
+            .first()
+        )
+        # Must exist now since another caller just created it.
+        assert pref is not None, "Preference must exist after ON CONFLICT"
         return pref
 
     def _should_email(
@@ -171,7 +201,11 @@ class NotificationService:
         if member is None:
             return None
 
-        notification = Notification(
+        # Insert with ON CONFLICT DO NOTHING to handle concurrent dedup
+        # races without leaking IntegrityError or rolling back unrelated
+        # caller state. The unique constraint is
+        # uq_notifications_user_dedup_key on (user_id, dedup_key).
+        _pending_notification = Notification(
             workspace_id=inp.workspace_id,
             user_id=inp.user_id,
             notification_type=inp.notification_type,
@@ -184,18 +218,44 @@ class NotificationService:
             deep_link_path=inp.deep_link_path,
             dedup_key=inp.dedup_key,
         )
-        self._session.add(notification)
 
-        # Use a SAVEPOINT around the insert so that a unique-constraint
-        # collision (dedup race) only rolls back the SAVEPOINT, not
-        # unrelated pending work in the caller's session. The context
-        # manager pattern ensures the SAVEPOINT is properly rolled back
-        # on error, even if the session enters an error state.
-        try:
-            with self._session.begin_nested():
-                self._session.flush()
-        except IntegrityError:
-            # Unique constraint caught a race — dedup.
+        # Use INSERT ... ON CONFLICT DO NOTHING RETURNING id to handle
+        # the dedup race atomically. If the row already exists (concurrent
+        # insert), no IntegrityError is raised and the session remains
+        # usable. We use a SAVEPOINT here ONLY to scope the flush, but
+        # the ON CONFLICT ensures no error state is entered.
+        # Note: SQLAlchemy's ORM flush does not natively support ON
+        # CONFLICT, so we use a raw INSERT with on_conflict_do_nothing.
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        stmt = (
+            pg_insert(Notification)
+            .values(
+                workspace_id=inp.workspace_id,
+                user_id=inp.user_id,
+                notification_type=inp.notification_type,
+                title=inp.title,
+                message=inp.message,
+                project_id=inp.project_id,
+                scan_id=inp.scan_id,
+                opportunity_id=inp.opportunity_id,
+                verification_id=inp.verification_id,
+                deep_link_path=inp.deep_link_path,
+                dedup_key=inp.dedup_key,
+            )
+            .on_conflict_do_nothing(constraint="uq_notifications_user_dedup_key")
+            .returning(Notification.id)
+        )
+        result = self._session.execute(stmt)
+        row = result.first()
+
+        if row is None:
+            # Concurrent insert won — dedup.
+            return None
+
+        # Load the inserted (or existing) notification.
+        notification = self._session.get(Notification, row.id)
+        if notification is None:
             return None
 
         # Resolve preferences and create email outbox if applicable.

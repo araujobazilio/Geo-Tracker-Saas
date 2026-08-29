@@ -144,9 +144,9 @@ def build_scheduled_scan_message(
     parts.append(f"Scan {status_label}.")
 
     if measurement_coverage is not None:
-        parts.append(f"Measurement coverage: {measurement_coverage:.1%}.")
+        parts.append(f"Measurement coverage: {measurement_coverage:.1f}%.")
     if brand_visibility is not None:
-        parts.append(f"Brand visibility: {brand_visibility:.1%}.")
+        parts.append(f"Brand visibility: {brand_visibility:.1f}%.")
     if open_opportunities is not None:
         parts.append(f"Open opportunities: {open_opportunities}.")
 

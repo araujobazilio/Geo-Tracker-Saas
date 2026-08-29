@@ -160,7 +160,11 @@ class ScheduledScanNotificationService:
             # Find brand entity in leaderboard.
             for entity in result.leaderboard:
                 if entity.entity_type == "BRAND":
-                    bv = float(entity.visibility_rate) if entity.visibility_rate else None
+                    # Use "is not None" check so that a measured brand
+                    # visibility of 0 (Decimal("0")) is displayed as
+                    # 0.0%, not omitted as falsy.
+                    if entity.visibility_rate is not None:
+                        bv = float(entity.visibility_rate)
                     break
             mc_float = float(mc) if mc is not None else None
             return mc_float, bv

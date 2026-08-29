@@ -181,6 +181,19 @@ def retry_email(
     delivery.failure_message = None
     session.commit()
 
+    # Record audit event (no email body, no secrets).
+    from app.db.session import get_session_factory
+    from app.services.audit_service import AuditService
+
+    audit = AuditService(get_session_factory())
+    audit.record(
+        action="NOTIFICATION_EMAIL_RETRY",
+        user_id=user.id,
+        workspace_id=workspace_id,
+        entity_type="email_delivery",
+        entity_id=delivery.id,
+    )
+
     # Dispatch email task.
     try:
         from app.workers.notification_tasks import send_email_task
