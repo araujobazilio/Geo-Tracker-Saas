@@ -105,12 +105,13 @@ def mark_notification_read(
     auth_service.require_membership(workspace_id, user.id)
 
     service = _build_notification_service(entitlement_service)
-    updated = service.mark_read(notification_id, user.id)
-    if not updated:
+    # mark_read is scoped by workspace_id + notification_id + user_id.
+    # This prevents a user who is a member of two workspaces from
+    # marking their Workspace B notification via a Workspace A route.
+    notification = service.mark_read(workspace_id, notification_id, user.id)
+    if notification is None:
         raise NotFoundError("Notification not found.")
 
-    session = entitlement_service._session
-    notification = session.get(Notification, notification_id)
     return NotificationResponse.model_validate(notification)
 
 

@@ -20,7 +20,6 @@ from app.core.enums import (
     ProjectStatus,
     ScanStatus,
     ScanType,
-    ScheduledScanOutcome,
     WorkspaceRole,
     WorkspaceType,
 )
@@ -29,7 +28,6 @@ from app.models.email_delivery import EmailDelivery
 from app.models.notification import Notification
 from app.models.plan_definition import PlanDefinition
 from app.models.project import Project
-from app.models.project_scan_schedule import ProjectScanSchedule
 from app.models.scan import Scan
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember
@@ -183,88 +181,11 @@ def test_schedule_creation_with_first_run_at(db_session: Session) -> None:
 
 
 # --- Tests: No catch-up storm ---
-
-
-def test_no_catchup_storm(db_session: Session) -> None:
-    pytest.skip("SAVEPOINT + session.rollback() interaction with test fixture transaction model")
-    """Schedule 24h, next_run_at = 5 days ago. One sweep → at most 1 scan, next_run_at > now."""
-    ws, user = _create_workspace_with_plan(db_session, min_schedule_interval=24)
-    project = _create_project(db_session, ws)
-    service = _build_schedule_service(db_session)
-
-    # Create schedule directly (bypassing create_or_update_schedule which
-    # calls session.commit() - in the test fixture transaction model,
-    # commit() only flushes and resets the flush context).
-    schedule = ProjectScanSchedule(
-        workspace_id=ws.id,
-        project_id=project.id,
-        enabled=True,
-        interval_hours=24,
-        next_run_at=datetime.now(UTC) - timedelta(days=5),
-        created_by_user_id=user.id,
-    )
-    db_session.add(schedule)
-    db_session.flush()
-    schedule_id = schedule.id
-
-    now = datetime.now(UTC)
-    # evaluate_due_schedule uses a SAVEPOINT internally to isolate
-    # ScanCreationService.rollback() from the schedule state.
-    # Use skip_locked=False in tests because the test fixture
-    # transaction has not committed the row, and SKIP LOCKED skips
-    # uncommitted rows even within the same transaction.
-    due = service.claim_due_schedules(now=now, skip_locked=False)
-    assert len(due) == 1
-    service.evaluate_due_schedule(due[0], now=now)
-
-    db_session.expire_all()
-    updated = (
-        db_session.execute(select(ProjectScanSchedule).where(ProjectScanSchedule.id == schedule_id))
-        .scalars()
-        .first()
-    )
-    assert updated is not None, "Schedule should still exist after evaluation"
-    assert updated.next_run_at > now
+# Moved to tests/integration/test_phase11_1.py (requires committed PostgreSQL setup)
 
 
 # --- Tests: Schedule advance ---
-
-
-def test_schedule_advance_after_skip(db_session: Session) -> None:
-    pytest.skip("SAVEPOINT + session.rollback() interaction with test fixture transaction model")
-    """Skipped schedule advances next_run_at to future."""
-    ws, user = _create_workspace_with_plan(db_session, min_schedule_interval=24)
-    project = _create_project(db_session, ws)
-    service = _build_schedule_service(db_session)
-
-    schedule = ProjectScanSchedule(
-        workspace_id=ws.id,
-        project_id=project.id,
-        enabled=True,
-        interval_hours=24,
-        next_run_at=datetime.now(UTC) - timedelta(hours=2),
-        created_by_user_id=user.id,
-    )
-    db_session.add(schedule)
-    db_session.flush()
-    schedule_id = schedule.id
-
-    now = datetime.now(UTC)
-    due = service.claim_due_schedules(now=now, skip_locked=False)
-    assert len(due) == 1
-    result = service.evaluate_due_schedule(due[0], now=now)
-
-    # Should skip (no prompt set configured).
-    assert result.outcome != ScheduledScanOutcome.TRIGGERED
-
-    db_session.expire_all()
-    updated = (
-        db_session.execute(select(ProjectScanSchedule).where(ProjectScanSchedule.id == schedule_id))
-        .scalars()
-        .first()
-    )
-    assert updated is not None
-    assert updated.next_run_at > now
+# Moved to tests/integration/test_phase11_1.py (requires committed PostgreSQL setup)
 
 
 # --- Tests: Notification dedup ---
@@ -454,7 +375,7 @@ def test_mark_read(db_session: Session) -> None:
     db_session.commit()
     assert notification is not None
 
-    assert service.mark_read(notification.id, user.id) is True
+    assert service.mark_read(ws.id, notification.id, user.id) is not None
     db_session.commit()
 
     db_session.expire_all()

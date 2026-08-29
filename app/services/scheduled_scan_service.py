@@ -11,12 +11,25 @@ Responsibilities:
 
 PostgreSQL remains authoritative. Redis/Celery is transport only.
 No catch-up storm: at most ONE due slot per scheduler evaluation.
+
+Concurrency architecture (Phase 11.1):
+- The scheduler session (Session A) holds the FOR UPDATE lock on the
+  ProjectScanSchedule row for the entire evaluation.
+- Scan creation runs in an INDEPENDENT session (Session B) via
+  scan_creation_session_factory. Session B may commit freely without
+  releasing the schedule row lock.
+- After scan creation returns, Session A updates last_outcome /
+  next_run_at and commits — only then is the row lock released.
+- process_due_schedules processes ONE schedule at a time: BEGIN ->
+  claim ONE -> evaluate -> commit -> repeat. This avoids holding a batch
+  of 50 locked rows whose locks are released by the first commit.
 """
 
 from __future__ import annotations
 
 import contextlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -31,13 +44,13 @@ from app.core.enums import (
 )
 from app.core.exceptions import ConflictError, NotFoundError, QuotaExceededError, ValidationError
 from app.core.logging import get_logger
-from app.models.project import Project
 from app.models.project_scan_schedule import ProjectScanSchedule
 from app.models.scan import Scan
+from app.repositories.project_repository import ProjectRepository
 from app.repositories.scan_repository import ScanRepository
 from app.services.audit_service import AuditService
 from app.services.entitlement_service import EntitlementService
-from app.services.scan_creation_service import ScanCreationService
+from app.services.scan_creation_service import ScanCreationResult, ScanCreationService
 from app.services.scanning.dispatcher import ScanDispatcher
 
 logger = get_logger("app.scheduler")
@@ -58,7 +71,7 @@ class ScheduledScanService:
 
     This service does NOT execute provider requests — it only creates
     and dispatches Scans via the normal ScanCreationService. Provider
-    execution continues via ``scan.execute`` Celery tasks.
+    execution continues via scan.execute Celery tasks.
     """
 
     def __init__(
@@ -67,20 +80,73 @@ class ScheduledScanService:
         dispatcher: ScanDispatcher,
         *,
         audit_service: AuditService | None = None,
+        scan_creation_session_factory: Callable[[], Session] | None = None,
     ) -> None:
         self._session = session
         self._dispatcher = dispatcher
         self._audit = audit_service
+        self._scan_creation_session_factory = scan_creation_session_factory
         self._entitlements = EntitlementService(session)
         self._scans = ScanRepository(session)
+        self._projects = ProjectRepository(session)
+
+    def process_due_schedules(
+        self,
+        now: datetime | None = None,
+        *,
+        limit: int = 50,
+    ) -> dict[str, int]:
+        """Process due schedules ONE AT A TIME.
+
+        For each due schedule:
+        1. BEGIN (outer transaction already active).
+        2. Claim ONE due schedule with FOR UPDATE SKIP LOCKED.
+        3. Evaluate that due slot (scan creation uses independent session).
+        4. Commit schedule decision (releases row lock).
+        5. Repeat up to limit times.
+
+        Returns a dict of outcome -> count.
+        """
+        if now is None:
+            now = datetime.now(UTC)
+
+        results: dict[str, int] = {}
+        for _ in range(limit):
+            schedule = self._claim_one_due_schedule(now)
+            if schedule is None:
+                break
+
+            result = self.evaluate_due_schedule(schedule, now=now)
+            outcome = result.outcome.value
+            results[outcome] = results.get(outcome, 0) + 1
+
+        return results
+
+    def _claim_one_due_schedule(self, now: datetime) -> ProjectScanSchedule | None:
+        """Claim a single due schedule with FOR UPDATE SKIP LOCKED."""
+        rows = (
+            self._session.execute(
+                select(ProjectScanSchedule)
+                .where(
+                    ProjectScanSchedule.enabled.is_(True),
+                    ProjectScanSchedule.next_run_at <= now,
+                )
+                .order_by(ProjectScanSchedule.next_run_at)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            .scalars()
+            .all()
+        )
+        return rows[0] if rows else None
 
     def claim_due_schedules(
         self, now: datetime | None = None, *, limit: int = 50, skip_locked: bool = True
     ) -> list[ProjectScanSchedule]:
         """Claim due schedules using FOR UPDATE SKIP LOCKED.
 
-        Multiple scheduler workers are safe — two workers cannot claim
-        the same schedule row.
+        Prefer process_due_schedules for production use. This method is
+        kept for testing and backward compatibility.
         """
         if now is None:
             now = datetime.now(UTC)
@@ -109,6 +175,10 @@ class ScheduledScanService:
         At most ONE scan is created per evaluation. next_run_at is
         advanced to the first future interval boundary regardless of
         outcome (no catch-up storm).
+
+        The schedule row lock (held on self._session) is preserved
+        throughout. Scan creation runs in an INDEPENDENT session so its
+        commits do not release the schedule lock.
         """
         if now is None:
             now = datetime.now(UTC)
@@ -136,8 +206,8 @@ class ScheduledScanService:
                 now,
             )
 
-        # 2. Validate project is active.
-        project = self._session.get(Project, schedule.project_id)
+        # 2. Validate project is active (tenant-scoped).
+        project = self._projects.get_in_workspace(schedule.project_id, schedule.workspace_id)
         if project is None or project.status != ProjectStatus.ACTIVE:
             return self._skip(
                 schedule,
@@ -157,8 +227,8 @@ class ScheduledScanService:
             )
 
         # 4. Create STANDARD scan via ScanCreationService.
-        # Capture IDs before the call — ScanCreationService may rollback
-        # the session on error, invalidating the schedule ORM object.
+        # Use an INDEPENDENT session so ScanCreationService commits do
+        # NOT release the schedule row lock held on self._session.
         schedule_id = schedule.id
         workspace_id = schedule.workspace_id
         project_id = schedule.project_id
@@ -166,67 +236,50 @@ class ScheduledScanService:
 
         idempotency_key = self._slot_idempotency_key(schedule_id, scheduled_for)
 
-        creation_service = ScanCreationService(
-            self._session,
-            self._dispatcher,
-            audit_service=self._audit,
-        )
-
-        sp = self._session.begin_nested()
         try:
-            result = creation_service.create_scan(
+            result = self._create_scan_in_independent_session(
                 workspace_id=workspace_id,
                 project_id=project_id,
-                scan_type=ScanType.STANDARD,
-                requested_by_user_id=created_by_user_id,
+                created_by_user_id=created_by_user_id,
                 idempotency_key=idempotency_key,
-                scan_schedule_id=schedule_id,
+                schedule_id=schedule_id,
                 scheduled_for=scheduled_for,
             )
-            sp.commit()
         except QuotaExceededError:
-            with contextlib.suppress(Exception):
-                sp.rollback()
-            return self._skip_reloaded(
-                schedule_id,
+            return self._skip(
+                schedule,
                 ScheduledScanOutcome.SKIPPED_QUOTA,
                 "Insufficient monthly AI checks quota.",
                 now,
             )
         except (ValidationError, ConflictError) as exc:
-            with contextlib.suppress(Exception):
-                sp.rollback()
-            return self._skip_reloaded(
-                schedule_id,
+            return self._skip(
+                schedule,
                 ScheduledScanOutcome.SKIPPED_NOT_READY,
                 f"Project not ready: {exc}",
                 now,
             )
         except NotFoundError:
-            with contextlib.suppress(Exception):
-                sp.rollback()
-            return self._skip_reloaded(
-                schedule_id,
+            return self._skip(
+                schedule,
                 ScheduledScanOutcome.SKIPPED_NOT_READY,
                 "Project not found.",
                 now,
             )
         except Exception as exc:
-            with contextlib.suppress(Exception):
-                sp.rollback()
             logger.error(
                 "schedule_scan_creation_failed",
                 schedule_id=str(schedule_id),
                 error=str(exc),
             )
-            return self._skip_reloaded(
-                schedule_id,
+            return self._skip(
+                schedule,
                 ScheduledScanOutcome.DISPATCH_FAILED,
                 f"Scan creation failed: {type(exc).__name__}",
                 now,
             )
 
-        # 5. Record success.
+        # 5. Record success — schedule row lock is still held.
         schedule.last_triggered_at = now
         schedule.last_scan_id = result.scan.id
         schedule.last_outcome = ScheduledScanOutcome.TRIGGERED
@@ -241,6 +294,63 @@ class ScheduledScanService:
             outcome=ScheduledScanOutcome.TRIGGERED,
             scan_id=result.scan.id,
         )
+
+    def _create_scan_in_independent_session(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        created_by_user_id: uuid.UUID,
+        idempotency_key: str,
+        schedule_id: uuid.UUID,
+        scheduled_for: datetime,
+    ) -> ScanCreationResult:
+        """Create a scan in an independent session.
+
+        If scan_creation_session_factory was provided, use it.
+        Otherwise, fall back to using the same session (for tests that
+        do not need the concurrency guarantee).
+        """
+        if self._scan_creation_session_factory is not None:
+            scan_session = self._scan_creation_session_factory()
+            try:
+                creation_service = ScanCreationService(
+                    scan_session,
+                    self._dispatcher,
+                    audit_service=self._audit,
+                )
+                result = creation_service.create_scan(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    scan_type=ScanType.STANDARD,
+                    requested_by_user_id=created_by_user_id,
+                    idempotency_key=idempotency_key,
+                    scan_schedule_id=schedule_id,
+                    scheduled_for=scheduled_for,
+                )
+                scan_session.commit()
+                return result
+            except Exception:
+                with contextlib.suppress(Exception):
+                    scan_session.rollback()
+                raise
+            finally:
+                scan_session.close()
+        else:
+            creation_service = ScanCreationService(
+                self._session,
+                self._dispatcher,
+                audit_service=self._audit,
+            )
+            return creation_service.create_scan(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                scan_type=ScanType.STANDARD,
+                requested_by_user_id=created_by_user_id,
+                idempotency_key=idempotency_key,
+                scan_schedule_id=schedule_id,
+                scheduled_for=scheduled_for,
+            )
 
     def _skip(
         self,
@@ -263,33 +373,6 @@ class ScheduledScanService:
             skip_reason=reason,
         )
 
-    def _skip_reloaded(
-        self,
-        schedule_id: uuid.UUID,
-        outcome: ScheduledScanOutcome,
-        reason: str,
-        now: datetime,
-    ) -> SchedulerEvaluationResult:
-        """Reload the schedule after a rollback, then skip.
-
-        Used when ScanCreationService rolled back the session on error,
-        invalidating the original schedule ORM object.
-        """
-        schedule = (
-            self._session.execute(
-                select(ProjectScanSchedule).where(ProjectScanSchedule.id == schedule_id)
-            )
-            .scalars()
-            .first()
-        )
-        if schedule is None:
-            return SchedulerEvaluationResult(
-                schedule_id=schedule_id,
-                outcome=outcome,
-                skip_reason=reason,
-            )
-        return self._skip(schedule, outcome, reason, now)
-
     def _advance_next_run(self, schedule: ProjectScanSchedule, now: datetime) -> None:
         """Advance next_run_at to the first future interval boundary.
 
@@ -298,7 +381,6 @@ class ScheduledScanService:
         """
         interval = timedelta(hours=schedule.interval_hours)
         next_run = schedule.next_run_at
-        # Advance until next_run is in the future.
         while next_run <= now:
             next_run = next_run + interval
         schedule.next_run_at = next_run
@@ -351,7 +433,14 @@ class ScheduledScanService:
         """Create or replace a project scan schedule.
 
         Validates entitlement at creation/update time.
+        Resolves Project with BOTH workspace_id and project_id to
+        enforce tenant isolation.
         """
+        # Tenant isolation: resolve project with workspace_id + project_id.
+        project = self._projects.get_in_workspace(project_id, workspace_id)
+        if project is None:
+            raise NotFoundError("Project not found in this workspace.")
+
         ent = self._entitlements.get_effective_entitlements(workspace_id)
         min_interval = ent.min_scheduled_scan_interval_hours
 
@@ -364,11 +453,21 @@ class ScheduledScanService:
         if interval_hours <= 0:
             raise ValidationError("Interval hours must be positive.")
 
-        # Check for existing schedule (one per project).
+        # Normalize first_run_at to timezone-aware UTC.
+        next_run: datetime
+        if first_run_at is not None:
+            next_run = self._normalize_to_utc(first_run_at)
+        else:
+            next_run = datetime.now(UTC) + timedelta(hours=interval_hours)
+
+        # Check for existing schedule (tenant-scoped: workspace_id + project_id).
         existing = (
             self._session.execute(
                 select(ProjectScanSchedule)
-                .where(ProjectScanSchedule.project_id == project_id)
+                .where(
+                    ProjectScanSchedule.workspace_id == workspace_id,
+                    ProjectScanSchedule.project_id == project_id,
+                )
                 .with_for_update()
             )
             .scalars()
@@ -376,9 +475,6 @@ class ScheduledScanService:
         )
 
         now = datetime.now(UTC)
-        next_run = (
-            first_run_at if first_run_at is not None else now + timedelta(hours=interval_hours)
-        )
 
         if existing is not None:
             existing.enabled = enabled
@@ -402,10 +498,21 @@ class ScheduledScanService:
         self._record_audit("SCHEDULE_CREATED", schedule)
         return schedule
 
+    @staticmethod
+    def _normalize_to_utc(dt: datetime) -> datetime:
+        """Normalize a datetime to timezone-aware UTC.
+
+        Naive datetimes are assumed to be UTC and explicitly tagged.
+        Timezone-aware datetimes are converted to UTC.
+        """
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+
     def get_schedule(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID
     ) -> ProjectScanSchedule | None:
-        """Get the schedule for a project, or None."""
+        """Get the schedule for a project, or None. Tenant-scoped."""
         return (
             self._session.execute(
                 select(ProjectScanSchedule).where(
@@ -420,7 +527,7 @@ class ScheduledScanService:
     def disable_schedule(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID
     ) -> ProjectScanSchedule | None:
-        """Disable a schedule (does not delete)."""
+        """Disable a schedule (does not delete). Tenant-scoped."""
         schedule = self.get_schedule(workspace_id, project_id)
         if schedule is None:
             return None

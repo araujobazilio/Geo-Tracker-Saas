@@ -56,7 +56,7 @@ class ScheduledScanNotificationService:
         This is the main entry point. It:
         1. Loads the scan and verifies it is scheduled + terminal.
         2. Runs automatic Action Center refresh if analysis is COMPLETED.
-        3. Generates scan summary notification.
+        3. Generates scan summary notification with summary metrics.
         4. Generates high-priority opportunity notifications.
 
         All operations are idempotent (deduplicated).
@@ -73,6 +73,9 @@ class ScheduledScanNotificationService:
 
         # Run automatic Action Center refresh for COMPLETED/PARTIAL with analysis.
         open_opportunities_count: int | None = None
+        measurement_coverage: float | None = None
+        brand_visibility: float | None = None
+
         if scan.status in (ScanStatus.COMPLETED, ScanStatus.PARTIAL):
             analysis = (
                 self._session.execute(select(ScanAnalysis).where(ScanAnalysis.scan_id == scan_id))
@@ -82,12 +85,19 @@ class ScheduledScanNotificationService:
 
             if analysis is not None and analysis.status == ScanAnalysisStatus.COMPLETED:
                 open_opportunities_count = self._auto_refresh_actions(scan)
+                # Compute summary metrics using approved VisibilityMetricsService.
+                measurement_coverage, brand_visibility = self._compute_summary_metrics(scan)
             elif analysis is not None and analysis.status == ScanAnalysisStatus.FAILED:
-                # Analysis failed — still notify but without opportunity count.
+                # Analysis failed — still notify but without metrics.
                 pass
 
         # Generate scan summary notification.
-        self._generate_scan_summary_notification(scan, open_opportunities_count)
+        self._generate_scan_summary_notification(
+            scan,
+            open_opportunities_count,
+            measurement_coverage=measurement_coverage,
+            brand_visibility=brand_visibility,
+        )
 
         # Generate high-priority opportunity notifications.
         if open_opportunities_count is not None:
@@ -129,8 +139,46 @@ class ScheduledScanNotificationService:
             self._session.rollback()
             return None
 
+    def _compute_summary_metrics(self, scan: Scan) -> tuple[float | None, float | None]:
+        """Compute measurement_coverage and brand_visibility for the scan.
+
+        Uses the approved VisibilityMetricsService methodology.
+        Returns (None, None) if metrics cannot be computed.
+        Does NOT reimplement formulas — delegates to VisibilityMetricsService.
+        """
+        try:
+            from app.services.visibility_metrics_service import VisibilityMetricsService
+
+            service = VisibilityMetricsService(self._session)
+            result = service.get_metrics(
+                workspace_id=scan.workspace_id,
+                project_id=scan.project_id,
+                scan_id=scan.id,
+            )
+            mc = result.measurement_coverage
+            bv: float | None = None
+            # Find brand entity in leaderboard.
+            for entity in result.leaderboard:
+                if entity.entity_type == "BRAND":
+                    bv = float(entity.visibility_rate) if entity.visibility_rate else None
+                    break
+            mc_float = float(mc) if mc is not None else None
+            return mc_float, bv
+        except Exception as exc:
+            logger.warning(
+                "summary_metrics_failed",
+                scan_id=str(scan.id),
+                error=str(exc),
+            )
+            return None, None
+
     def _generate_scan_summary_notification(
-        self, scan: Scan, open_opportunities_count: int | None
+        self,
+        scan: Scan,
+        open_opportunities_count: int | None,
+        *,
+        measurement_coverage: float | None = None,
+        brand_visibility: float | None = None,
     ) -> None:
         """Generate the scheduled scan summary notification."""
         if scan.status == ScanStatus.COMPLETED:
@@ -143,6 +191,8 @@ class ScheduledScanNotificationService:
         message = build_scheduled_scan_message(
             scan,
             open_opportunities=open_opportunities_count,
+            measurement_coverage=measurement_coverage,
+            brand_visibility=brand_visibility,
         )
 
         dedup_key = f"scheduled-scan:{scan.id}:terminal"
@@ -162,16 +212,22 @@ class ScheduledScanNotificationService:
     def _generate_high_priority_notifications(self, scan: Scan) -> None:
         """Generate NEW_HIGH_PRIORITY_OPPORTUNITY notifications.
 
-        Only for opportunities newly created by this scan (deduplicated
-        per Opportunity.id, not per Scan ID).
+        Only for opportunities whose logical workflow card was FIRST
+        CREATED by the current scheduled Scan. This is determined by
+        ``Opportunity.first_detected_scan_id == scan.id``.
+
+        An existing Opportunity that gets a new OpportunityOccurrence
+        from this Scan is NOT notified — it was already announced when
+        it was first created.
         """
-        # Find HIGH priority opportunities for this project.
+        # Find HIGH priority opportunities FIRST DETECTED by this scan.
         opportunities = (
             self._session.execute(
                 select(Opportunity).where(
                     Opportunity.workspace_id == scan.workspace_id,
                     Opportunity.project_id == scan.project_id,
                     Opportunity.priority == OpportunityPriority.HIGH,
+                    Opportunity.first_detected_scan_id == scan.id,
                 )
             )
             .scalars()

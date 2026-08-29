@@ -186,11 +186,16 @@ class NotificationService:
         )
         self._session.add(notification)
 
+        # Use a SAVEPOINT around the insert so that a unique-constraint
+        # collision (dedup race) only rolls back the SAVEPOINT, not
+        # unrelated pending work in the caller's session. The context
+        # manager pattern ensures the SAVEPOINT is properly rolled back
+        # on error, even if the session enters an error state.
         try:
-            self._session.flush()
+            with self._session.begin_nested():
+                self._session.flush()
         except IntegrityError:
             # Unique constraint caught a race — dedup.
-            self._session.rollback()
             return None
 
         # Resolve preferences and create email outbox if applicable.
@@ -259,12 +264,24 @@ class NotificationService:
         ).all()
         return list(rows)  # type: ignore[arg-type]
 
-    def mark_read(self, notification_id: uuid.UUID, user_id: uuid.UUID) -> bool:
-        """Mark a notification as read. Returns True if updated."""
+    def mark_read(
+        self,
+        workspace_id: uuid.UUID,
+        notification_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Notification | None:
+        """Mark a notification as read. Returns the Notification if updated/found.
+
+        Scoped by workspace_id + notification_id + user_id to enforce
+        tenant isolation. A user who is a member of two workspaces
+        cannot mark their Workspace B notification via a Workspace A
+        route.
+        """
         notification = (
             self._session.execute(
                 select(Notification).where(
                     Notification.id == notification_id,
+                    Notification.workspace_id == workspace_id,
                     Notification.user_id == user_id,
                 )
             )
@@ -272,11 +289,11 @@ class NotificationService:
             .first()
         )
         if notification is None:
-            return False
+            return None
         if notification.read_at is None:
             notification.read_at = datetime.now(UTC)
             self._session.flush()
-        return True
+        return notification
 
     def mark_all_read(self, user_id: uuid.UUID, workspace_id: uuid.UUID) -> int:
         """Mark all unread notifications for a user as read. Returns count."""
