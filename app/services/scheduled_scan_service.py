@@ -151,7 +151,18 @@ class ScheduledScanService:
                 continue
 
             # Re-read schedule after acquiring lock to confirm still due.
-            refreshed = self._session.get(ProjectScanSchedule, schedule.id)
+            # Use populate_existing=True to force a true database refresh,
+            # bypassing the identity map cache. A plain session.get() would
+            # return the already-loaded instance with stale attributes.
+            refreshed = (
+                self._session.execute(
+                    select(ProjectScanSchedule)
+                    .where(ProjectScanSchedule.id == schedule.id)
+                    .execution_options(populate_existing=True)
+                )
+                .scalars()
+                .first()
+            )
             if refreshed is None or not refreshed.enabled or refreshed.next_run_at > now:
                 # Schedule was changed or processed by another worker.
                 processed_ids.add(schedule.id)
@@ -389,12 +400,18 @@ class ScheduledScanService:
 
         This lock is held ONLY for the brief final update, NOT during
         scan creation. This avoids the FK self-block issue.
+
+        Uses populate_existing=True to force a true database refresh,
+        replacing any stale identity-map attributes with current committed
+        values (e.g. if the user changed next_run_at or disabled the
+        schedule while scan creation was in progress).
         """
         return (
             self._session.execute(
                 select(ProjectScanSchedule)
                 .where(ProjectScanSchedule.id == schedule_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
             .scalars()
             .first()
