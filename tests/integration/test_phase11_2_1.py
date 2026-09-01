@@ -780,9 +780,9 @@ def test_delayed_second_worker_stale_identity(engine_factory: Any) -> None:
         # Schedule: next_run_at > now (advanced by A, not overwritten by B).
         sched = verify_session.get(ProjectScanSchedule, schedule_id)
         assert sched is not None
-        assert sched.next_run_at > datetime.now(UTC), (
-            f"next_run_at should be in the future, got {sched.next_run_at}"
-        )
+        assert sched.next_run_at > datetime.now(
+            UTC
+        ), f"next_run_at should be in the future, got {sched.next_run_at}"
         # last_outcome should be TRIGGERED (from A), not overwritten by B.
         assert sched.last_outcome == ScheduledScanOutcome.TRIGGERED
     finally:
@@ -853,9 +853,9 @@ def test_advisory_lock_reread_populates_existing(engine_factory: Any) -> None:
         stale = session_a.get(ProjectScanSchedule, schedule_id)
         assert stale is not None
         # session.get() returns the cached object — stale value.
-        assert stale.next_run_at == original_next_run, (
-            "session.get() should return stale identity-map value"
-        )
+        assert (
+            stale.next_run_at == original_next_run
+        ), "session.get() should return stale identity-map value"
 
         # Step 4: Re-read in session A WITH populate_existing=True.
         # This MUST see the committed value.

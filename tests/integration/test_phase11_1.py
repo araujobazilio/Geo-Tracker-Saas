@@ -701,15 +701,15 @@ def test_scheduler_concurrency_real_postgresql(engine_factory) -> None:  # type:
     # The key guarantee: no duplicate scans, no IntegrityError leaks.
     # If project is not ready (no prompt set), both will skip — that's OK.
     # The important thing is no duplicate scans and no leaked errors.
-    assert results["success"] + results["skipped"] >= 1, (
-        f"Expected at least 1 outcome, got {results}"
-    )
-    assert all("IntegrityError" not in e for e in results["errors"]), (
-        f"Raw IntegrityError leaked: {results['errors']}"
-    )
-    assert all("IntegrityError" not in e for e in results["errors"]), (
-        f"Raw IntegrityError leaked: {results['errors']}"
-    )
+    assert (
+        results["success"] + results["skipped"] >= 1
+    ), f"Expected at least 1 outcome, got {results}"
+    assert all(
+        "IntegrityError" not in e for e in results["errors"]
+    ), f"Raw IntegrityError leaked: {results['errors']}"
+    assert all(
+        "IntegrityError" not in e for e in results["errors"]
+    ), f"Raw IntegrityError leaked: {results['errors']}"
 
     # Verify AT MOST ONE scan for this schedule (no duplicates).
     # If the project has no prompt set, zero scans is fine — the key
@@ -850,9 +850,9 @@ def test_notification_dedup_concurrency(engine_factory) -> None:  # type: ignore
 
     # Exactly one notification created.
     assert results["created"] == 1, f"Expected 1 created, got {results}"
-    assert all("IntegrityError" not in e for e in results["errors"]), (
-        f"Raw IntegrityError leaked: {results['errors']}"
-    )
+    assert all(
+        "IntegrityError" not in e for e in results["errors"]
+    ), f"Raw IntegrityError leaked: {results['errors']}"
 
     # Verify in DB.
     verify_session = factory()

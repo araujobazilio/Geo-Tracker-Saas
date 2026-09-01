@@ -85,7 +85,8 @@ def _setup_workspace_with_plan(db: Session, monthly_limit: int = 100) -> Workspa
 def _get_period_counts(db: Session, workspace_id: uuid.UUID) -> tuple[int, int]:  # type: ignore[no-untyped-def]
     from datetime import UTC, datetime
 
-    period_start = datetime(2026, 8, 1, tzinfo=UTC)
+    now = datetime.now(UTC)
+    period_start = datetime(now.year, now.month, 1, tzinfo=UTC)
     result = db.execute(
         text(
             "SELECT ai_checks_used, ai_checks_reserved "
@@ -168,12 +169,12 @@ class TestDeterministicConcurrency:
         t1.join(timeout=30)
         t2.join(timeout=30)
 
-        assert results["success"] == 1, (
-            f"Expected 1 success, got {results['success']}: {results['errors']}"
-        )
-        assert results["rejected"] == 1, (
-            f"Expected 1 rejection, got {results['rejected']}: {results['errors']}"
-        )
+        assert (
+            results["success"] == 1
+        ), f"Expected 1 success, got {results['success']}: {results['errors']}"
+        assert (
+            results["rejected"] == 1
+        ), f"Expected 1 rejection, got {results['rejected']}: {results['errors']}"
 
         verify = factory()
         try:
@@ -228,9 +229,9 @@ class TestDeterministicConcurrency:
         t2.join(timeout=30)
 
         # Both should succeed (one creates, other returns existing).
-        assert results["success"] == 2, (
-            f"Expected 2 successes, got {results['success']}: {results['errors']}"
-        )
+        assert (
+            results["success"] == 2
+        ), f"Expected 2 successes, got {results['success']}: {results['errors']}"
         assert len(results["errors"]) == 0, f"Unexpected errors: {results['errors']}"
 
         # Both should have received the same reservation ID.
@@ -301,9 +302,9 @@ class TestDeterministicConcurrency:
         t1.join(timeout=30)
         t2.join(timeout=30)
 
-        assert results["success"] == 2, (
-            f"Expected 2 successes, got {results['success']}: {results['errors']}"
-        )
+        assert (
+            results["success"] == 2
+        ), f"Expected 2 successes, got {results['success']}: {results['errors']}"
         assert len(results["errors"]) == 0, f"Unexpected errors: {results['errors']}"
         assert results["event_ids"][0] == results["event_ids"][1]
 
@@ -374,12 +375,12 @@ class TestDeterministicConcurrency:
         t1.join(timeout=30)
         t2.join(timeout=30)
 
-        assert results["success"] == 1, (
-            f"Expected 1 success, got {results['success']}: {results['errors']}"
-        )
-        assert results["conflict"] == 1, (
-            f"Expected 1 conflict, got {results['conflict']}: {results['errors']}"
-        )
+        assert (
+            results["success"] == 1
+        ), f"Expected 1 success, got {results['success']}: {results['errors']}"
+        assert (
+            results["conflict"] == 1
+        ), f"Expected 1 conflict, got {results['conflict']}: {results['errors']}"
 
         verify = factory()
         try:
@@ -443,9 +444,9 @@ class TestDeterministicConcurrency:
 
         # Exactly one worker should expire 1 reservation; the other gets 0.
         total_expired = sum(results["expired_counts"])
-        assert total_expired == 1, (
-            f"Expected total 1 expiration, got {total_expired}: {results['errors']}"
-        )
+        assert (
+            total_expired == 1
+        ), f"Expected total 1 expiration, got {total_expired}: {results['errors']}"
         assert len(results["errors"]) == 0, f"Unexpected errors: {results['errors']}"
 
         verify = factory()

@@ -195,9 +195,9 @@ def test_concurrent_same_scan_refresh_no_integrity_error(committed_engine) -> No
                     )
                 ).scalars()
             )
-            assert len(occurrences) == 1, (
-                f"Expected 1 occurrence for opp {opp.id} + scan {scan_id}, got {len(occurrences)}"
-            )
+            assert (
+                len(occurrences) == 1
+            ), f"Expected 1 occurrence for opp {opp.id} + scan {scan_id}, got {len(occurrences)}"
 
             evidence = list(
                 verify_session.execute(
@@ -800,9 +800,9 @@ def test_prompt_gap_failed_runs_not_in_evidence(db_session: Session) -> None:
         for ref in pg.competitor_only_prompt_run_ids:
             run = db_session.get(PromptRun, ref.prompt_run_id)
             assert run is not None
-            assert run.status == PromptRunStatus.SUCCEEDED, (
-                f"FAILED run {run.id} found in prompt gap evidence"
-            )
+            assert (
+                run.status == PromptRunStatus.SUCCEEDED
+            ), f"FAILED run {run.id} found in prompt gap evidence"
 
 
 # ----------------------------------------------------------------------
@@ -947,9 +947,9 @@ def test_same_scan_idempotent_after_lineage_change(db_session: Session) -> None:
             )
             total_evidence_2 += len(ev)
 
-    assert total_evidence_1 == total_evidence_2, (
-        f"Evidence count changed after idempotent refresh: {total_evidence_1} → {total_evidence_2}"
-    )
+    assert (
+        total_evidence_1 == total_evidence_2
+    ), f"Evidence count changed after idempotent refresh: {total_evidence_1} → {total_evidence_2}"
 
 
 # ----------------------------------------------------------------------
@@ -994,9 +994,9 @@ def test_refresh_zero_cost_after_phase9_1(db_session: Session) -> None:
     usage_count_after = len(usage_after)
 
     # No new UsageEvents.
-    assert usage_count_after == usage_count_before, (
-        f"UsageEvent count changed: {usage_count_before} → {usage_count_after}"
-    )
+    assert (
+        usage_count_after == usage_count_before
+    ), f"UsageEvent count changed: {usage_count_before} → {usage_count_after}"
 
 
 # ----------------------------------------------------------------------

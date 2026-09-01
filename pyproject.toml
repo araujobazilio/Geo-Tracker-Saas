@@ -121,6 +121,13 @@ markers = [
 ]
 filterwarnings = [
     "error::DeprecationWarning",
+    # pytest-asyncio 0.24.x uses asyncio APIs deprecated in Python 3.14.
+    # Ignore those specific deprecations so the suite remains runnable on 3.14
+    # while still treating all other DeprecationWarnings as errors.
+    "ignore:.*asyncio.get_event_loop_policy.*:DeprecationWarning",
+    "ignore:.*asyncio.iscoroutinefunction.*:DeprecationWarning",
+    "ignore:.*asyncio.get_event_loop.*:DeprecationWarning",
+    "ignore:.*asyncio.set_event_loop_policy.*:DeprecationWarning",
 ]
 
 # =============================================================================

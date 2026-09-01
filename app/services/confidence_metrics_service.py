@@ -688,7 +688,10 @@ class ConfidenceMetricsService:
             .where(PromptRun.scan_id == scan_id)
             .order_by(PromptRun.observation_index, PromptRun.created_at, PromptRun.id)
         ).all()
-        return [(run, prompt) for run, prompt in rows]
+        # Unpack Row objects into plain tuples to match the return type.
+        # C416 would rewrite this as list(rows), but Row is not a tuple
+        # subclass, so the rewrite would change the return type.
+        return [(run, prompt) for run, prompt in rows]  # noqa: C416
 
     def _load_mentions(
         self, analysis_id: uuid.UUID, run_ids: set[uuid.UUID]
