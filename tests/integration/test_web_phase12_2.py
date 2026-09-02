@@ -145,12 +145,54 @@ def client_with_dispatcher(recording_dispatcher):
 
 def _get_db_session():
     settings = get_settings()
-    engine = create_engine(settings.test_database_url)
+    engine = create_engine(settings.database_url)
     return Session(engine)
 
 
+def _seed_billing_for_workspace(ws_id: str) -> None:
+    """Create a PlanDefinition + BillingAccount so the workspace is entitled."""
+    from app.core.enums import BillingAccountStatus, BillingSource, LLMProvider
+    from app.models.billing import BillingAccount
+    from app.models.plan_definition import PlanDefinition
+    from app.models.plan_provider import PlanProvider
+
+    session = _get_db_session()
+    try:
+        plan = PlanDefinition(
+            code=f"P122_{ws_id.replace('-', '')[:12]}",
+            name="P12.2 Test Plan",
+            is_active=True,
+            max_projects=10,
+            max_keywords_per_project=50,
+            max_competitors_per_project=20,
+            max_team_members=10,
+            monthly_ai_checks=100,
+            confidence_scans_enabled=True,
+            verification_scans_enabled=True,
+        )
+        session.add(plan)
+        session.flush()
+        for p in LLMProvider:
+            session.add(PlanProvider(plan_id=plan.id, provider=p))
+        session.add(
+            BillingAccount(
+                workspace_id=uuid.UUID(ws_id),
+                source=BillingSource.ADMIN,
+                status=BillingAccountStatus.ACTIVE,
+                plan_code=plan.code,
+                is_primary=True,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
 def _register_api(client: TestClient, email: str | None = None) -> tuple[str, str, str]:
-    """Register via API, return (csrf_token, workspace_id, user_id)."""
+    """Register via API, return (csrf_token, workspace_id, user_id).
+
+    Also seeds a PlanDefinition + BillingAccount so the workspace is entitled.
+    """
     if email is None:
         email = _unique_email()
     resp = client.post(
@@ -163,6 +205,7 @@ def _register_api(client: TestClient, email: str | None = None) -> tuple[str, st
     csrf_token = csrf_resp.json()["csrf_token"]
     ws_resp = client.get("/api/v1/workspaces")
     ws_id = ws_resp.json()[0]["id"]
+    _seed_billing_for_workspace(ws_id)
     return csrf_token, ws_id, user_id
 
 
