@@ -96,4 +96,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 # Production command: no --reload, bounded workers.
 # For a small VPS, 2 workers is conservative. Override via docker-compose.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Use "python -m uvicorn" because pip --target installs packages but does
+# not place console_scripts (like the uvicorn CLI) on PATH.
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
