@@ -11,4 +11,7 @@ def test_health_returns_ok() -> None:
     client = TestClient(app)
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    # Build metadata is included (non-secret).
+    assert "version" in body

@@ -335,3 +335,170 @@ Security properties:
 - Never commit `.env`, credentials, private keys, or access tokens.
 - Never log secrets, credentials, or authentication tokens.
 - Never store passwords, API secrets, or auth tokens in audit logs.
+
+## Phase 13: Production hardening
+
+Phase 13 hardens the deployment surface for single-VPS production with
+Docker Compose. The properties below are enforced by the production
+Dockerfile, the application middleware stack, configuration validation,
+and the `docker-compose.prod.yml` network topology. See
+`docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`, and `docs/BACKUP_AND_RESTORE.md`
+for operational procedures.
+
+### Production Dockerfile
+
+- **Multi-stage build:** `Dockerfile` uses three stages —
+  `frontend-build` (Node 24, builds Tailwind CSS), `python-builder`
+  (Python 3.11, installs production dependencies into a target
+  directory), and `runtime` (Python 3.11-slim, copies only the built
+  packages and application source). No compiler toolchain is present
+  in the runtime image.
+- **Production dependencies only:** the builder runs
+  `pip install --target=/install .` (NOT `.[dev]`), so test/lint/dev
+  tooling is absent from the runtime image. `uvicorn[standard]` is
+  installed explicitly for production serving.
+- **Non-root runtime user:** the runtime stage creates a system user
+  `geo` (uid/gid 1001) with no home directory and runs as `USER geo`.
+  The application never runs as root.
+- **Minimal runtime deps:** only `libpq5`, `libffi8`, and `curl` (for
+  the healthcheck) are installed at runtime. `apt` lists are cleaned.
+- **No dev reload:** the production command is
+  `uvicorn ... --host 0.0.0.0 --port 8000 --workers 2` with no
+  `--reload`. The healthcheck uses `curl -fsS /health`.
+
+### ALLOWED_HOSTS / trusted host validation
+
+- **`TrustedHostMiddleware`** (`app/middleware/trusted_host.py`) rejects
+  requests whose `Host` header (port stripped) is not in
+  `settings.allowed_host_list` with a `400` response. This prevents
+  Host header spoofing attacks (cache poisoning, password-reset link
+  manipulation, routing bypass).
+- **`ALLOWED_HOSTS` is required in production:** `Settings` fail-fast
+  validation rejects an empty `ALLOWED_HOSTS` when `APP_ENV=production`
+  (see `app/config.py`, `_validate_production_secret`). The application
+  will not start without it.
+- In development/test, `ALLOWED_HOSTS` is empty and all hosts are
+  allowed (preserving `localhost` ergonomics).
+
+### Security headers
+
+`SecurityHeadersMiddleware` (`app/middleware/security_headers.py`) is
+added early in the middleware stack so headers are present on all
+responses, including error responses:
+
+- **`X-Content-Type-Options: nosniff`** — always.
+- **`Referrer-Policy: strict-origin-when-cross-origin`** — always.
+- **`X-Frame-Options: DENY`** — always (clickjacking protection).
+- **`Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()`**
+  — always.
+- **`Content-Security-Policy`** — `default-src 'self'`,
+  `script-src 'self' 'unsafe-inline'`, `style-src 'self' 'unsafe-inline'`,
+  `img-src 'self' data:`, `frame-ancestors 'none'`, `base-uri 'self'`,
+  `form-action 'self'`. Inline scripts/styles are allowed only because
+  the current Jinja/HTMX/Chart.js UI uses small inline blocks; a future
+  refactor to static JS files will tighten this to remove
+  `'unsafe-inline'`.
+- **`Strict-Transport-Security`** — `max-age=31536000;
+  includeSubDomains; preload`, sent **only** in staging/production
+  (`settings.is_staging or settings.is_production`) to avoid breaking
+  local HTTP development.
+
+Nginx (`docker/nginx/nginx.conf`) supplements the app middleware with
+the same headers via `add_header ... always`, so headers are present
+even on responses Nginx generates directly (e.g. the HTTP→HTTPS
+`301`).
+
+### Request correlation ID
+
+`RequestCorrelationMiddleware` (`app/middleware/correlation.py`):
+
+- Accepts an incoming `X-Request-ID` only if it matches
+  `^[A-Za-z0-9_-]{1,64}$` — this prevents log injection via newline or
+  control characters. Invalid or missing IDs are replaced with a fresh
+  UUID4 hex.
+- Binds the correlation ID into `structlog` contextvars so every
+  structured log line for the request includes `request_id`.
+- Returns the correlation ID as the `X-Request-ID` response header,
+  enabling end-to-end tracing from Nginx through the app to the worker.
+  Nginx forwards `$request_id` as `X-Request-ID` on proxied requests.
+
+No secrets, tokens, or credentials are ever included in the
+correlation ID.
+
+### Closed beta registration gate
+
+- **`REGISTRATION_MODE`** (`app/config.py`) is a `Literal["open",
+  "closed", "invite_only"]` defaulting to `"open"` for development.
+  `Settings.is_registration_closed` returns `True` for `"closed"` and
+  `"invite_only"`.
+- For closed beta, set `REGISTRATION_MODE=closed` in
+  `.env.production`. The register endpoint refuses new sign-ups while
+  login for existing users continues to work. This prevents
+  uncontrolled account creation during the beta period.
+- Production validation does not force a specific mode (an operator may
+  legitimately choose `invite_only`), but the default `open` should be
+  set deliberately, not accidentally.
+
+### Production config fail-fast validation
+
+`Settings._validate_production_secret` (`app/config.py`) runs at config
+load time and raises immediately — the application never starts — if any
+production invariant is violated:
+
+- `APP_SECRET_KEY` empty, a known placeholder (`change-me`,
+  `change-me-to-a-long-random-string`), or shorter than 32 characters.
+  The real secret value is never included in the error message.
+- `DATABASE_URL` contains the development password placeholder
+  `geo_tracker_dev_password`.
+- `REDIS_URL` is empty.
+- `APP_PUBLIC_BASE_URL` does not start with `https://`.
+- `ALLOWED_HOSTS` is empty (production only).
+- `DEV_SEED_ENABLED` is `true` (production only).
+- `EMAIL_ENABLED=true` without `SMTP_HOST` or `EMAIL_FROM_ADDRESS`.
+- `SESSION_COOKIE_SECURE` is not set — it is forced to `True` in
+  staging/production.
+- Confidence scan repeat-count bounds (`default >= 2`, `max >= default`,
+  `max <= 10`).
+
+This means a misconfigured production deploy fails loudly at boot
+rather than serving insecure traffic.
+
+### No public DB / Redis ports
+
+In `docker-compose.prod.yml`, `postgres` and `redis` publish **no
+ports** — they are reachable only on the internal Docker network. Only
+`nginx` publishes ports (`80` and `443`). The `app`, `worker`, and
+`beat` services use `expose` (internal only) or no port mapping at all.
+This means:
+
+- PostgreSQL is not reachable from the public internet — no remote
+  brute-force or credential-stuffing surface.
+- Redis is not reachable from the public internet — no unauthenticated
+  Redis exposure.
+- All inter-service communication (app→postgres, app→redis,
+  worker→postgres, worker→redis, beat→redis) stays on the Docker
+  bridge network.
+
+### TLS via Nginx
+
+- Nginx terminates TLS (`listen 443 ssl`) with certificates mounted
+  read-only from `./tls` (`docker/nginx/nginx.conf`). TLS 1.2 and 1.3
+  only; `ssl_ciphers HIGH:!aNULL:!MD5`; server cipher preference enabled.
+- Port 80 returns a `301` to HTTPS for all requests.
+- Nginx forwards `X-Forwarded-For` (overwritten with the real client IP,
+  not appended to an untrusted chain), `X-Forwarded-Proto`, `Host`, and
+  `X-Real-IP` to the app. The app trusts these headers because it is
+  never exposed directly — Nginx is the only ingress.
+- Certificates are provisioned and renewed with Let's Encrypt
+  `certbot`; see the certbot runbook in `docs/DEPLOYMENT.md`.
+
+### Cookie Secure flag enforced
+
+- `SESSION_COOKIE_SECURE` is forced to `True` in staging/production by
+  `Settings._validate_production_secret`. Session cookies are only
+  ever sent over HTTPS.
+- All session cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, with an
+  explicit `Max-Age` (see the existing Cookie security property above).
+  The `Secure` flag is not optional in production — it is enforced at
+  config load time, so a misconfiguration cannot ship a cookie over
+  HTTP.

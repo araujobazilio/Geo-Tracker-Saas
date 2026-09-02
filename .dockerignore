@@ -14,7 +14,12 @@ htmlcov
 .env
 .env.*
 !.env.example
+!.env.production.example
 Dockerfile
 docker-compose.yml
+docker-compose.prod.yml
 .dockerignore
 docs
+tls
+backups
+node_modules

@@ -12,6 +12,7 @@ from app.web.notifications import router as notifications_router
 from app.web.onboarding import router as onboarding_router
 from app.web.opportunities import router as opportunities_router
 from app.web.pages import router as pages_router
+from app.web.plan import router as plan_router
 from app.web.project_config import router as project_config_router
 from app.web.scans import router as scans_router
 from app.web.schedule import router as schedule_router
@@ -31,6 +32,8 @@ web_router.include_router(scans_router)
 web_router.include_router(opportunities_router)
 # Schedule management
 web_router.include_router(schedule_router)
+# Plan & Usage (read-only customer page)
+web_router.include_router(plan_router)
 # Notification center + preferences
 web_router.include_router(notifications_router)
 # Project configuration (prompt regeneration)

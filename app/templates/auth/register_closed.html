@@ -1,0 +1,24 @@
+{% extends "auth_base.html" %}
+{% block title %}Registration Closed — GEO Tracker{% endblock %}
+{% block content %}
+<div class="auth-card">
+  <div class="auth-header">
+    <h1>GEO Tracker</h1>
+    <p class="auth-subtitle">AI Visibility Intelligence</p>
+  </div>
+  <div class="alert alert-info" role="status">
+    <h2>Registration is currently closed</h2>
+    <p>
+      GEO Tracker is in a closed beta phase. New account registration is
+      not available at this time.
+    </p>
+    <p>
+      If you already have an account, you can
+      <a href="/login">sign in here</a>.
+    </p>
+    <p class="text-sm text-gray-500 mt-4">
+      For access requests, please contact the GEO Tracker team.
+    </p>
+  </div>
+</div>
+{% endblock %}

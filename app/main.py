@@ -20,6 +20,9 @@ from app.config import get_settings
 from app.core.csrf import CSRFMiddleware
 from app.core.exceptions import AppError, TenantAccessError
 from app.core.logging import configure_logging, get_logger
+from app.middleware.correlation import RequestCorrelationMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
+from app.middleware.trusted_host import TrustedHostMiddleware
 from app.routers import infra
 from app.routers.api import analysis as analysis_router
 from app.routers.api import auth as auth_router
@@ -74,6 +77,16 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    # Security headers (HSTS, CSP, X-Content-Type-Options, etc.)
+    # Added early so headers are present on all responses including errors.
+    app.add_middleware(SecurityHeadersMiddleware)
+
+    # Trusted host validation (rejects arbitrary Host headers in production).
+    app.add_middleware(TrustedHostMiddleware)
+
+    # Request correlation ID (X-Request-ID in response + structured logs).
+    app.add_middleware(RequestCorrelationMiddleware)
 
     # CSRF protection for state-changing requests.
     app.add_middleware(CSRFMiddleware)

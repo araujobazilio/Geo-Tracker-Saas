@@ -114,6 +114,23 @@ jobs:
           test -f app/templates/errors/500.html
           test -f app/templates/errors/4xx.html
           test -f app/templates/projects/settings.html
+          test -f app/templates/auth/register_closed.html
+          test -f app/templates/settings/plan.html
+          test -f app/middleware/__init__.py
+          test -f app/middleware/correlation.py
+          test -f app/middleware/security_headers.py
+          test -f app/middleware/trusted_host.py
+          test -f docker-compose.prod.yml
+          test -f docker/nginx/nginx.conf
+          test -f .env.production.example
+          test -f scripts/check_production_config.py
+          test -f scripts/backup_postgres.sh
+          test -f scripts/smoke_test.sh
+          test -f scripts/provision_beta_user.py
+          test -f scripts/seed_plans.py
+          test -f docs/DEPLOYMENT.md
+          test -f docs/OPERATIONS.md
+          test -f docs/BACKUP_AND_RESTORE.md
 
       - name: Verify web app starts (semantic route check)
         run: |
@@ -152,6 +169,7 @@ jobs:
               '/app/w/{workspace_id}/notifications/{notification_id}/read',
               '/app/w/{workspace_id}/notifications/mark-all-read',
               '/app/w/{workspace_id}/settings/notifications',
+              '/app/w/{workspace_id}/settings/plan',
               '/health',
               '/api/v1/auth/register',
               '/api/v1/auth/login',

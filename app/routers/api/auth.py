@@ -15,7 +15,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request, Response, status
 
 from app.config import Settings, get_settings
-from app.core.exceptions import AuthenticationError, RateLimitExceededError
+from app.core.exceptions import AuthenticationError, RateLimitExceededError, ValidationError
 from app.core.session_cookie import clear_session_cookie, set_session_cookie
 from app.dependencies import (
     get_auth_service,
@@ -54,7 +54,17 @@ def register(
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> UserResponse:
-    """Register a new user and create a default personal workspace."""
+    """Register a new user and create a default personal workspace.
+
+    Respects the REGISTRATION_MODE setting:
+    - open: registration is allowed.
+    - closed/invite_only: registration is rejected with a 403 error.
+    """
+    if settings.is_registration_closed:
+        raise ValidationError(
+            "Registration is currently closed. Please contact the administrator for access."
+        )
+
     if not rate_limiter.check("register", client_ip):
         raise RateLimitExceededError("Too many registration attempts. Please try again later.")
 

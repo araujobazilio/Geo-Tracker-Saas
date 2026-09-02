@@ -137,11 +137,21 @@ def login_submit(
 def register_page(
     request: Request,
     user: Annotated[User | None, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
-    """Render the registration page. Redirect to /app if already authenticated."""
+    """Render the registration page. Redirect to /app if already authenticated.
+
+    If registration is closed, render a polished closed-beta message instead.
+    """
     if user is not None:
         return RedirectResponse(url="/app", status_code=302)
     templates = Jinja2Templates(directory="app/templates")
+    if settings.is_registration_closed:
+        return templates.TemplateResponse(
+            request,
+            "auth/register_closed.html",
+            {"settings": settings},
+        )
     return templates.TemplateResponse(request, "auth/register.html")
 
 
@@ -155,8 +165,19 @@ def register_submit(
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> Response:
-    """Process registration form submission. Sets cookie on the returned redirect."""
+    """Process registration form submission. Sets cookie on the returned redirect.
+
+    If registration is closed, reject without creating any User, Workspace,
+    or BillingAccount. Existing users can still log in.
+    """
     templates = Jinja2Templates(directory="app/templates")
+    if settings.is_registration_closed:
+        return templates.TemplateResponse(
+            request,
+            "auth/register_closed.html",
+            {"settings": settings},
+            status_code=403,
+        )
     if not rate_limiter.check("register", client_ip):
         return templates.TemplateResponse(
             request,

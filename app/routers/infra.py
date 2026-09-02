@@ -1,9 +1,10 @@
 """Infrastructure health endpoints.
 
-- GET /health  → liveness, no external dependencies
-- GET /ready   → readiness, verifies PostgreSQL + Redis
+- GET /health  → liveness, no external dependencies, includes build metadata
+- GET /ready   → readiness, verifies PostgreSQL + Redis, includes build metadata
 
 These endpoints are intentionally outside /api/v1 versioning.
+No provider network calls are made from these endpoints.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 
+from app.config import get_settings
 from app.db.redis import check_redis
 from app.db.session import check_database
 
@@ -20,12 +22,16 @@ router = APIRouter(tags=["infra"])
 @router.get("/health")
 def health() -> dict[str, str]:
     """Liveness probe. Never touches external infrastructure."""
-    return {"status": "ok"}
+    settings = get_settings()
+    result: dict[str, str] = {"status": "ok"}
+    result.update(settings.build_metadata)
+    return result
 
 
 @router.get("/ready")
 def ready() -> JSONResponse:
     """Readiness probe. Verifies PostgreSQL and Redis connectivity."""
+    settings = get_settings()
     db_ok = check_database()
     redis_ok = check_redis()
 
@@ -34,6 +40,7 @@ def ready() -> JSONResponse:
         "database": "ok" if db_ok else "error",
         "redis": "ok" if redis_ok else "error",
     }
+    payload.update(settings.build_metadata)
 
     code = status.HTTP_200_OK if (db_ok and redis_ok) else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=code, content=payload)

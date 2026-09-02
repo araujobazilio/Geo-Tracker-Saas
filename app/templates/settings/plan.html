@@ -1,0 +1,209 @@
+{% extends "app_base.html" %}
+{% block title %}Plan & Usage — GEO Tracker{% endblock %}
+{% block content %}
+<div class="max-w-4xl mx-auto px-4 py-8">
+  <h1 class="text-2xl font-bold mb-6">Plan & Usage</h1>
+
+  {% if is_unentitled %}
+  <div class="alert alert-warning mb-6" role="status">
+    <h2 class="text-lg font-semibold">No active plan</h2>
+    <p>Your workspace does not currently have an active plan. New paid
+      measurements are unavailable. You can still view your workspace
+      and historical data.</p>
+    <p class="text-sm text-gray-500 mt-2">Please contact the GEO Tracker team to activate your plan.</p>
+  </div>
+  {% endif %}
+
+  <!-- Plan summary -->
+  <div class="card mb-6">
+    <div class="card-header">
+      <h2 class="card-title">Current Plan</h2>
+    </div>
+    <div class="card-body">
+      <dl class="grid grid-cols-2 gap-4">
+        <div>
+          <dt class="text-sm text-gray-500">Plan</dt>
+          <dd class="font-semibold">{{ plan_name }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm text-gray-500">Status</dt>
+          <dd class="font-semibold">{{ status_label }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm text-gray-500">Billing source</dt>
+          <dd class="font-semibold">{{ billing_source_label }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm text-gray-500">Providers</dt>
+          <dd class="font-semibold">
+            {% if providers %}
+              {{ providers|join(", ") }}
+            {% else %}
+              <span class="text-gray-400">None</span>
+            {% endif %}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+
+  <!-- AI Checks usage -->
+  <div class="card mb-6">
+    <div class="card-header">
+      <h2 class="card-title">AI Checks (this month)</h2>
+    </div>
+    <div class="card-body">
+      <div class="grid grid-cols-4 gap-4 mb-4">
+        <div class="stat-box">
+          <div class="stat-label">Used</div>
+          <div class="stat-value">{{ plan_quota.used }}</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Reserved</div>
+          <div class="stat-value">{{ plan_quota.reserved }}</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Remaining</div>
+          <div class="stat-value {% if plan_quota.is_exhausted %}text-red-600{% endif %}">{{ plan_quota.remaining }}</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Monthly limit</div>
+          <div class="stat-value">{{ plan_quota.limit }}</div>
+        </div>
+      </div>
+
+      <!-- Usage bar -->
+      <div class="usage-bar-container">
+        <div class="usage-bar usage-bar-used" style="width: {{ plan_quota.usage_pct }}%"></div>
+        <div class="usage-bar usage-bar-reserved" style="width: {{ plan_quota.reserved_pct }}%"></div>
+      </div>
+
+      {% if plan_quota.is_80_warning and not plan_quota.is_exhausted %}
+      <div class="alert alert-warning mt-4" role="status">
+        You have used {{ plan_quota.usage_pct }}% of your monthly AI Checks.
+        Consider monitoring your usage to avoid running out.
+      </div>
+      {% endif %}
+
+      {% if plan_quota.is_exhausted %}
+      <div class="alert alert-danger mt-4" role="status">
+        Your monthly AI Checks are exhausted. Paid measurement actions
+        may be unavailable until the next billing cycle.
+      </div>
+      {% endif %}
+
+      <p class="text-sm text-gray-500 mt-2">
+        <strong>Used</strong> = committed AI Checks from completed scans.
+        <strong>Reserved</strong> = held by in-progress scans (released if they fail).
+        <strong>Remaining</strong> = available for new scans.
+      </p>
+    </div>
+  </div>
+
+  <!-- Resource limits -->
+  <div class="card mb-6">
+    <div class="card-header">
+      <h2 class="card-title">Resource Limits</h2>
+    </div>
+    <div class="card-body">
+      <dl class="grid grid-cols-2 gap-4">
+        <div>
+          <dt class="text-sm text-gray-500">Max projects</dt>
+          <dd class="font-semibold">{{ limits.max_projects }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm text-gray-500">Max topics per project</dt>
+          <dd class="font-semibold">{{ limits.max_keywords_per_project }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm text-gray-500">Max competitors per project</dt>
+          <dd class="font-semibold">{{ limits.max_competitors_per_project }}</dd>
+        </div>
+        <div>
+          <dt class="text-sm text-gray-500">Max team members</dt>
+          <dd class="font-semibold">{{ limits.max_team_members }}</dd>
+        </div>
+      </dl>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <div class="card mb-6">
+    <div class="card-header">
+      <h2 class="card-title">Features</h2>
+    </div>
+    <div class="card-body">
+      <ul class="space-y-2">
+        <li class="flex items-center justify-between">
+          <span>Confidence scans</span>
+          {% if features.confidence_scans %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>Verification scans</span>
+          {% if features.verification_scans %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>Scheduled measurements</span>
+          {% if features.scheduled_scans %}
+          <span class="badge badge-green">Enabled (min {{ min_scheduled_scan_interval_hours }}h interval)</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>White-label reports</span>
+          {% if features.white_label_reports %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>Exports</span>
+          {% if features.exports %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>Agency dashboard</span>
+          {% if features.agency_dashboard %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>Integrations</span>
+          {% if features.integrations %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+        <li class="flex items-center justify-between">
+          <span>Bring your own key (BYOK)</span>
+          {% if features.byok %}
+          <span class="badge badge-green">Enabled</span>
+          {% else %}
+          <span class="badge badge-gray">Not available</span>
+          {% endif %}
+        </li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="text-sm text-gray-500">
+    This page is read-only. To change your plan, please contact the GEO Tracker team.
+  </p>
+</div>
+{% endblock %}

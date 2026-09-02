@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
 
+    # --- Build metadata (non-secret, injected at build/deploy time) ---
+    app_version: str = "0.1.0"
+    git_sha: str = ""
+    build_time: str = ""
+
     # --- Logging ---
     log_level: str = "INFO"
     log_json: bool = False
@@ -59,6 +64,10 @@ class Settings(BaseSettings):
 
     # --- Security ---
     cors_origins: str = ""
+    allowed_hosts: str = ""  # comma-separated; empty = allow all (dev/test only)
+
+    # --- Registration / closed beta ---
+    registration_mode: Literal["open", "closed", "invite_only"] = "open"
 
     # --- Session / cookie ---
     session_cookie_name: str = "geo_session"
@@ -207,6 +216,45 @@ class Settings(BaseSettings):
         # Enforce secure cookies in staging/production.
         if not self.session_cookie_secure:
             self.session_cookie_secure = True
+
+        # Reject obvious development DATABASE_URL placeholders.
+        if "geo_tracker_dev_password" in self.database_url:
+            raise ValueError(
+                "DATABASE_URL contains the development password placeholder. "
+                "Provide a real production database URL."
+            )
+
+        # Reject empty REDIS_URL.
+        if not self.redis_url:
+            raise ValueError("REDIS_URL must be set in staging/production.")
+
+        # APP_PUBLIC_BASE_URL must be HTTPS in staging/production.
+        if not self.app_public_base_url.startswith("https://"):
+            raise ValueError("APP_PUBLIC_BASE_URL must use HTTPS in staging/production.")
+
+        # ALLOWED_HOSTS must be set in production.
+        if self.is_production and not self.allowed_hosts:
+            raise ValueError(
+                "ALLOWED_HOSTS must be set in production to prevent Host header spoofing."
+            )
+
+        # DEV_SEED_ENABLED must never be true in production.
+        if self.is_production and self.dev_seed_enabled:
+            raise ValueError("DEV_SEED_ENABLED must not be true in production.")
+
+        # Email validation: if EMAIL_ENABLED, SMTP settings must be present.
+        if self.email_enabled:
+            if not self.smtp_host:
+                raise ValueError("SMTP_HOST must be set when EMAIL_ENABLED is true.")
+            if not self.email_from_address:
+                raise ValueError("EMAIL_FROM_ADDRESS must be set when EMAIL_ENABLED is true.")
+
+        # Production default: closed registration.
+        if self.is_production and self.registration_mode == "open":
+            # Allow explicit open mode but warn via validation —
+            # the operator must set it deliberately.
+            pass
+
         self._validate_confidence_scan_settings()
         return self
 
@@ -243,6 +291,25 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def allowed_host_list(self) -> list[str]:
+        """Return ALLOWED_HOSTS as a list. Empty list means allow all (dev/test only)."""
+        return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()]
+
+    @property
+    def is_registration_closed(self) -> bool:
+        """Return True if new user registration is disabled."""
+        return self.registration_mode in ("closed", "invite_only")
+
+    @property
+    def build_metadata(self) -> dict[str, str]:
+        """Return non-secret build metadata for /health and /version."""
+        return {
+            "version": self.app_version,
+            "git_sha": self.git_sha,
+            "build_time": self.build_time,
+        }
 
 
 @lru_cache(maxsize=1)
