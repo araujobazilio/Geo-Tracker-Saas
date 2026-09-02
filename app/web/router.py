@@ -20,10 +20,11 @@ web_router = APIRouter()
 
 # Auth routes (login, register, logout)
 web_router.include_router(auth_router)
+# Guided onboarding wizard (must be before pages_router so /projects/new
+# doesn't match /projects/{project_id})
+web_router.include_router(onboarding_router)
 # Root + workspace + project dashboard pages
 web_router.include_router(pages_router)
-# Guided onboarding wizard
-web_router.include_router(onboarding_router)
 # Scan execution, polling, detail
 web_router.include_router(scans_router)
 # Action Center (opportunities)

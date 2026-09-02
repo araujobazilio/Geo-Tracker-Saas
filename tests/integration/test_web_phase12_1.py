@@ -431,9 +431,6 @@ class TestMemberRole:
         csrf_token, ws_id = _register(client)
         # Try to access onboarding page — owner should work
         resp = client.get(f"/app/w/{ws_id}/projects/new", headers={"Accept": "text/html"})
-        if resp.status_code != 200:
-            # Print response body for debugging
-            print(f"ONBOARDING RESPONSE {resp.status_code}: {resp.text[:500]}")
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:200]}"
         # The owner is ADMIN/OWNER so this should work.
         # For MEMBER test, we'd need to add a member to the workspace.
@@ -859,6 +856,22 @@ class TestVerificationRejection:
 
         session = _get_db_session()
         try:
+            # Create a Scan first (Opportunity requires first_detected_scan_id)
+            scan = Scan(
+                id=uuid.uuid4(),
+                workspace_id=uuid.UUID(ws_id),
+                project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
+                scan_type=ScanType.STANDARD,
+                status=ScanStatus.COMPLETED,
+                idempotency_key=f"test-verify-{uuid.uuid4().hex[:8]}",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
+            )
+            session.add(scan)
+            session.flush()
+
             opp = Opportunity(
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
@@ -872,6 +885,8 @@ class TestVerificationRejection:
                 summary="Test",
                 priority=OpportunityPriority.HIGH,
                 status=OpportunityStatus.IMPLEMENTED,
+                first_detected_scan_id=scan.id,
+                latest_detected_scan_id=scan.id,
             )
             session.add(opp)
             session.commit()
