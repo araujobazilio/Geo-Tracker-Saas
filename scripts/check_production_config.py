@@ -5,9 +5,10 @@ Checks (WITHOUT making any paid provider API calls):
   - production Settings load (fail-fast validation)
   - database connectivity
   - Redis connectivity
-  - configured provider/model pairs (structural presence only)
+  - active PlanDefinitions exist
+  - active plan provider entitlements match structurally configured
+    provider key+model pairs (FAIL if a plan exposes an unconfigured provider)
   - SMTP settings if EMAIL_ENABLED
-  - PlanDefinitions exist in the database
   - Alembic migration head
 
 Does NOT call OpenAI, Anthropic, Google, or Perplexity.
@@ -22,10 +23,14 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 # Exit codes: 0 = all checks passed, 1 = one or more checks failed.
 EXIT_OK = 0
 EXIT_FAIL = 1
+
+# Project root: scripts/check_production_config.py -> repo root
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _check_settings() -> bool:
@@ -77,44 +82,93 @@ def _check_redis() -> bool:
         return False
 
 
-def _check_providers() -> bool:
-    """Check that configured provider/model pairs are structurally present.
+def _get_configured_providers() -> dict[str, tuple[str, str]]:
+    """Return dict of provider name -> (api_key, scan_model) from Settings."""
+    from app.config import get_settings
 
-    Does NOT make API calls. Only checks that keys and model names are set.
-    A missing provider is NOT a failure — it just means that provider is disabled.
+    settings = get_settings()
+    return {
+        "OPENAI": (settings.openai_api_key.get_secret_value(), settings.openai_scan_model),
+        "ANTHROPIC": (
+            settings.anthropic_api_key.get_secret_value(),
+            settings.anthropic_scan_model,
+        ),
+        "GOOGLE": (settings.google_api_key.get_secret_value(), settings.google_scan_model),
+        "PERPLEXITY": (
+            settings.perplexity_api_key.get_secret_value(),
+            settings.perplexity_scan_model,
+        ),
+    }
+
+
+def _check_providers() -> bool:
+    """Check that active plan provider entitlements are structurally configured.
+
+    For each provider exposed by an active PlanDefinition, verify that the
+    corresponding API key and scan model are set in the environment.
+    A provider absent from all active plans may remain unconfigured.
+
+    Does NOT make API calls. Only checks structural presence of keys/models.
     """
     print("Checking provider configuration (structural only)...", end=" ")
     try:
-        from app.config import get_settings
+        from sqlalchemy import select
 
-        settings = get_settings()
-        providers = {
-            "OPENAI": (settings.openai_api_key.get_secret_value(), settings.openai_scan_model),
-            "ANTHROPIC": (
-                settings.anthropic_api_key.get_secret_value(),
-                settings.anthropic_scan_model,
-            ),
-            "GOOGLE": (settings.google_api_key.get_secret_value(), settings.google_scan_model),
-            "PERPLEXITY": (
-                settings.perplexity_api_key.get_secret_value(),
-                settings.perplexity_scan_model,
-            ),
-        }
-        configured = []
+        from app.db.session import get_session_factory
+        from app.models.plan_definition import PlanDefinition
+        from app.models.plan_provider import PlanProvider
+
+        configured = _get_configured_providers()
+
+        # Collect providers from ALL active plans.
+        factory = get_session_factory()
+        with factory() as session:
+            active_plan_ids = (
+                session.execute(select(PlanDefinition.id).where(PlanDefinition.is_active.is_(True)))
+                .scalars()
+                .all()
+            )
+
+            if not active_plan_ids:
+                print("FAIL (no active plans to check)")
+                return False
+
+            plan_providers = (
+                session.execute(
+                    select(PlanProvider.provider).where(PlanProvider.plan_id.in_(active_plan_ids))
+                )
+                .scalars()
+                .all()
+            )
+
+        required_providers = set(plan_providers)
         incomplete = []
-        for name, (key, model) in providers.items():
+        unconfigured = []
+
+        for name in sorted(required_providers):
+            key, model = configured.get(name, ("", ""))
             if key and model:
-                configured.append(name)
-            elif key or model:
+                continue
+            if key or model:
                 incomplete.append(
                     f"{name} (key={'set' if key else 'missing'}, model={'set' if model else 'missing'})"
                 )
+            else:
+                unconfigured.append(name)
+
+        if unconfigured:
+            print(
+                f"FAIL (active plans expose {', '.join(unconfigured)} but no "
+                f"API key/model configured)"
+            )
+            return False
 
         if incomplete:
-            print(f"WARN (incomplete: {', '.join(incomplete)})")
-        else:
-            print(f"OK (configured: {', '.join(configured) if configured else 'none'})")
-        # Incomplete providers are warnings, not failures.
+            print(f"FAIL (incomplete: {', '.join(incomplete)})")
+            return False
+
+        configured_names = [name for name, (k, m) in configured.items() if k and m]
+        print(f"OK (configured: {', '.join(configured_names) if configured_names else 'none'})")
         return True
     except Exception as exc:
         print(f"FAIL ({exc})")
@@ -174,14 +228,21 @@ def _check_migration_head() -> bool:
     """Check that the database is at the Alembic migration head."""
     print("Checking Alembic migration head...", end=" ")
     try:
-        import os
-
         from alembic.config import Config as AlembicConfig
         from alembic.runtime.migration import MigrationContext
 
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        cfg = AlembicConfig(os.path.join(project_root, "alembic.ini"))
-        cfg.set_main_option("script_location", os.path.join(project_root, "alembic"))
+        alembic_ini = PROJECT_ROOT / "alembic.ini"
+        alembic_dir = PROJECT_ROOT / "alembic"
+
+        if not alembic_ini.exists():
+            print(f"FAIL (alembic.ini not found at {alembic_ini})")
+            return False
+        if not alembic_dir.is_dir():
+            print(f"FAIL (alembic/ directory not found at {alembic_dir})")
+            return False
+
+        cfg = AlembicConfig(str(alembic_ini))
+        cfg.set_main_option("script_location", str(alembic_dir))
 
         from app.db.session import get_engine
 
@@ -216,9 +277,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         _check_settings,
         _check_database,
         _check_redis,
+        _check_plan_definitions,
         _check_providers,
         _check_smtp,
-        _check_plan_definitions,
         _check_migration_head,
     ]
 

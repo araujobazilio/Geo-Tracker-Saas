@@ -149,13 +149,75 @@ def require_authenticated_user(
 # --- Client IP resolution ---
 
 
-def get_client_ip(request: Request) -> str:
-    """Resolve the client IP address.
+def _ip_in_trusted_list(ip: str, trusted: list[str]) -> bool:
+    """Check if an IP is in the trusted proxy list (supports CIDR notation)."""
+    import ipaddress
 
-    For local development, uses request.client.host directly.
-    Does NOT blindly trust X-Forwarded-For headers. Reverse proxy trust
-    configuration should be hardened during production deployment.
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for entry in trusted:
+        try:
+            if "/" in entry:
+                network = ipaddress.ip_network(entry, strict=False)
+                if addr in network:
+                    return True
+            else:
+                if addr == ipaddress.ip_address(entry):
+                    return True
+        except ValueError:
+            continue
+    return False
+
+
+def get_client_ip(request: Request) -> str:
+    """Resolve the real client IP address behind a trusted reverse proxy.
+
+    Trust model:
+    - The direct peer (request.client.host) is the *proxy* when behind Nginx.
+    - X-Forwarded-For is only trusted if the direct peer is in
+      FORWARDED_ALLOW_IPS (configured via Settings).
+    - When trusted, the leftmost non-trusted IP in X-Forwarded-For is the
+      real client IP.
+    - When NOT trusted (or no XFF header), the direct peer IP is used.
+    - This prevents arbitrary public X-Forwarded-For spoofing.
+
+    In development/test with an empty FORWARDED_ALLOW_IPS, the direct peer
+    IP is always used (no proxy trust).
     """
-    if request.client is not None:
-        return request.client.host
-    return "unknown"
+    from app.config import get_settings
+
+    settings = get_settings()
+    trusted = settings.forwarded_allow_ips_list
+
+    if request.client is None:
+        return "unknown"
+
+    direct_peer = request.client.host
+
+    # If no trusted proxies configured, use the direct peer.
+    if not trusted:
+        return direct_peer
+
+    # Only trust XFF if the direct peer is a trusted proxy.
+    if not _ip_in_trusted_list(direct_peer, trusted):
+        return direct_peer
+
+    # Peer is trusted — parse X-Forwarded-For.
+    xff = request.headers.get("x-forwarded-for", "")
+    if not xff:
+        return direct_peer
+
+    # XFF is a comma-separated list: client, proxy1, proxy2, ...
+    # The leftmost IP is the original client. However, since the trusted
+    # proxy overwrites XFF (per Nginx config), we take the leftmost entry.
+    # For defense-in-depth, we walk from left and return the first IP that
+    # is NOT a trusted proxy (in case of chained proxies).
+    ips = [ip.strip() for ip in xff.split(",") if ip.strip()]
+    for ip in ips:
+        if not _ip_in_trusted_list(ip, trusted):
+            return ip
+
+    # All IPs in XFF are trusted proxies — return the last one.
+    return ips[-1] if ips else direct_peer

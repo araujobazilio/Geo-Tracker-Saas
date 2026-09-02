@@ -3,12 +3,21 @@
 # =============================================================================
 # Services: nginx, app, worker, beat, postgres, redis, migrate (one-shot)
 # =============================================================================
-# Usage:
-#   docker compose -f docker-compose.prod.yml up -d
-#   docker compose -f docker-compose.prod.yml run --rm migrate
+# Release sequence (see docs/DEPLOYMENT.md for full runbook):
+#   1. Build/pull exact SHA image
+#   2. Backup database (scripts/backup_postgres.sh)
+#   3. Run migration (one-shot, BEFORE app rollout):
+#        docker compose -f docker-compose.prod.yml run --rm migrate
+#   4. Start/update services:
+#        docker compose -f docker-compose.prod.yml up -d
+#   5. Readiness check: curl https://<host>/ready
+#   6. Worker check: docker compose exec worker celery inspect ping
+#   7. Smoke test: scripts/smoke_test.sh
 # =============================================================================
 # IMPORTANT: PostgreSQL and Redis are NOT exposed publicly.
 # All inter-service communication is on the internal Docker network.
+# Migration is a deliberate one-shot step — do NOT auto-run Alembic inside
+# every app replica.
 # =============================================================================
 
 name: geo-tracker-prod
@@ -57,6 +66,10 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       APP_ENV: production
       GIT_SHA: ${GIT_SHA:-unknown}
+      # Trust the Nginx container as the forwarding proxy.
+      # The Docker internal network typically uses 172.16.0.0/12.
+      # Adjust to match your Docker network subnet if different.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-172.16.0.0/12}
     # NO host port mapping — Nginx proxies to app internally.
     expose:
       - "8000"
@@ -154,7 +167,8 @@ services:
       app:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
+      # nginx:alpine does not include curl; use wget which is available.
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
       interval: 30s
       timeout: 5s
       retries: 3

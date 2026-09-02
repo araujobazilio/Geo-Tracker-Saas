@@ -58,7 +58,7 @@ def register(
 
     Respects the REGISTRATION_MODE setting:
     - open: registration is allowed.
-    - closed/invite_only: registration is rejected with a 403 error.
+    - closed: registration is rejected with a 403 error.
     """
     if settings.is_registration_closed:
         raise ValidationError(

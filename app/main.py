@@ -21,6 +21,7 @@ from app.core.csrf import CSRFMiddleware
 from app.core.exceptions import AppError, TenantAccessError
 from app.core.logging import configure_logging, get_logger
 from app.middleware.correlation import RequestCorrelationMiddleware
+from app.middleware.request_logging import RequestLoggingMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.trusted_host import TrustedHostMiddleware
 from app.routers import infra
@@ -87,6 +88,10 @@ def create_app() -> FastAPI:
 
     # Request correlation ID (X-Request-ID in response + structured logs).
     app.add_middleware(RequestCorrelationMiddleware)
+
+    # Structured request logging (method, path, status, duration).
+    # Added after correlation so request_id is in the log context.
+    app.add_middleware(RequestLoggingMiddleware)
 
     # CSRF protection for state-changing requests.
     app.add_middleware(CSRFMiddleware)

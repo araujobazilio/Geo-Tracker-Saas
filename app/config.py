@@ -67,7 +67,14 @@ class Settings(BaseSettings):
     allowed_hosts: str = ""  # comma-separated; empty = allow all (dev/test only)
 
     # --- Registration / closed beta ---
-    registration_mode: Literal["open", "closed", "invite_only"] = "open"
+    registration_mode: Literal["open", "closed"] = "open"
+
+    # --- Trusted proxy ---
+    # Comma-separated list of IPs/CIDRs trusted to provide forwarded headers
+    # (X-Forwarded-For, X-Forwarded-Proto). Empty = trust none (use direct
+    # connection IP). In production behind Nginx, set to the Nginx container IP
+    # or the Docker internal subnet (e.g. "172.16.0.0/12").
+    forwarded_allow_ips: str = ""
 
     # --- Session / cookie ---
     session_cookie_name: str = "geo_session"
@@ -249,11 +256,10 @@ class Settings(BaseSettings):
             if not self.email_from_address:
                 raise ValueError("EMAIL_FROM_ADDRESS must be set when EMAIL_ENABLED is true.")
 
-        # Production default: closed registration.
-        if self.is_production and self.registration_mode == "open":
-            # Allow explicit open mode but warn via validation —
-            # the operator must set it deliberately.
-            pass
+        # Production fail-closed: if REGISTRATION_MODE was NOT explicitly
+        # supplied, default to "closed". An explicit "open" is honored.
+        if self.is_production and "registration_mode" not in self.model_fields_set:
+            self.registration_mode = "closed"
 
         self._validate_confidence_scan_settings()
         return self
@@ -298,9 +304,14 @@ class Settings(BaseSettings):
         return [h.strip() for h in self.allowed_hosts.split(",") if h.strip()]
 
     @property
+    def forwarded_allow_ips_list(self) -> list[str]:
+        """Return FORWARDED_ALLOW_IPS as a list. Empty = trust none."""
+        return [ip.strip() for ip in self.forwarded_allow_ips.split(",") if ip.strip()]
+
+    @property
     def is_registration_closed(self) -> bool:
         """Return True if new user registration is disabled."""
-        return self.registration_mode in ("closed", "invite_only")
+        return self.registration_mode == "closed"
 
     @property
     def build_metadata(self) -> dict[str, str]:

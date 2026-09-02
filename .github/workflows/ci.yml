@@ -120,6 +120,7 @@ jobs:
           test -f app/middleware/correlation.py
           test -f app/middleware/security_headers.py
           test -f app/middleware/trusted_host.py
+          test -f app/middleware/request_logging.py
           test -f docker-compose.prod.yml
           test -f docker/nginx/nginx.conf
           test -f .env.production.example
@@ -194,3 +195,108 @@ jobs:
 
       - name: pytest
         run: pytest -v
+
+      # ====================================================================
+      # Production Docker / Compose / Nginx gates
+      # ====================================================================
+
+      - name: Validate production compose config
+        env:
+          DATABASE_USER: geo_tracker
+          DATABASE_PASSWORD: ci-dummy-password
+          DATABASE_NAME: geo_tracker
+          GIT_SHA: ${{ github.sha }}
+          FORWARDED_ALLOW_IPS: 172.16.0.0/12
+        run: |
+          docker compose -f docker-compose.prod.yml config -q
+
+      - name: Verify production compose has no public DB/Redis ports
+        run: |
+          python -c "
+          import yaml, sys
+          with open('docker-compose.prod.yml') as f:
+              data = yaml.safe_load(f)
+          services = data.get('services', {})
+          for svc_name in ['postgres', 'redis', 'app']:
+              ports = services.get(svc_name, {}).get('ports', [])
+              if ports:
+                  print(f'FAIL: {svc_name} has public ports: {ports}')
+                  sys.exit(1)
+          nginx_ports = services.get('nginx', {}).get('ports', [])
+          port_strs = [str(p) for p in nginx_ports]
+          assert any('80' in p for p in port_strs), 'Nginx must publish 80'
+          assert any('443' in p for p in port_strs), 'Nginx must publish 443'
+          print('OK: production compose port configuration valid')
+          "
+
+      - name: Build production Docker image
+        run: |
+          docker build \
+            --tag geo-tracker-ci:${{ github.sha }} \
+            .
+
+      - name: Inspect production image (non-root runtime)
+        run: |
+          # Verify the runtime user is NOT root (uid 0).
+          RUNTIME_UID=$(docker run --rm geo-tracker-ci:${{ github.sha }} id -u)
+          echo "Runtime UID: $RUNTIME_UID"
+          if [ "$RUNTIME_UID" = "0" ]; then
+            echo "FAIL: production image runs as root (uid 0)"
+            exit 1
+          fi
+          echo "OK: production image runs as non-root (uid $RUNTIME_UID)"
+
+      - name: Verify runtime image has no dev tooling
+        run: |
+          # Verify pytest, ruff, mypy, ipython are NOT installed in the runtime image.
+          for tool in pytest ruff mypy ipython; do
+            if docker run --rm geo-tracker-ci:${{ github.sha }} which $tool 2>/dev/null; then
+              echo "FAIL: $tool is present in the production runtime image"
+              exit 1
+            fi
+            echo "OK: $tool not found in runtime image"
+          done
+
+      - name: Verify /app/.env does not exist in image
+        run: |
+          if docker run --rm geo-tracker-ci:${{ github.sha }} test -f /app/.env 2>/dev/null; then
+            echo "FAIL: /app/.env exists in production image"
+            exit 1
+          fi
+          echo "OK: /app/.env not found in production image"
+
+      - name: Production image health smoke
+        run: |
+          # Run the production image and verify /health responds.
+          docker run --rm -d --name geo-tracker-smoke -p 18001:8000 \
+            -e APP_ENV=test \
+            -e APP_SECRET_KEY=ci-smoke-test-secret-not-for-production-use \
+            -e DATABASE_URL=postgresql+psycopg://geo_tracker:geo_tracker_dev_password@localhost:5432/geo_tracker_test \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e LOG_JSON=false \
+            geo-tracker-ci:${{ github.sha }}
+          sleep 5
+          # /health should return 200 (zero-dependency endpoint).
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:18001/health || echo "000")
+          echo "Health status: $STATUS"
+          docker stop geo-tracker-smoke 2>/dev/null || true
+          if [ "$STATUS" != "200" ]; then
+            echo "FAIL: /health did not return 200"
+            exit 1
+          fi
+          echo "OK: /health returned 200"
+
+      - name: Validate Nginx config syntax
+        run: |
+          # Create temporary dummy cert files for syntax validation.
+          mkdir -p /tmp/nginx-tls
+          openssl req -x509 -nodes -days 1 \
+            -newkey rsa:2048 \
+            -keyout /tmp/nginx-tls/dummy.key \
+            -out /tmp/nginx-tls/dummy.crt \
+            -subj "/CN=localhost" 2>/dev/null
+          # Validate nginx config by mounting it into the nginx image.
+          docker run --rm \
+            -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
+            -v /tmp/nginx-tls:/etc/nginx/tls:ro \
+            nginx:1.27-alpine nginx -t

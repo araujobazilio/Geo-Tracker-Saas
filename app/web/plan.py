@@ -2,6 +2,7 @@
 
 Displays:
 - Current plan name and friendly billing source label
+- Real billing account status (Active, Trialing, Past due, Canceled, Unentitled)
 - AI Checks: used, reserved, remaining, monthly limit
 - Resource limits: projects, topics, competitors, team members
 - Feature flags: confidence, verification, scheduled scans, email
@@ -20,6 +21,7 @@ import fastapi
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.enums import BillingAccountStatus, BillingSource
@@ -30,6 +32,7 @@ from app.dependencies import (
 from app.dependencies import (
     get_workspace_auth_service,
 )
+from app.models.billing import BillingAccount
 from app.models.user import User
 from app.services.entitlement_service import EntitlementService
 from app.services.quota_service import QuotaService
@@ -93,7 +96,35 @@ def plan_page(
         else (ent.billing_source.value if ent.billing_source else "")
     )
     billing_source_label = _BILLING_SOURCE_LABELS.get(billing_source_value, "Not configured")
-    status_label = "Unentitled" if ent.is_unentitled else "Active"
+
+    # Read the primary BillingAccount for display status.
+    # EffectiveEntitlements.is_unentitled collapses non-eligible states to
+    # UNENTITLED, so we read the BillingAccount directly for the *display*
+    # status. EntitlementService remains authoritative for what the customer
+    # may DO; BillingAccount is only the display source for WHY.
+    primary_billing = db.execute(
+        select(BillingAccount).where(
+            BillingAccount.workspace_id == workspace_id,
+            BillingAccount.is_primary.is_(True),
+        )
+    ).scalar_one_or_none()
+
+    if primary_billing is not None:
+        status_key = (
+            primary_billing.status.value
+            if hasattr(primary_billing.status, "value")
+            else str(primary_billing.status)
+        )
+        status_label = _STATUS_LABELS.get(status_key, "Unknown")
+        # Also derive billing source from the actual account.
+        source_key = (
+            primary_billing.source.value
+            if hasattr(primary_billing.source, "value")
+            else str(primary_billing.source)
+        )
+        billing_source_label = _BILLING_SOURCE_LABELS.get(source_key, billing_source_label)
+    else:
+        status_label = "Unentitled"
 
     # Feature availability.
     features = {

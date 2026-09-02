@@ -279,6 +279,68 @@ class TestProductionConfigValidation:
         settings = Settings()
         assert settings.is_registration_closed is False
 
+    def test_production_omitted_registration_defaults_closed(
+        self, _clean_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production + REGISTRATION_MODE omitted => closed (fail-closed)."""
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_SECRET_KEY", "a" * 64)
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:strongpass@db:5432/geo")
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
+        monkeypatch.setenv("APP_PUBLIC_BASE_URL", "https://example.com")
+        monkeypatch.setenv("ALLOWED_HOSTS", "example.com")
+        # REGISTRATION_MODE is NOT set.
+
+        from app.config import Settings
+
+        settings = Settings()
+        assert settings.registration_mode == "closed"
+        assert settings.is_registration_closed is True
+
+    def test_development_omitted_registration_defaults_open(
+        self, _clean_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Development + REGISTRATION_MODE omitted => open."""
+        monkeypatch.setenv("APP_ENV", "development")
+        # REGISTRATION_MODE is NOT set.
+
+        from app.config import Settings
+
+        settings = Settings()
+        assert settings.registration_mode == "open"
+        assert settings.is_registration_closed is False
+
+    def test_test_omitted_registration_defaults_open(
+        self, _clean_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test + REGISTRATION_MODE omitted => open."""
+        monkeypatch.setenv("APP_ENV", "test")
+        # REGISTRATION_MODE is NOT set.
+
+        from app.config import Settings
+
+        settings = Settings()
+        assert settings.registration_mode == "open"
+        assert settings.is_registration_closed is False
+
+    def test_production_explicit_open_still_works(
+        self, _clean_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Production + explicit REGISTRATION_MODE=open => open (not silently closed)."""
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_SECRET_KEY", "a" * 64)
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:strongpass@db:5432/geo")
+        monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
+        monkeypatch.setenv("APP_PUBLIC_BASE_URL", "https://example.com")
+        monkeypatch.setenv("ALLOWED_HOSTS", "example.com")
+        monkeypatch.setenv("REGISTRATION_MODE", "open")
+
+        from app.config import Settings
+
+        settings = Settings()
+        assert settings.registration_mode == "open"
+        assert settings.is_registration_closed is False
+
     def test_build_metadata(self, _clean_env, monkeypatch: pytest.MonkeyPatch) -> None:
         """Build metadata is exposed safely."""
         monkeypatch.setenv("APP_ENV", "production")

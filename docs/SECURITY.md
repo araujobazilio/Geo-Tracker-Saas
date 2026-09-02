@@ -428,16 +428,16 @@ correlation ID.
 ### Closed beta registration gate
 
 - **`REGISTRATION_MODE`** (`app/config.py`) is a `Literal["open",
-  "closed", "invite_only"]` defaulting to `"open"` for development.
-  `Settings.is_registration_closed` returns `True` for `"closed"` and
-  `"invite_only"`.
+  "closed"]` defaulting to `"open"` for development.
+  `Settings.is_registration_closed` returns `True` for `"closed"`.
 - For closed beta, set `REGISTRATION_MODE=closed` in
   `.env.production`. The register endpoint refuses new sign-ups while
   login for existing users continues to work. This prevents
   uncontrolled account creation during the beta period.
-- Production validation does not force a specific mode (an operator may
-  legitimately choose `invite_only`), but the default `open` should be
-  set deliberately, not accidentally.
+- Production fail-closed: if `REGISTRATION_MODE` is NOT explicitly
+  supplied in production, it defaults to `"closed"`. An explicit
+  `REGISTRATION_MODE=open` is still honored if the operator deliberately
+  chooses to enable public registration.
 
 ### Production config fail-fast validation
 
