@@ -15,6 +15,7 @@ import contextlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -887,6 +888,8 @@ class TestVerificationRejection:
                 status=OpportunityStatus.IMPLEMENTED,
                 first_detected_scan_id=scan.id,
                 latest_detected_scan_id=scan.id,
+                first_detected_at=datetime.now(UTC),
+                last_detected_at=datetime.now(UTC),
             )
             session.add(opp)
             session.commit()
