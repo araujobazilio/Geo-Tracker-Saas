@@ -1,0 +1,28 @@
+{% extends "auth_base.html" %}
+{% block title %}Create account — GEO Tracker{% endblock %}
+{% block content %}
+<div class="card">
+  <h2 class="card-title">Create your account</h2>
+  <p class="text-sm text-gray-600 mt-1">Start tracking how AI systems see your brand.</p>
+  {% if error %}
+  <div class="alert alert-error" role="alert">{{ error }}</div>
+  {% endif %}
+  <form method="POST" action="/register" class="mt-6 space-y-4">
+    <div>
+      <label for="email" class="form-label">Email</label>
+      <input type="email" id="email" name="email" value="{{ email or '' }}" required
+             class="form-input" autocomplete="email" autofocus>
+    </div>
+    <div>
+      <label for="password" class="form-label">Password</label>
+      <input type="password" id="password" name="password" required
+             class="form-input" autocomplete="new-password" minlength="12">
+      <p class="form-hint">At least 12 characters.</p>
+    </div>
+    <button type="submit" class="btn btn-primary w-full">Create account</button>
+  </form>
+  <p class="mt-6 text-center text-sm text-gray-600">
+    Already have an account? <a href="/login" class="link">Sign in</a>
+  </p>
+</div>
+{% endblock %}

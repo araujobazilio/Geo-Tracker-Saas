@@ -1,0 +1,25 @@
+{# Partial template for scan status polling. Rendered standalone by the status endpoint. #}
+<div id="scan-status-block"
+     {% if not is_terminal %}hx-get="/app/w/{{ workspace_id }}/projects/{{ project_id }}/scans/{{ scan.id }}/status" hx-trigger="every 4s" hx-swap="outerHTML"{% endif %}>
+  <div class="card">
+    <div class="card-body flex items-center justify-between">
+      <div>
+        <span class="badge {{ scan_status_badge(scan.status) }}">{{ scan_status_label(scan.status) }}</span>
+        {% if scan.status == 'PENDING' %}
+        <span class="text-sm text-gray-600 ml-2">Queued — waiting to start…</span>
+        {% elif scan.status == 'RUNNING' %}
+        <span class="text-sm text-gray-600 ml-2">Running — measuring AI providers…</span>
+        {% elif scan.status == 'COMPLETED' %}
+        <span class="text-sm text-gray-600 ml-2">Measurement completed.</span>
+        {% elif scan.status == 'PARTIAL' %}
+        <span class="text-sm text-gray-600 ml-2">Partial measurement — some requests did not complete.</span>
+        {% elif scan.status == 'FAILED' %}
+        <span class="text-sm text-gray-600 ml-2">Measurement failed.</span>
+        {% endif %}
+      </div>
+      {% if is_terminal %}
+      <a href="/app/w/{{ workspace_id }}/projects/{{ project_id }}" class="btn btn-secondary btn-sm">View dashboard</a>
+      {% endif %}
+    </div>
+  </div>
+</div>

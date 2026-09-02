@@ -1,0 +1,106 @@
+{% extends "app_base.html" %}
+{% block title %}{{ workspace.name }} — Overview{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  <div class="flex items-center justify-between">
+    <h1 class="page-title">Overview</h1>
+    {% if is_owner_or_admin %}
+    <a href="/app/w/{{ workspace_id }}/projects/new" class="btn btn-primary">+ New project</a>
+    {% endif %}
+  </div>
+
+  <!-- KPI cards -->
+  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div class="card">
+      <div class="card-body">
+        <p class="metric-label">Active projects</p>
+        <p class="metric-value">{{ overview.active_projects }}</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <p class="metric-label">AI Checks (monthly)</p>
+        <p class="metric-value">{{ quota.used }} / {{ quota.limit }}</p>
+        {% if quota.is_warning %}
+        <p class="metric-warning">{{ quota.usage_pct }}% used</p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <p class="metric-label">Open high-priority opportunities</p>
+        <p class="metric-value">{{ overview.high_open_opportunities }}</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-body">
+        <p class="metric-label">Unread notifications</p>
+        <p class="metric-value">{{ overview.unread_notifications }}</p>
+      </div>
+    </div>
+  </div>
+
+  {% if overview.next_scheduled_run %}
+  <div class="alert alert-info">
+    Next scheduled measurement: {{ overview.next_scheduled_run.strftime('%Y-%m-%d %H:%M UTC') }}
+  </div>
+  {% endif %}
+
+  <!-- Projects -->
+  <section id="projects">
+    <h2 class="section-title">Projects</h2>
+    {% if not overview.projects %}
+    <!-- Empty state -->
+    <div class="card empty-state">
+      <div class="card-body text-center py-12">
+        <h3 class="text-lg font-semibold text-gray-900">Track how AI systems see your brand</h3>
+        <p class="mt-2 text-sm text-gray-600 max-w-md mx-auto">
+          Create your first project to start measuring how leading AI providers discover, mention, and cite your brand.
+        </p>
+        <div class="mt-6 space-y-2 text-sm text-gray-600 max-w-sm mx-auto text-left">
+          <p>1. Add your brand and topics.</p>
+          <p>2. GEO Tracker measures leading AI providers.</p>
+          <p>3. Get opportunities and verify improvements.</p>
+        </div>
+        {% if is_owner_or_admin %}
+        <a href="/app/w/{{ workspace_id }}/projects/new" class="btn btn-primary mt-6">Create your first project</a>
+        {% endif %}
+      </div>
+    </div>
+    {% else %}
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {% for project in overview.projects %}
+      <a href="/app/w/{{ workspace_id }}/projects/{{ project.id }}" class="card card-hover">
+        <div class="card-body">
+          <div class="flex items-start justify-between">
+            <div>
+              <h3 class="card-title-sm">{{ project.name }}</h3>
+              <p class="text-sm text-gray-600">{{ truncate(project.domain, 40) }}</p>
+            </div>
+            <span class="badge badge-gray badge-sm">{{ project.status }}</span>
+          </div>
+          <div class="mt-4 space-y-1 text-sm">
+            <div class="flex justify-between">
+              <span class="text-gray-600">Brand visibility</span>
+              <span class="font-medium">{{ format_metric_or_none(project.visibility_rate) }}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-600">Coverage</span>
+              <span class="font-medium">{{ format_metric_or_none(project.measurement_coverage) }}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-600">High-priority opportunities</span>
+              <span class="font-medium">{{ project.high_open_opportunities }}</span>
+            </div>
+          </div>
+          {% if project.is_prompt_set_stale %}
+          <div class="alert alert-warning mt-3 text-xs">Tracking prompts need regeneration.</div>
+          {% endif %}
+        </div>
+      </a>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

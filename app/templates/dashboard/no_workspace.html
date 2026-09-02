@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}No workspace — GEO Tracker{% endblock %}
+{% block body %}
+<div class="flex items-center justify-center h-full">
+  <div class="card max-w-md">
+    <div class="card-body text-center">
+      <h2 class="card-title">No workspace available</h2>
+      <p class="mt-2 text-sm text-gray-600">
+        Your account is not linked to any workspace. Please contact support to get started.
+      </p>
+      <form method="POST" action="/logout" class="mt-6">
+        <button type="submit" class="btn btn-ghost">Sign out</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

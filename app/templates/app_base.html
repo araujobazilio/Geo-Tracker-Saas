@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ workspace.name if workspace else 'GEO Tracker' }} — GEO Tracker{% endblock %}
+{% block body %}
+<div class="flex h-full">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <a href="/app/w/{{ workspace_id }}" class="sidebar-brand">GEO Tracker</a>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="/app/w/{{ workspace_id }}" class="nav-item {% if request.url.path == '/app/w/' ~ workspace_id %}nav-active{% endif %}">
+        <span class="nav-icon">○</span> Overview
+      </a>
+      <a href="/app/w/{{ workspace_id }}#projects" class="nav-item">
+        <span class="nav-icon">▤</span> Projects
+      </a>
+      <a href="/app/w/{{ workspace_id }}/notifications" class="nav-item {% if '/notifications' in request.url.path %}nav-active{% endif %}">
+        <span class="nav-icon">🔔</span> Notifications
+        {% if unread_notifications > 0 %}
+        <span class="badge badge-red badge-sm">{{ unread_notifications }}</span>
+        {% endif %}
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <span class="user-email">{{ user.email }}</span>
+        <span class="user-role">{{ role }}</span>
+      </div>
+      <form method="POST" action="/logout" class="inline">
+        <button type="submit" class="btn btn-ghost btn-sm">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <div class="flex-1 flex flex-col overflow-hidden">
+    <!-- Top bar -->
+    <header class="topbar">
+      <button class="btn btn-ghost btn-sm md:hidden" onclick="document.getElementById('sidebar').classList.toggle('sidebar-open')">
+        <span aria-hidden="true">☰</span>
+        <span class="sr-only">Toggle menu</span>
+      </button>
+      <div class="topbar-workspace">
+        <span class="workspace-name">{{ workspace.name if workspace else 'Workspace' }}</span>
+        {% if plan_name %}
+        <span class="badge badge-gray badge-sm">{{ plan_name }}</span>
+        {% endif %}
+      </div>
+      <div class="topbar-right">
+        <!-- Quota indicator -->
+        <div class="quota-indicator" title="AI Checks: {{ quota.used }} used, {{ quota.remaining }} remaining of {{ quota.limit }}">
+          <span class="quota-label">AI Checks</span>
+          <span class="quota-value">{{ quota.used }} / {{ quota.limit }}</span>
+          {% if quota.is_warning %}
+          <span class="badge badge-yellow badge-sm">{{ quota.usage_pct }}%</span>
+          {% endif %}
+        </div>
+        <!-- Notification bell -->
+        <a href="/app/w/{{ workspace_id }}/notifications" class="bell-button" aria-label="Notifications">
+          <span aria-hidden="true">🔔</span>
+          {% if unread_notifications > 0 %}
+          <span class="bell-count">{{ unread_notifications }}</span>
+          {% endif %}
+        </a>
+      </div>
+    </header>
+
+    <!-- Flash messages -->
+    {% if flashes %}
+    <div class="flash-container">
+      {% for flash in flashes %}
+      <div class="alert alert-{{ flash.level }}" role="status">{{ flash.text }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Page content -->
+    <main class="main-content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endblock %}

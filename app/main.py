@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.config import get_settings
 from app.core.csrf import CSRFMiddleware
@@ -76,16 +79,43 @@ def create_app() -> FastAPI:
     app.add_middleware(CSRFMiddleware)
 
     # Centralized exception handlers.
+    # For web (HTML) routes, return HTML error pages. For API (JSON) routes,
+    # return JSON error responses. We distinguish by Accept header.
+    _templates = Jinja2Templates(directory="app/templates")
+
+    def _is_web_request(request: Request) -> bool:
+        """Return True if the client expects HTML (web browser), not JSON."""
+        accept = request.headers.get("accept", "")
+        return "text/html" in accept and "application/json" not in accept
+
     @app.exception_handler(TenantAccessError)
-    async def tenant_access_handler(request: Request, exc: TenantAccessError) -> JSONResponse:
+    async def tenant_access_handler(
+        request: Request, exc: TenantAccessError
+    ) -> JSONResponse | HTMLResponse:
         # Return 404 to avoid revealing whether an inaccessible resource exists.
+        if _is_web_request(request):
+            return _templates.TemplateResponse(
+                "errors/404.html", {"request": request}, status_code=404
+            )
         return JSONResponse(
             status_code=404,
             content={"error": {"code": "not_found", "message": "Resource not found."}},
         )
 
     @app.exception_handler(AppError)
-    async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    async def app_error_handler(request: Request, exc: AppError) -> JSONResponse | HTMLResponse:
+        if _is_web_request(request):
+            if exc.status_code == 404:
+                return _templates.TemplateResponse(
+                    "errors/404.html", {"request": request}, status_code=404
+                )
+            if exc.status_code == 403:
+                return _templates.TemplateResponse(
+                    "errors/403.html", {"request": request}, status_code=403
+                )
+            return _templates.TemplateResponse(
+                "errors/500.html", {"request": request}, status_code=500
+            )
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
@@ -107,6 +137,17 @@ def create_app() -> FastAPI:
     app.include_router(verification_router.router)
     app.include_router(schedule_router.router)
     app.include_router(notifications_router.router)
+
+    # Web application routes (customer-facing Jinja2 + HTMX).
+    from app.web.router import web_router
+
+    app.include_router(web_router)
+
+    # Static files (CSS, JS, vendored HTMX + Chart.js).
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
     return app
 
 

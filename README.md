@@ -24,12 +24,12 @@ an action was implemented.
 | 4 | Project onboarding and prompt system | IMPLEMENTED |
 | 5 | AI provider abstraction and integrations | IMPLEMENTED |
 | 6 | Scan Engine | IMPLEMENTED |
-| 7 | Brand / citation detection and metrics | PLANNED |
-| 8 | Confidence Scans | PLANNED |
-| 9 | Action Center / opportunity engine | PLANNED |
-| 10 | Verification system | PLANNED |
-| 11 | Scheduling and email reports | PLANNED |
-| 12 | Dashboard and user interface | PLANNED |
+| 7 | Brand / citation detection and metrics | IMPLEMENTED |
+| 8 | Confidence Scans | IMPLEMENTED |
+| 9 | Action Center / opportunity engine | IMPLEMENTED |
+| 10 | Verification system | IMPLEMENTED |
+| 11 | Scheduling and email reports | IMPLEMENTED |
+| 12 | Dashboard and user interface | IMPLEMENTED |
 | 13 | Agency dashboard and white-label reports | PLANNED |
 | 14 | AppSumo licensing integration | PLANNED |
 | 15 | Stripe billing | PLANNED |
@@ -82,6 +82,12 @@ See `docs/` for detailed architecture and roadmap documentation.
   precedence, and null-as-unknown semantics. No production rules are seeded;
   operators must add verified rules for environment-configured model IDs. See
   `docs/COST_ACCOUNTING.md`.
+- **Web application:** server-rendered HTML (Jinja2) with HTMX for
+  progressive enhancement and Chart.js for trend visualization. Guided
+  project onboarding wizard, workspace and project dashboards, Action
+  Center with opportunity workflow, scan detail with polling, notification
+  center, and schedule management. See `docs/WEB_APP.md`,
+  `docs/ONBOARDING_UX.md`, and `docs/DASHBOARD_UX.md`.
 
 ---
 
@@ -92,7 +98,7 @@ See `docs/` for detailed architecture and roadmap documentation.
 - **Cache / queue broker:** Redis
 - **Background jobs:** Celery + Celery Beat
 - **Migrations:** Alembic
-- **Frontend:** Jinja2, HTMX, Tailwind CSS, Chart.js (planned)
+- **Frontend:** Jinja2, HTMX 2.x, Tailwind CSS, Chart.js 4.x
 - **Infrastructure:** Docker, Docker Compose, Nginx, HTTPS (production)
 - **Quality:** pytest, Ruff, mypy (strict), GitHub Actions CI
 

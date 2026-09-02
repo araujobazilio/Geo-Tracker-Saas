@@ -1,0 +1,36 @@
+{% extends "app_base.html" %}
+{% block title %}{{ scan_type_label(scan.scan_type) }} — GEO Tracker{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  <div>
+    <a href="/app/w/{{ workspace_id }}/projects/{{ project_id }}" class="link text-sm">← Back to project</a>
+    <h1 class="page-title mt-2">{{ scan_type_label(scan.scan_type) }}</h1>
+    <p class="text-sm text-gray-600">{{ scan.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</p>
+  </div>
+
+  <!-- Scan status (HTMX polling for non-terminal) -->
+  <div id="scan-status-block"
+       hx-get="/app/w/{{ workspace_id }}/projects/{{ project_id }}/scans/{{ scan.id }}/status"
+       hx-trigger="every 4s"
+       hx-swap="outerHTML">
+    {% include "partials/scan_status.html" %}
+  </div>
+
+  <!-- Scan details -->
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Details</h2></div>
+    <div class="card-body">
+      <table class="table">
+        <tbody>
+          <tr><td class="text-gray-600">Type</td><td>{{ scan_type_label(scan.scan_type) }}</td></tr>
+          <tr><td class="text-gray-600">Status</td><td><span class="badge {{ scan_status_badge(scan.status) }}">{{ scan_status_label(scan.status) }}</span></td></tr>
+          <tr><td class="text-gray-600">Created</td><td>{{ scan.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</td></tr>
+          {% if scan.completed_at %}
+          <tr><td class="text-gray-600">Completed</td><td>{{ scan.completed_at.strftime('%Y-%m-%d %H:%M UTC') }}</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

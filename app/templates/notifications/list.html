@@ -1,0 +1,42 @@
+{% extends "app_base.html" %}
+{% block title %}Notifications — GEO Tracker{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  <div class="flex items-center justify-between">
+    <h1 class="page-title">Notifications</h1>
+    <form method="POST" action="/app/w/{{ workspace_id }}/notifications/mark-all-read" class="inline">
+      <button type="submit" class="btn btn-ghost btn-sm">Mark all as read</button>
+    </form>
+  </div>
+
+  {% if not notifications %}
+  <div class="card empty-state">
+    <div class="card-body text-center py-12">
+      <h3 class="text-lg font-semibold">No notifications</h3>
+      <p class="mt-2 text-sm text-gray-600">You'll see updates here when measurements complete or new opportunities are found.</p>
+    </div>
+  </div>
+  {% else %}
+  <div class="space-y-2">
+    {% for notif in notifications %}
+    <div class="card {% if not notif.read_at %}card-unread{% endif %}">
+      <div class="card-body flex items-start justify-between">
+        <div class="flex-1">
+          <h3 class="font-medium text-sm">{{ notif.title }}</h3>
+          <p class="text-sm text-gray-600 mt-1">{{ notif.message }}</p>
+          <p class="text-xs text-gray-400 mt-1">{{ notif.created_at.strftime('%Y-%m-%d %H:%M UTC') }}</p>
+        </div>
+        <div class="flex gap-2">
+          {% if not notif.read_at %}
+          <form method="POST" action="/app/w/{{ workspace_id }}/notifications/{{ notif.id }}/read" class="inline">
+            <button type="submit" class="btn btn-ghost btn-sm">Mark read</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

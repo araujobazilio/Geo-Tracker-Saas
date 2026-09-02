@@ -23,13 +23,14 @@ External AI APIs
 
 **Modular monolith.** Clear boundaries between:
 
-- HTTP layer (`app/routers`)
+- HTTP layer (`app/routers` for REST API, `app/web` for browser UI)
 - domain / application logic (`app/services`)
 - persistence (`app/repositories`, `app/db`)
 - external providers (`app/providers`)
 - billing / entitlements (`app/services/entitlements`, `app/integrations`)
 - background jobs (`app/workers`)
 - integrations (`app/integrations`)
+- web UI (`app/web`, `app/templates`, `app/static`) — server-rendered HTML with HTMX
 
 No microservices are introduced prematurely.
 

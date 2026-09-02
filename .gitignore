@@ -86,5 +86,9 @@ logs/
 # --- Build artifacts ---
 *.spec
 
+# --- Node / frontend ---
+node_modules/
+package-lock.json
+
 # --- Misc ---
 # .python-version is intentionally committed to pin the runtime baseline.

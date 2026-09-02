@@ -1,0 +1,181 @@
+{% extends "app_base.html" %}
+{% block title %}Create project — GEO Tracker{% endblock %}
+{% block content %}
+<div class="max-w-2xl mx-auto space-y-6">
+  <h1 class="page-title">Create a new project</h1>
+  <p class="text-sm text-gray-600">Track how AI systems discover, mention, and cite your brand.</p>
+
+  {% if errors %}
+  <div class="alert alert-error">
+    <ul class="list-disc list-inside text-sm">
+      {% for field, error in errors.items() %}
+      <li>{{ error }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <form method="POST" action="/app/w/{{ workspace_id }}/projects/new" class="space-y-8">
+    <!-- Step 1: Brand -->
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">1. Brand</h2></div>
+      <div class="card-body space-y-4">
+        <div>
+          <label for="name" class="form-label">Project name</label>
+          <input type="text" id="name" name="name" class="form-input" required value="{{ form_data.get('name', '') }}">
+        </div>
+        <div>
+          <label for="domain" class="form-label">Domain / website</label>
+          <input type="text" id="domain" name="domain" class="form-input" required placeholder="example.com" value="{{ form_data.get('domain', '') }}">
+        </div>
+        <div>
+          <label for="brand_name" class="form-label">Brand name</label>
+          <input type="text" id="brand_name" name="brand_name" class="form-input" required value="{{ form_data.get('brand_name', '') }}">
+        </div>
+        <div>
+          <label for="brand_aliases" class="form-label">Brand aliases (comma-separated)</label>
+          <input type="text" id="brand_aliases" name="brand_aliases" class="form-input" placeholder="Acme Inc, Acme" value="{{ form_data.get('brand_aliases', '') }}">
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label for="industry" class="form-label">Industry</label>
+            <input type="text" id="industry" name="industry" class="form-input" value="{{ form_data.get('industry', '') }}">
+          </div>
+          <div>
+            <label for="target_audience" class="form-label">Target audience</label>
+            <input type="text" id="target_audience" name="target_audience" class="form-input" value="{{ form_data.get('target_audience', '') }}">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label for="target_country" class="form-label">Target country</label>
+            <input type="text" id="target_country" name="target_country" class="form-input" placeholder="US" value="{{ form_data.get('target_country', '') }}">
+          </div>
+          <div>
+            <label for="target_language" class="form-label">Target language</label>
+            <input type="text" id="target_language" name="target_language" class="form-input" placeholder="en" value="{{ form_data.get('target_language', '') }}">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2: Topics -->
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">2. Topics</h2></div>
+      <div class="card-body space-y-4">
+        <p class="text-sm text-gray-600">What do you want AI systems to mention your brand for? Add topics or questions.</p>
+        <div id="keywords-container" class="space-y-2"></div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addKeyword()">+ Add topic</button>
+        <p class="form-hint">Limit: {{ max_keywords }} topics per project.</p>
+      </div>
+    </div>
+
+    <!-- Step 3: Competitors -->
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">3. Competitors (optional)</h2></div>
+      <div class="card-body space-y-4">
+        <div id="competitors-container" class="space-y-2"></div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addCompetitor()">+ Add competitor</button>
+        <p class="form-hint">Limit: {{ max_competitors }} competitors per project.</p>
+      </div>
+    </div>
+
+    <!-- Step 4: Providers -->
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">4. AI providers</h2></div>
+      <div class="card-body space-y-4">
+        <p class="text-sm text-gray-600">Select which AI providers should measure your brand.</p>
+        <div class="space-y-2">
+          {% for provider in allowed_providers %}
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="providers" value="{{ provider.value }}" class="form-checkbox">
+            <span>{{ provider.label }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        {% if not allowed_providers %}
+        <p class="text-sm text-gray-600">No providers available on your current plan.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Step 5: Review -->
+    <div class="card">
+      <div class="card-header"><h2 class="card-title">5. Review</h2></div>
+      <div class="card-body">
+        <p class="text-sm text-gray-600">
+          A measurement uses one AI Check for each successful prompt/provider observation.
+          You can run your first measurement after creating this project.
+        </p>
+      </div>
+    </div>
+
+    <div class="flex justify-end">
+      <button type="submit" class="btn btn-primary">Create project</button>
+    </div>
+  </form>
+</div>
+
+<script>
+var maxKeywords = {{ max_keywords }};
+var maxCompetitors = {{ max_competitors }};
+var keywordCount = 0;
+var competitorCount = 0;
+
+function addKeyword() {
+  if (keywordCount >= maxKeywords) return;
+  var container = document.getElementById('keywords-container');
+  var div = document.createElement('div');
+  div.className = 'flex gap-2';
+  div.innerHTML = '<input type="text" name="keyword_text" class="form-input" placeholder="Topic or question" oninput="syncKeywords()">' +
+    '<select name="keyword_intent" class="form-input" onchange="syncKeywords()"><option value="">Intent</option><option value="informational">Informational</option><option value="commercial">Commercial</option></select>' +
+    '<select name="keyword_funnel" class="form-input" onchange="syncKeywords()"><option value="">Funnel</option><option value="AWARENESS">Awareness</option><option value="CONSIDERATION">Consideration</option><option value="PURCHASE">Purchase</option></select>';
+  container.appendChild(div);
+  keywordCount++;
+  syncKeywords();
+}
+
+function addCompetitor() {
+  if (competitorCount >= maxCompetitors) return;
+  var container = document.getElementById('competitors-container');
+  var div = document.createElement('div');
+  div.className = 'flex gap-2';
+  div.innerHTML = '<input type="text" name="comp_name" class="form-input" placeholder="Competitor name" oninput="syncCompetitors()">' +
+    '<input type="text" name="comp_domain" class="form-input" placeholder="domain.com" oninput="syncCompetitors()">' +
+    '<input type="text" name="comp_aliases" class="form-input" placeholder="aliases (comma-separated)" oninput="syncCompetitors()">';
+  container.appendChild(div);
+  competitorCount++;
+  syncCompetitors();
+}
+
+function syncKeywords() {
+  var inputs = document.querySelectorAll('#keywords-container > div');
+  var kws = [];
+  inputs.forEach(function(div) {
+    var text = div.querySelector('input[name="keyword_text"]').value;
+    var intent = div.querySelector('select[name="keyword_intent"]').value;
+    var funnel = div.querySelector('select[name="keyword_funnel"]').value;
+    if (text) kws.push({text: text, intent: intent, funnel_stage: funnel});
+  });
+  var hidden = document.getElementById('keywords-hidden');
+  if (hidden) hidden.value = JSON.stringify(kws);
+}
+
+function syncCompetitors() {
+  var inputs = document.querySelectorAll('#competitors-container > div');
+  var comps = [];
+  inputs.forEach(function(div) {
+    var name = div.querySelector('input[name="comp_name"]').value;
+    var domain = div.querySelector('input[name="comp_domain"]').value;
+    var aliases = div.querySelector('input[name="comp_aliases"]').value;
+    if (name && domain) comps.push({name: name, domain: domain, aliases: aliases ? aliases.split(',').map(function(s){return s.trim()}) : []});
+  });
+  var hidden = document.getElementById('competitors-hidden');
+  if (hidden) hidden.value = JSON.stringify(comps);
+}
+</script>
+
+<!-- Hidden fields for JSON serialization of keywords/competitors -->
+<input type="hidden" id="keywords-hidden" name="keywords" value="[]">
+<input type="hidden" id="competitors-hidden" name="competitors" value="[]">
+{% endblock %}

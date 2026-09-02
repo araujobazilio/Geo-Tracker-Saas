@@ -1,0 +1,13 @@
+{
+  "name": "geo-tracker-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GEO Tracker frontend build tooling (Tailwind CSS only)",
+  "scripts": {
+    "build:css": "tailwindcss -i ./app/static/css/tailwind-input.css -o ./app/static/css/app.css --minify",
+    "build:frontend": "npm run build:css"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

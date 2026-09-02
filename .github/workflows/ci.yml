@@ -71,6 +71,38 @@ jobs:
       - name: mypy
         run: mypy app
 
+      - name: Verify static assets exist
+        run: |
+          test -f app/static/css/app.css
+          test -f app/static/js/app.js
+          test -f app/static/vendor/htmx.min.js
+          test -f app/static/vendor/chart.umd.min.js
+
+      - name: Verify templates exist
+        run: |
+          test -f app/templates/base.html
+          test -f app/templates/auth_base.html
+          test -f app/templates/app_base.html
+          test -f app/templates/auth/login.html
+          test -f app/templates/auth/register.html
+          test -f app/templates/dashboard/workspace.html
+          test -f app/templates/dashboard/no_workspace.html
+          test -f app/templates/projects/dashboard.html
+          test -f app/templates/projects/onboarding.html
+          test -f app/templates/scans/detail.html
+          test -f app/templates/partials/scan_status.html
+          test -f app/templates/opportunities/list.html
+          test -f app/templates/opportunities/detail.html
+          test -f app/templates/notifications/list.html
+          test -f app/templates/settings/notifications.html
+          test -f app/templates/errors/404.html
+          test -f app/templates/errors/403.html
+          test -f app/templates/errors/500.html
+
+      - name: Verify web app starts
+        run: |
+          python -c "from app.main import create_app; app = create_app(); assert len(app.routes) > 90, f'Expected >90 routes, got {len(app.routes)}'"
+
       - name: Alembic migration to head
         run: alembic upgrade head
 

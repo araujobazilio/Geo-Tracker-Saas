@@ -1,0 +1,47 @@
+{% extends "app_base.html" %}
+{% block title %}Notification preferences — GEO Tracker{% endblock %}
+{% block content %}
+<div class="space-y-6 max-w-2xl">
+  <h1 class="page-title">Notification preferences</h1>
+
+  {% if request.query_params.get('saved') %}
+  <div class="alert alert-success">Preferences saved.</div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-body">
+      <form method="POST" action="/app/w/{{ workspace_id }}/settings/notifications" class="space-y-4">
+        <label class="flex items-center gap-3">
+          <input type="checkbox" name="email_enabled" value="true" {% if preference.email_enabled %}checked{% endif %} class="form-checkbox">
+          <div>
+            <span class="font-medium text-sm">Email notifications</span>
+            <p class="text-xs text-gray-500">Receive notifications by email.</p>
+          </div>
+        </label>
+        <label class="flex items-center gap-3">
+          <input type="checkbox" name="scheduled_scan_summary" value="true" {% if preference.scheduled_scan_summary %}checked{% endif %} class="form-checkbox">
+          <div>
+            <span class="font-medium text-sm">Scheduled measurement summaries</span>
+            <p class="text-xs text-gray-500">Get notified when scheduled measurements complete.</p>
+          </div>
+        </label>
+        <label class="flex items-center gap-3">
+          <input type="checkbox" name="high_priority_opportunities" value="true" {% if preference.high_priority_opportunities %}checked{% endif %} class="form-checkbox">
+          <div>
+            <span class="font-medium text-sm">High-priority opportunities</span>
+            <p class="text-xs text-gray-500">Get notified when new high-priority opportunities are detected.</p>
+          </div>
+        </label>
+        <label class="flex items-center gap-3">
+          <input type="checkbox" name="verification_outcomes" value="true" {% if preference.verification_outcomes %}checked{% endif %} class="form-checkbox">
+          <div>
+            <span class="font-medium text-sm">Verification outcomes</span>
+            <p class="text-xs text-gray-500">Get notified when verification results are available.</p>
+          </div>
+        </label>
+        <button type="submit" class="btn btn-primary">Save preferences</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

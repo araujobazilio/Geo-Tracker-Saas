@@ -1,0 +1,72 @@
+{% extends "app_base.html" %}
+{% block title %}Action Center — GEO Tracker{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  <div class="flex items-center justify-between">
+    <h1 class="page-title">Action Center</h1>
+    <a href="/app/w/{{ workspace_id }}/projects/{{ project_id }}" class="link text-sm">← Back to project</a>
+  </div>
+
+  <!-- Filters -->
+  <div class="card">
+    <div class="card-body">
+      <form method="GET" class="flex flex-wrap gap-4">
+        <div>
+          <label for="status" class="form-label">Status</label>
+          <select name="status" id="status" class="form-input">
+            <option value="all" {% if filter_status == 'all' %}selected{% endif %}>All</option>
+            <option value="OPEN" {% if filter_status == 'OPEN' %}selected{% endif %}>Open</option>
+            <option value="IN_PROGRESS" {% if filter_status == 'IN_PROGRESS' %}selected{% endif %}>In progress</option>
+            <option value="IMPLEMENTED" {% if filter_status == 'IMPLEMENTED' %}selected{% endif %}>Implemented</option>
+            <option value="VERIFIED" {% if filter_status == 'VERIFIED' %}selected{% endif %}>Verified</option>
+            <option value="DISMISSED" {% if filter_status == 'DISMISSED' %}selected{% endif %}>Dismissed</option>
+          </select>
+        </div>
+        <div>
+          <label for="priority" class="form-label">Priority</label>
+          <select name="priority" id="priority" class="form-input">
+            <option value="" {% if not filter_priority %}selected{% endif %}>All</option>
+            <option value="HIGH" {% if filter_priority == 'HIGH' %}selected{% endif %}>High</option>
+            <option value="MEDIUM" {% if filter_priority == 'MEDIUM' %}selected{% endif %}>Medium</option>
+            <option value="LOW" {% if filter_priority == 'LOW' %}selected{% endif %}>Low</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-secondary btn-sm self-end">Filter</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Opportunity list -->
+  {% if not opportunities %}
+  <div class="card empty-state">
+    <div class="card-body text-center py-12">
+      <h3 class="text-lg font-semibold">No opportunities detected yet</h3>
+      <p class="mt-2 text-sm text-gray-600">Run a measurement to discover gaps where competitors are winning AI visibility.</p>
+    </div>
+  </div>
+  {% else %}
+  <div class="space-y-3">
+    {% for opp in opportunities %}
+    <a href="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opp.id }}" class="card card-hover">
+      <div class="card-body">
+        <div class="flex items-start justify-between">
+          <div class="flex-1">
+            <div class="flex items-center gap-2">
+              <span class="badge {{ opportunity_priority_badge(opp.priority) }}">{{ opportunity_priority_label(opp.priority) }}</span>
+              <span class="badge {{ opportunity_status_badge(opp.status) }}">{{ opportunity_status_label(opp.status) }}</span>
+              <span class="text-xs text-gray-500">{{ opportunity_type_label(opp.opportunity_type) }}</span>
+            </div>
+            <h3 class="mt-2 font-medium text-gray-900">{{ opp.title }}</h3>
+            <p class="mt-1 text-xs text-gray-500">
+              First detected: {{ opp.first_detected_at.strftime('%Y-%m-%d') if opp.first_detected_at else '—' }}
+              · Latest: {{ opp.latest_detected_at.strftime('%Y-%m-%d') if opp.latest_detected_at else '—' }}
+            </p>
+          </div>
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,66 @@
+{% extends "app_base.html" %}
+{% block title %}{{ opportunity.title }} — GEO Tracker{% endblock %}
+{% block content %}
+<div class="space-y-6 max-w-3xl">
+  <div>
+    <a href="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities" class="link text-sm">← Back to Action Center</a>
+  </div>
+
+  <div class="card">
+    <div class="card-body space-y-4">
+      <div class="flex items-center gap-2">
+        <span class="badge {{ opportunity_priority_badge(opportunity.priority) }}">{{ opportunity_priority_label(opportunity.priority) }}</span>
+        <span class="badge {{ opportunity_status_badge(opportunity.status) }}">{{ opportunity_status_label(opportunity.status) }}</span>
+        <span class="text-xs text-gray-500">{{ opportunity_type_label(opportunity.opportunity_type) }}</span>
+      </div>
+      <h1 class="page-title">{{ opportunity.title }}</h1>
+      <p class="text-sm text-gray-600">{{ opportunity.description or '' }}</p>
+
+      <table class="table">
+        <tbody>
+          <tr><td class="text-gray-600">First detected</td><td>{{ opportunity.first_detected_at.strftime('%Y-%m-%d') if opportunity.first_detected_at else '—' }}</td></tr>
+          <tr><td class="text-gray-600">Latest detected</td><td>{{ opportunity.latest_detected_at.strftime('%Y-%m-%d') if opportunity.latest_detected_at else '—' }}</td></tr>
+          <tr><td class="text-gray-600">Evidence count</td><td>{{ opportunity.evidence_count if opportunity.evidence_count else 0 }}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% if is_owner_or_admin %}
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Actions</h2></div>
+    <div class="card-body space-y-3">
+      {% if opportunity.status == 'OPEN' %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/transition" class="inline">
+        <input type="hidden" name="new_status" value="IN_PROGRESS">
+        <button type="submit" class="btn btn-secondary btn-sm">Mark as in progress</button>
+      </form>
+      {% endif %}
+      {% if opportunity.status == 'IN_PROGRESS' %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/transition" class="inline">
+        <input type="hidden" name="new_status" value="IMPLEMENTED">
+        <button type="submit" class="btn btn-primary btn-sm">Mark as implemented</button>
+      </form>
+      <p class="text-xs text-gray-500">This records that you applied a change. GEO Tracker will use the frozen measurement baseline when you verify it.</p>
+      {% endif %}
+      {% if opportunity.status in ['OPEN', 'IN_PROGRESS'] %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/transition" class="inline">
+        <input type="hidden" name="new_status" value="DISMISSED">
+        <button type="submit" class="btn btn-ghost btn-sm">Dismiss</button>
+      </form>
+      {% endif %}
+      {% if can_verify %}
+      <div class="border-t pt-3 mt-3">
+        <h3 class="font-medium text-sm">Verify result</h3>
+        <p class="text-xs text-gray-500 mt-1">This runs a new targeted measurement. It consumes normal AI Checks for successful observations.</p>
+        <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/verify" class="mt-2">
+          <input type="hidden" name="idempotency_key" value="{{ request.query_params.get('key', '') }}">
+          <button type="submit" class="btn btn-primary btn-sm">Verify result</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

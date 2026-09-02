@@ -32,6 +32,8 @@ _PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _EXEMPT_PATHS = {
     "/api/v1/auth/login",
     "/api/v1/auth/register",
+    "/login",
+    "/register",
     "/health",
     "/ready",
 }
