@@ -11,6 +11,7 @@ External paid calls: 0.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -70,20 +71,74 @@ def client():
     get_settings.cache_clear()
     app = create_app()
     with TestClient(app) as c:
+        # Flush Redis at start to clear rate limiter counters from prior tests
+        with contextlib.suppress(Exception):
+            get_redis().flushdb()
         yield c
+    with contextlib.suppress(Exception):
+        get_redis().flushdb()
     reset_redis()
 
 
 @pytest.fixture()
 def clean_redis():
-    redis = get_redis()
-    redis.flushdb()
+    with contextlib.suppress(Exception):
+        get_redis().flushdb()
     yield
-    redis.flushdb()
+    with contextlib.suppress(Exception):
+        get_redis().flushdb()
+
+
+def _seed_billing_for_workspace(ws_id: str) -> None:
+    """Create a PlanDefinition + BillingAccount so the workspace is entitled.
+
+    The register endpoint does NOT create a billing account. Without this,
+    the entitlement service returns UNENTITLED (max_projects=0) and project
+    creation fails with QuotaExceededError (429).
+    """
+    from app.core.enums import BillingAccountStatus, BillingSource, LLMProvider
+    from app.models.billing import BillingAccount
+    from app.models.plan_definition import PlanDefinition
+    from app.models.plan_provider import PlanProvider
+
+    session = _get_db_session()
+    try:
+        plan = PlanDefinition(
+            code=f"P121_{ws_id.replace('-', '')[:12]}",
+            name="P12.1 Test Plan",
+            is_active=True,
+            max_projects=10,
+            max_keywords_per_project=50,
+            max_competitors_per_project=20,
+            max_team_members=10,
+            monthly_ai_checks=100,
+            confidence_scans_enabled=True,
+            verification_scans_enabled=True,
+        )
+        session.add(plan)
+        session.flush()
+        for p in LLMProvider:
+            session.add(PlanProvider(plan_id=plan.id, provider=p))
+        session.add(
+            BillingAccount(
+                workspace_id=uuid.UUID(ws_id),
+                source=BillingSource.ADMIN,
+                status=BillingAccountStatus.ACTIVE,
+                plan_code=plan.code,
+                is_primary=True,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 def _register(client: TestClient, email: str | None = None) -> tuple[str, str]:
-    """Register via API, return (csrf_token, workspace_id)."""
+    """Register via API, return (csrf_token, workspace_id).
+
+    Also seeds a PlanDefinition + BillingAccount so the workspace is
+    entitled to create projects.
+    """
     if email is None:
         email = _unique_email()
     resp = client.post(
@@ -97,6 +152,7 @@ def _register(client: TestClient, email: str | None = None) -> tuple[str, str]:
     ws_resp = client.get("/api/v1/workspaces")
     assert ws_resp.status_code == 200
     ws_id = ws_resp.json()[0]["id"]
+    _seed_billing_for_workspace(ws_id)
     return csrf_token, ws_id
 
 
@@ -116,7 +172,7 @@ def _register_web(client: TestClient, email: str | None = None) -> str:
 def _get_db_session():
     """Get a direct DB session for seeding test data."""
     settings = get_settings()
-    engine = create_engine(settings.test_database_url)
+    engine = create_engine(settings.database_url)
     return Session(engine)
 
 
