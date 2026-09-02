@@ -311,6 +311,7 @@ jobs:
           # Mount as conf.d/default.conf (same as docker-compose.prod.yml).
           # The nginx:alpine image includes /etc/nginx/conf.d/*.conf by default.
           docker run --rm \
+            --add-host app:127.0.0.1 \
             -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
             -v /tmp/nginx-tls:/etc/nginx/tls:ro \
             nginx:1.27-alpine nginx -t
