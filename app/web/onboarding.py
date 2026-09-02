@@ -102,7 +102,15 @@ async def onboarding_submit(
     No partial project data is created on validation error.
     """
     auth_service.require_role(workspace_id, user.id, WorkspaceRole.ADMIN)
-    form_data: dict[str, object] = dict(await request.form())
+    raw_form = await request.form()
+    # Preserve multi-value fields (e.g. repeated providers checkboxes)
+    form_data: dict[str, object] = {}
+    for key in raw_form:
+        values = raw_form.getlist(key)
+        if len(values) > 1:
+            form_data[key] = values
+        else:
+            form_data[key] = values[0] if values else ""
 
     parsed = parse_onboarding_form(form_data)
     if not parsed.is_valid:

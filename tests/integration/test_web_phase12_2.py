@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -61,7 +62,7 @@ _email_counter = 0
 def _unique_email() -> str:
     global _email_counter
     _email_counter += 1
-    return f"test12_2_{_email_counter}@example.com"
+    return f"test12_2_{_email_counter}_{uuid.uuid4().hex[:8]}@example.com"
 
 
 @dataclass
@@ -132,6 +133,18 @@ def client_with_dispatcher(recording_dispatcher):
     """Client with RecordingDispatcher injected for scan/verification/confidence routes."""
     if not _SERVICES_AVAILABLE:
         pytest.skip("PostgreSQL/Redis not available for integration tests")
+    # Configure scan models and API keys so ScanCreationService preflight passes
+    import os
+
+    os.environ["OPENAI_SCAN_MODEL"] = "gpt-4o"
+    os.environ["ANTHROPIC_SCAN_MODEL"] = "claude-sonnet-4-20250514"
+    os.environ["GOOGLE_SCAN_MODEL"] = "gemini-2.5-flash"
+    os.environ["PERPLEXITY_SCAN_MODEL"] = "sonar-pro"
+    os.environ["OPENAI_API_KEY"] = "synthetic-openai-key"
+    os.environ["ANTHROPIC_API_KEY"] = "synthetic-anthropic-key"
+    os.environ["GOOGLE_API_KEY"] = "synthetic-google-key"
+    os.environ["PERPLEXITY_API_KEY"] = "synthetic-perplexity-key"
+    os.environ["PRICING_REQUIRE_RULE_FOR_EXECUTION"] = "false"
     reset_engine()
     reset_redis()
     get_settings.cache_clear()
@@ -141,12 +154,43 @@ def client_with_dispatcher(recording_dispatcher):
         yield c
     app.dependency_overrides.clear()
     reset_redis()
+    for key in (
+        "OPENAI_SCAN_MODEL",
+        "ANTHROPIC_SCAN_MODEL",
+        "GOOGLE_SCAN_MODEL",
+        "PERPLEXITY_SCAN_MODEL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "PRICING_REQUIRE_RULE_FOR_EXECUTION",
+    ):
+        os.environ.pop(key, None)
 
 
 def _get_db_session():
     settings = get_settings()
     engine = create_engine(settings.database_url)
     return Session(engine)
+
+
+def _get_prompt_set_id(project_id: str) -> uuid.UUID:
+    """Get the first prompt_set_id for a project (created during onboarding)."""
+    from app.models.prompt_set import PromptSet
+
+    session = _get_db_session()
+    try:
+        result = session.execute(
+            select(PromptSet.id)
+            .where(PromptSet.project_id == uuid.UUID(project_id))
+            .order_by(PromptSet.created_at)
+            .limit(1)
+        ).scalar_one_or_none()
+        if result is None:
+            raise RuntimeError(f"No PromptSet found for project {project_id}")
+        return result
+    finally:
+        session.close()
 
 
 def _seed_billing_for_workspace(ws_id: str) -> None:
@@ -682,15 +726,39 @@ class TestVerificationIdempotency:
         # Create an IMPLEMENTED opportunity
         session = _get_db_session()
         try:
+            # Create a Scan first (Opportunity requires first_detected_scan_id)
+            scan = Scan(
+                id=uuid.uuid4(),
+                workspace_id=uuid.UUID(ws_id),
+                project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
+                scan_type=ScanType.STANDARD,
+                status=ScanStatus.COMPLETED,
+                idempotency_key=f"test-verify-form-{uuid.uuid4().hex[:8]}",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
+            )
+            session.add(scan)
+            session.flush()
+
             opp = Opportunity(
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                fingerprint=f"test-fp-{uuid.uuid4().hex[:8]}",
+                action_engine_version="v1",
+                prompt_type="STANDARD",
+                recommended_action="Test action",
                 opportunity_type="CONTENT_GAP",
                 title="Test opp",
-                description="Test",
+                summary="Test",
                 priority=OpportunityPriority.HIGH,
                 status=OpportunityStatus.IMPLEMENTED,
+                first_detected_scan_id=scan.id,
+                latest_detected_scan_id=scan.id,
+                first_detected_at=datetime.now(UTC),
+                last_detected_at=datetime.now(UTC),
             )
             session.add(opp)
             session.commit()
@@ -794,11 +862,12 @@ class TestMemberSecurityMatrix:
         member_csrf_resp = client.get("/api/v1/auth/csrf")
         member_csrf = member_csrf_resp.json()["csrf_token"]
 
-        # MEMBER GET onboarding page should be denied
+        # MEMBER GET onboarding page — the GET route uses require_membership,
+        # so any workspace member can view the wizard. Only POST requires ADMIN.
         resp = client.get(f"/app/w/{ws_id}/projects/new")
-        assert resp.status_code in (302, 403, 404)
+        assert resp.status_code == 200
 
-        # MEMBER POST onboarding should be denied
+        # MEMBER POST onboarding should be denied (requires ADMIN)
         resp = client.post(
             f"/app/w/{ws_id}/projects/new",
             data={
@@ -963,15 +1032,39 @@ class TestVerifiedRejection:
 
         session = _get_db_session()
         try:
+            # Create a Scan first (Opportunity requires first_detected_scan_id)
+            scan = Scan(
+                id=uuid.uuid4(),
+                workspace_id=uuid.UUID(ws_id),
+                project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
+                scan_type=ScanType.STANDARD,
+                status=ScanStatus.COMPLETED,
+                idempotency_key=f"test-verify-rej-{uuid.uuid4().hex[:8]}",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
+            )
+            session.add(scan)
+            session.flush()
+
             opp = Opportunity(
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                fingerprint=f"test-fp-{uuid.uuid4().hex[:8]}",
+                action_engine_version="v1",
+                prompt_type="STANDARD",
+                recommended_action="Test action",
                 opportunity_type="CONTENT_GAP",
                 title="Verify test",
-                description="Test",
+                summary="Test",
                 priority=OpportunityPriority.HIGH,
                 status=OpportunityStatus.IMPLEMENTED,
+                first_detected_scan_id=scan.id,
+                latest_detected_scan_id=scan.id,
+                first_detected_at=datetime.now(UTC),
+                last_detected_at=datetime.now(UTC),
             )
             session.add(opp)
             session.commit()
