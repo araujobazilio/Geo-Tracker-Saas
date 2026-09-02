@@ -113,9 +113,9 @@ def test_schedule_creation_denied_when_no_entitlement(db_session: Session) -> No
     project = _create_project(db_session, ws)
     service = _build_schedule_service(db_session)
 
-    from app.core.exceptions import ValidationError
+    from app.core.exceptions import EntitlementDeniedError
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(EntitlementDeniedError):
         service.create_or_update_schedule(
             workspace_id=ws.id,
             project_id=project.id,

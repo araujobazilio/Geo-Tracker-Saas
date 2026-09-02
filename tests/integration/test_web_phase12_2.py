@@ -80,29 +80,15 @@ class RecordingDispatcher:
 # ---------------------------------------------------------------------------
 
 
-def _services_available() -> bool:
-    """Check if PostgreSQL and Redis are available for integration tests."""
-    import socket
-
-    for host, port in [("localhost", 15432), ("localhost", 16379)]:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
-        try:
-            s.connect((host, port))
-        except Exception:
-            return False
-        finally:
-            s.close()
-    return True
-
-
-_SERVICES_AVAILABLE = _services_available()
-
-
 @pytest.fixture()
-def client():
-    if not _SERVICES_AVAILABLE:
-        pytest.skip("PostgreSQL/Redis not available for integration tests")
+def client(prepared_test_db: str):
+    """Real web client backed by the canonical prepared test database.
+
+    Depends on ``prepared_test_db`` (from ``tests/integration/conftest.py``)
+    which resets the schema via real Alembic migrations once per session.
+    Redis is flushed before and after via the application's configured
+    ``REDIS_URL`` — no hardcoded ports.
+    """
     reset_engine()
     reset_redis()
     get_settings.cache_clear()
@@ -114,9 +100,13 @@ def client():
 
 @pytest.fixture()
 def clean_redis():
-    if not _SERVICES_AVAILABLE:
-        pytest.skip("Redis not available")
+    """Flush Redis before and after the test using configured infrastructure.
+
+    Redis is mandatory for these integration tests. If it is unavailable
+    the test fails rather than silently skipping.
+    """
     redis = get_redis()
+    redis.ping()
     redis.flushdb()
     yield
     redis.flushdb()
@@ -129,22 +119,29 @@ def recording_dispatcher():
 
 
 @pytest.fixture()
-def client_with_dispatcher(recording_dispatcher):
-    """Client with RecordingDispatcher injected for scan/verification/confidence routes."""
-    if not _SERVICES_AVAILABLE:
-        pytest.skip("PostgreSQL/Redis not available for integration tests")
-    # Configure scan models and API keys so ScanCreationService preflight passes
-    import os
+def client_with_dispatcher(
+    prepared_test_db: str,
+    recording_dispatcher: RecordingDispatcher,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Client with RecordingDispatcher injected for scan/verification/confidence routes.
 
-    os.environ["OPENAI_SCAN_MODEL"] = "gpt-4o"
-    os.environ["ANTHROPIC_SCAN_MODEL"] = "claude-sonnet-4-20250514"
-    os.environ["GOOGLE_SCAN_MODEL"] = "gemini-2.5-flash"
-    os.environ["PERPLEXITY_SCAN_MODEL"] = "sonar-pro"
-    os.environ["OPENAI_API_KEY"] = "synthetic-openai-key"
-    os.environ["ANTHROPIC_API_KEY"] = "synthetic-anthropic-key"
-    os.environ["GOOGLE_API_KEY"] = "synthetic-google-key"
-    os.environ["PERPLEXITY_API_KEY"] = "synthetic-perplexity-key"
-    os.environ["PRICING_REQUIRE_RULE_FOR_EXECUTION"] = "false"
+    Uses ``monkeypatch.setenv`` so synthetic scan models / API keys /
+    pricing bypass are automatically restored after the test, guaranteeing
+    no contamination of subsequent tests or the developer environment.
+    """
+    # Configure scan models and API keys so ScanCreationService preflight passes.
+    # The RecordingDispatcher prevents any real provider execution.
+    monkeypatch.setenv("OPENAI_SCAN_MODEL", "gpt-4o")
+    monkeypatch.setenv("ANTHROPIC_SCAN_MODEL", "claude-sonnet-4-20250514")
+    monkeypatch.setenv("GOOGLE_SCAN_MODEL", "gemini-2.5-flash")
+    monkeypatch.setenv("PERPLEXITY_SCAN_MODEL", "sonar-pro")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "synthetic-google-key")
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "synthetic-perplexity-key")
+    monkeypatch.setenv("PRICING_REQUIRE_RULE_FOR_EXECUTION", "false")
+
     reset_engine()
     reset_redis()
     get_settings.cache_clear()
@@ -154,18 +151,6 @@ def client_with_dispatcher(recording_dispatcher):
         yield c
     app.dependency_overrides.clear()
     reset_redis()
-    for key in (
-        "OPENAI_SCAN_MODEL",
-        "ANTHROPIC_SCAN_MODEL",
-        "GOOGLE_SCAN_MODEL",
-        "PERPLEXITY_SCAN_MODEL",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GOOGLE_API_KEY",
-        "PERPLEXITY_API_KEY",
-        "PRICING_REQUIRE_RULE_FOR_EXECUTION",
-    ):
-        os.environ.pop(key, None)
 
 
 def _get_db_session():
@@ -252,6 +237,32 @@ def _register_api(client: TestClient, email: str | None = None) -> tuple[str, st
     ws_id = ws_resp.json()[0]["id"]
     _seed_billing_for_workspace(ws_id)
     return csrf_token, ws_id, user_id
+
+
+def _override_plan_min_interval(ws_id: str, min_interval: int | None) -> None:
+    """Update the PlanDefinition for a workspace's billing account.
+
+    Sets ``min_scheduled_scan_interval_hours`` to the given value
+    (``None`` disables scheduled scans entirely).
+    """
+    from app.models.billing import BillingAccount
+    from app.models.plan_definition import PlanDefinition
+
+    session = _get_db_session()
+    try:
+        account = session.execute(
+            select(BillingAccount).where(
+                BillingAccount.workspace_id == uuid.UUID(ws_id),
+                BillingAccount.is_primary.is_(True),
+            )
+        ).scalar_one()
+        plan = session.execute(
+            select(PlanDefinition).where(PlanDefinition.code == account.plan_code)
+        ).scalar_one()
+        plan.min_scheduled_scan_interval_hours = min_interval
+        session.commit()
+    finally:
+        session.close()
 
 
 def _create_project_via_api(client: TestClient, csrf_token: str, ws_id: str, **overrides) -> str:
@@ -515,6 +526,146 @@ class TestScheduleIntegration:
             ).scalar_one_or_none()
             assert schedule is not None
             assert schedule.enabled is False
+        finally:
+            session.close()
+
+    def test_schedule_unavailable_when_feature_off(self, client: TestClient, clean_redis) -> None:
+        """CASE A: min_scheduled_scan_interval_hours = None → schedule_unavailable.
+
+        The plan does not include scheduled scans. POSTing to /schedule/enable
+        must redirect with error=schedule_unavailable and create ZERO side
+        effects: no ProjectScanSchedule, no Scan, no PromptRun, no UsageEvent,
+        no provider dispatch.
+        """
+        csrf_token, ws_id, _ = _register_api(client)
+        project_id = _create_project_via_api(client, csrf_token, ws_id)
+
+        # Override the plan to disable scheduled scans (min_interval = None).
+        _override_plan_min_interval(ws_id, None)
+
+        resp = client.post(
+            f"/app/w/{ws_id}/projects/{project_id}/schedule/enable",
+            data={"csrf_token": csrf_token, "interval_hours": "168"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302
+        assert "error=schedule_unavailable" in resp.headers["location"]
+
+        # Zero side effects
+        session = _get_db_session()
+        try:
+            from app.models.scan import PromptRun
+            from app.models.usage import UsageEvent
+
+            schedules = (
+                session.execute(
+                    select(ProjectScanSchedule).where(
+                        ProjectScanSchedule.project_id == uuid.UUID(project_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(schedules) == 0
+
+            scans = (
+                session.execute(select(Scan).where(Scan.project_id == uuid.UUID(project_id)))
+                .scalars()
+                .all()
+            )
+            assert len(scans) == 0
+
+            runs = (
+                session.execute(
+                    select(PromptRun).where(
+                        PromptRun.scan_id.in_(
+                            select(Scan.id).where(Scan.project_id == uuid.UUID(project_id))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(runs) == 0
+
+            events = (
+                session.execute(
+                    select(UsageEvent).where(UsageEvent.workspace_id == uuid.UUID(ws_id))
+                )
+                .scalars()
+                .all()
+            )
+            assert len(events) == 0
+        finally:
+            session.close()
+
+    def test_schedule_interval_below_minimum(self, client: TestClient, clean_redis) -> None:
+        """CASE B: plan minimum = 24h, request 12h → interval_too_short.
+
+        The plan allows scheduled scans but with a 24h minimum. Requesting
+        12h must redirect with error=interval_too_short and create ZERO
+        side effects: no ProjectScanSchedule, no Scan, no PromptRun, no
+        UsageEvent, no provider dispatch.
+        """
+        csrf_token, ws_id, _ = _register_api(client)
+        project_id = _create_project_via_api(client, csrf_token, ws_id)
+
+        # Override the plan to set a 24h minimum.
+        _override_plan_min_interval(ws_id, 24)
+
+        resp = client.post(
+            f"/app/w/{ws_id}/projects/{project_id}/schedule/enable",
+            data={"csrf_token": csrf_token, "interval_hours": "12"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 302
+        assert "error=interval_too_short" in resp.headers["location"]
+
+        # Zero side effects
+        session = _get_db_session()
+        try:
+            from app.models.scan import PromptRun
+            from app.models.usage import UsageEvent
+
+            schedules = (
+                session.execute(
+                    select(ProjectScanSchedule).where(
+                        ProjectScanSchedule.project_id == uuid.UUID(project_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(schedules) == 0
+
+            scans = (
+                session.execute(select(Scan).where(Scan.project_id == uuid.UUID(project_id)))
+                .scalars()
+                .all()
+            )
+            assert len(scans) == 0
+
+            runs = (
+                session.execute(
+                    select(PromptRun).where(
+                        PromptRun.scan_id.in_(
+                            select(Scan.id).where(Scan.project_id == uuid.UUID(project_id))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(runs) == 0
+
+            events = (
+                session.execute(
+                    select(UsageEvent).where(UsageEvent.workspace_id == uuid.UUID(ws_id))
+                )
+                .scalars()
+                .all()
+            )
+            assert len(events) == 0
         finally:
             session.close()
 

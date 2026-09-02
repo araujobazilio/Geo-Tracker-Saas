@@ -54,7 +54,13 @@ from app.core.enums import (
     ScanType,
     ScheduledScanOutcome,
 )
-from app.core.exceptions import ConflictError, NotFoundError, QuotaExceededError, ValidationError
+from app.core.exceptions import (
+    ConflictError,
+    EntitlementDeniedError,
+    NotFoundError,
+    QuotaExceededError,
+    ValidationError,
+)
 from app.core.logging import get_logger
 from app.models.project_scan_schedule import ProjectScanSchedule
 from app.models.scan import Scan
@@ -571,7 +577,7 @@ class ScheduledScanService:
         min_interval = ent.min_scheduled_scan_interval_hours
 
         if min_interval is None:
-            raise ValidationError("Scheduled scans are not available on your plan.")
+            raise EntitlementDeniedError("Scheduled scans are not available on your plan.")
         if interval_hours < min_interval:
             raise ValidationError(
                 f"Interval {interval_hours}h is below the minimum {min_interval}h for your plan."
