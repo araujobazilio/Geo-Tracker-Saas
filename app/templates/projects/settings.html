@@ -80,19 +80,47 @@
     <div class="card-body">
       {% if keywords %}
       <table class="table">
-        <thead><tr><th>Topic</th><th>Intent</th><th>Funnel stage</th></tr></thead>
+        <thead><tr><th>Topic</th><th>Intent</th><th>Funnel stage</th>{% if is_owner_or_admin %}<th></th>{% endif %}</tr></thead>
         <tbody>
           {% for kw in keywords %}
           <tr>
             <td>{{ kw.text }}</td>
             <td>{{ kw.intent or '—' }}</td>
             <td>{{ kw.funnel_stage or '—' }}</td>
+            {% if is_owner_or_admin %}
+            <td>
+              <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project.id }}/settings/topics/{{ kw.id }}/remove" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-ghost btn-sm">Remove</button>
+              </form>
+            </td>
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>
       </table>
       {% else %}
       <p class="empty-text">No topics configured.</p>
+      {% endif %}
+      {% if is_owner_or_admin %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project.id }}/settings/topics/add" class="mt-4 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="label">Topic text</label>
+            <input type="text" name="text" class="input" placeholder="e.g. best crm software">
+          </div>
+          <div>
+            <label class="label">Intent</label>
+            <input type="text" name="intent" class="input" placeholder="commercial">
+          </div>
+          <div>
+            <label class="label">Funnel stage</label>
+            <input type="text" name="funnel_stage" class="input" placeholder="TOFU">
+          </div>
+        </div>
+        <button type="submit" class="btn btn-secondary btn-sm">Add topic</button>
+      </form>
       {% endif %}
     </div>
   </div>
@@ -103,19 +131,47 @@
     <div class="card-body">
       {% if competitors %}
       <table class="table">
-        <thead><tr><th>Name</th><th>Domain</th><th>Aliases</th></tr></thead>
+        <thead><tr><th>Name</th><th>Domain</th><th>Aliases</th>{% if is_owner_or_admin %}<th></th>{% endif %}</tr></thead>
         <tbody>
           {% for comp in competitors %}
           <tr>
             <td>{{ comp.name }}</td>
             <td>{{ comp.domain or '—' }}</td>
             <td>{{ comp.aliases | join(', ') if comp.aliases else '—' }}</td>
+            {% if is_owner_or_admin %}
+            <td>
+              <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project.id }}/settings/competitors/{{ comp.id }}/remove" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-ghost btn-sm">Remove</button>
+              </form>
+            </td>
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>
       </table>
       {% else %}
       <p class="empty-text">No competitors configured.</p>
+      {% endif %}
+      {% if is_owner_or_admin %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project.id }}/settings/competitors/add" class="mt-4 space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="label">Name</label>
+            <input type="text" name="name" class="input" placeholder="Competitor Inc.">
+          </div>
+          <div>
+            <label class="label">Domain</label>
+            <input type="text" name="domain" class="input" placeholder="competitor.com">
+          </div>
+          <div>
+            <label class="label">Aliases (comma-separated)</label>
+            <input type="text" name="aliases" class="input" placeholder="Comp, CI">
+          </div>
+        </div>
+        <button type="submit" class="btn btn-secondary btn-sm">Add competitor</button>
+      </form>
       {% endif %}
     </div>
   </div>
@@ -124,7 +180,23 @@
   <div class="card">
     <div class="card-header"><h2 class="card-title">AI providers ({{ providers|length }})</h2></div>
     <div class="card-body">
-      {% if providers %}
+      {% if is_owner_or_admin %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project.id }}/settings/providers" class="space-y-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="space-y-2">
+          {% for p in allowed_providers %}
+          <label class="flex items-center gap-2">
+            <input type="checkbox" name="providers" value="{{ p.value }}"
+              {% for prov in providers %}
+                {% if prov.provider == p.value and prov.enabled %}checked{% endif %}
+              {% endfor %}>
+            <span>{{ p.value }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        <button type="submit" class="btn btn-secondary btn-sm">Save providers</button>
+      </form>
+      {% else %}
       <table class="table">
         <thead><tr><th>Provider</th><th>Status</th></tr></thead>
         <tbody>
@@ -136,8 +208,6 @@
           {% endfor %}
         </tbody>
       </table>
-      {% else %}
-      <p class="empty-text">No providers configured.</p>
       {% endif %}
     </div>
   </div>

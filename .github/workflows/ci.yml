@@ -53,10 +53,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node.js LTS
+      - name: Set up Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: "lts"
+          node-version: "24"
 
       - name: Create test database
         run: |
@@ -142,6 +142,11 @@ jobs:
               '/app/w/{workspace_id}/projects/{project_id}/schedule/disable',
               '/app/w/{workspace_id}/projects/{project_id}/settings',
               '/app/w/{workspace_id}/projects/{project_id}/settings/brand',
+              '/app/w/{workspace_id}/projects/{project_id}/settings/topics/add',
+              '/app/w/{workspace_id}/projects/{project_id}/settings/topics/{keyword_id}/remove',
+              '/app/w/{workspace_id}/projects/{project_id}/settings/competitors/add',
+              '/app/w/{workspace_id}/projects/{project_id}/settings/competitors/{competitor_id}/remove',
+              '/app/w/{workspace_id}/projects/{project_id}/settings/providers',
               '/app/w/{workspace_id}/projects/{project_id}/prompts/regenerate',
               '/app/w/{workspace_id}/notifications',
               '/app/w/{workspace_id}/notifications/{notification_id}/read',

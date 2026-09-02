@@ -1,4 +1,4 @@
-"""Web Action Center routes — opportunity list, detail, workflow, verification.
+"""Web Action Center routes - opportunity list, detail, workflow, verification.
 
 Calls OpportunityWorkflowService and VerificationScanCreationService.
 The web layer never directly sets VERIFIED status.
@@ -22,20 +22,24 @@ from app.dependencies import (
     get_entitlement_service,
     get_workspace_auth_service,
 )
-from app.models.opportunity import Opportunity
+from app.models.opportunity import Opportunity, OpportunityVerification
+from app.models.scan import Scan
 from app.models.user import User
 from app.services.audit_service import AuditService
 from app.services.entitlement_service import EntitlementService
 from app.services.opportunity_workflow_service import OpportunityWorkflowService
+from app.services.scanning.dispatcher import ScanDispatcher
 from app.services.verification_scan_creation_service import VerificationScanCreationService
 from app.services.workspace_auth_service import WorkspaceAuthorizationService
-from app.web.dependencies import get_web_csrf_token, require_web_user
+from app.web.dependencies import get_web_csrf_token, get_web_scan_dispatcher, require_web_user
 from app.web.view_models import (
     opportunity_priority_badge,
     opportunity_priority_label,
     opportunity_status_badge,
     opportunity_status_label,
     opportunity_type_label,
+    verification_outcome_explanation,
+    verification_outcome_label,
 )
 
 router = APIRouter(tags=["web-opportunities"])
@@ -59,7 +63,7 @@ def action_center(
     priority: str | None = None,
     opp_type: str | None = None,
 ) -> HTMLResponse:
-    """Action Center page — list opportunities with filters."""
+    """Action Center page - list opportunities with filters."""
     auth_service.require_membership(workspace_id, user.id)
 
     query = select(Opportunity).where(
@@ -67,7 +71,6 @@ def action_center(
         Opportunity.project_id == project_id,
     )
 
-    # Default: OPEN + IN_PROGRESS + IMPLEMENTED
     if status and status != "all":
         try:
             status_enum = OpportunityStatus(status)
@@ -150,6 +153,24 @@ def opportunity_detail(
     ent = entitlement_service.get_effective_entitlements(workspace_id)
     can_verify = opp.status == OpportunityStatus.IMPLEMENTED and ent.verification_scans_enabled
 
+    # Latest verification record (and its scan) for this opportunity, if any.
+    verification = db.execute(
+        select(OpportunityVerification)
+        .where(
+            OpportunityVerification.opportunity_id == opp.id,
+            OpportunityVerification.workspace_id == workspace_id,
+        )
+        .order_by(OpportunityVerification.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    verification_outcome = verification.outcome if verification is not None else None
+    verification_scan = None
+    if verification is not None:
+        verification_scan = db.get(Scan, verification.verification_scan_id)
+
+    # Stable server-rendered idempotency key for the verify form.
+    verify_idempotency_key = str(uuid.uuid4())
+
     ctx = _build_context(
         request,
         user,
@@ -161,6 +182,12 @@ def opportunity_detail(
         opportunity=opp,
         project_id=str(project_id),
         can_verify=can_verify,
+        verification=verification,
+        verification_scan=verification_scan,
+        verification_outcome=verification_outcome,
+        verify_idempotency_key=verify_idempotency_key,
+        verification_outcome_label=verification_outcome_label,
+        verification_outcome_explanation=verification_outcome_explanation,
         opportunity_priority_label=opportunity_priority_label,
         opportunity_priority_badge=opportunity_priority_badge,
         opportunity_status_label=opportunity_status_label,
@@ -218,6 +245,7 @@ def start_verification(
     entitlement_service: Annotated[EntitlementService, Depends(get_entitlement_service)],
     audit: Annotated[AuditService, Depends(get_audit_service)],
     csrf_token: Annotated[str, Depends(get_web_csrf_token)],
+    dispatcher: Annotated[ScanDispatcher, Depends(get_web_scan_dispatcher)],
     idempotency_key: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
     """Start a verification scan for an IMPLEMENTED opportunity."""
@@ -226,12 +254,9 @@ def start_verification(
     if not idempotency_key:
         idempotency_key = str(uuid.uuid4())
 
-    from app.web.scans import _get_scan_dispatcher
-
-    dispatcher = _get_scan_dispatcher(db)
     svc = VerificationScanCreationService(
         session=db,
-        dispatcher=dispatcher,  # type: ignore[arg-type]
+        dispatcher=dispatcher,
         audit_service=audit,
     )
     result = svc.create_verification_scan(

@@ -71,3 +71,20 @@ def require_workspace_membership(
     """Verify workspace membership. Raises TenantAccessError (→404) if not a member."""
     auth_service.require_membership(workspace_id, user.id)
     return auth_service
+
+
+def get_web_scan_dispatcher() -> ScanDispatcher:
+    """FastAPI dependency for scan dispatcher injection.
+
+    Production returns a CeleryScanDispatcher. Tests override this via
+    ``app.dependency_overrides[get_web_scan_dispatcher] = lambda: fake``
+    to inject a RecordingDispatcher without monkeypatching.
+    """
+    from app.services.scanning.dispatcher import CeleryScanDispatcher
+
+    return CeleryScanDispatcher()
+
+
+# Imported here for type-checking only; the actual class lives in the
+# scanning package to avoid a circular import at module load time.
+from app.services.scanning.dispatcher import ScanDispatcher  # noqa: E402

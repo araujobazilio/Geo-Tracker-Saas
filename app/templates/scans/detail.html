@@ -80,16 +80,72 @@
         </div>
       </div>
       {% endif %}
-      {% if is_owner_or_admin and scan.scan_type == 'STANDARD' and scan.status in ['COMPLETED', 'PARTIAL'] %}
+      {% if is_owner_or_admin and scan.scan_type == 'STANDARD' and scan.status in ['COMPLETED', 'PARTIAL'] and confidence_scans_enabled %}
       <div class="mt-4 border-t pt-4">
         <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/scans/{{ scan.id }}/confidence" class="inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <input type="hidden" name="idempotency_key" value="{{ request.query_params.get('key', '') }}">
+          <input type="hidden" name="idempotency_key" value="{{ confidence_idempotency_key }}">
           <button type="submit" class="btn btn-secondary btn-sm">Check reliability</button>
         </form>
         <p class="text-xs text-gray-500 mt-1">Repeat this measurement to see how stable the result is.</p>
       </div>
       {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Confidence (reliability) result -->
+  {% if confidence_result %}
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Reliability result</h2></div>
+    <div class="card-body space-y-3">
+      <div class="flex items-center gap-2">
+        {% if confidence_result.overall_confidence_level == 'HIGH' %}
+        <span class="badge badge-green">High reliability</span>
+        {% elif confidence_result.overall_confidence_level == 'MEDIUM' %}
+        <span class="badge badge-blue">Medium reliability</span>
+        {% elif confidence_result.overall_confidence_level == 'LOW' %}
+        <span class="badge badge-yellow">Low reliability</span>
+        {% else %}
+        <span class="badge badge-gray">Insufficient data</span>
+        {% endif %}
+        <span class="text-xs text-gray-500">{{ confidence_result.repeat_count }} repeats</span>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div>
+          <p class="text-sm text-gray-600">Coverage</p>
+          <p class="text-xl font-semibold">
+            {% if confidence_result.measurement_coverage is not none %}
+            {{ "%.1f"|format(confidence_result.measurement_coverage) }}%
+            {% else %}—{% endif %}
+          </p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Repeat sufficiency</p>
+          <p class="text-xl font-semibold">
+            {% if confidence_result.brand_repeat_sufficiency is not none %}
+            {{ "%.1f"|format(confidence_result.brand_repeat_sufficiency) }}%
+            {% else %}—{% endif %}
+          </p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Mention stability</p>
+          <p class="text-xl font-semibold">
+            {% if confidence_result.brand_mention_stability is not none %}
+            {{ "%.1f"|format(confidence_result.brand_mention_stability) }}%
+            {% else %}—{% endif %}
+          </p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Observed range</p>
+          <p class="text-xl font-semibold">
+            {% if confidence_result.brand_observed_range is not none %}
+            ±{{ "%.1f"|format(confidence_result.brand_observed_range) }}pp
+            {% else %}—{% endif %}
+          </p>
+        </div>
+      </div>
+      <p class="text-xs text-gray-500">This is an observed repeatability range, not a statistical confidence interval.</p>
     </div>
   </div>
   {% endif %}

@@ -31,9 +31,11 @@ from app.core.enums import (
     OpportunityStatus,
     ProjectStatus,
     PromptType,
+    ScanAnalysisStatus,
     ScanStatus,
     ScanType,
 )
+from app.models.analysis import ScanAnalysis
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
 from app.models.project import Project
@@ -102,6 +104,19 @@ class TrendPoint:
     visibility_rate: Decimal | None  # None = missing/gap, NOT zero
     owned_citation_rate: Decimal | None
 
+    def to_chart_dict(self) -> dict[str, object]:
+        """Convert to a JSON-safe dict for Chart.js rendering."""
+        return {
+            "scan_id": str(self.scan_id),
+            "created_at": self.created_at.isoformat(),
+            "visibility_rate": float(self.visibility_rate)
+            if self.visibility_rate is not None
+            else None,
+            "owned_citation_rate": float(self.owned_citation_rate)
+            if self.owned_citation_rate is not None
+            else None,
+        }
+
 
 @dataclass(frozen=True)
 class LeaderboardEntry:
@@ -130,6 +145,13 @@ class ProjectDashboardData:
     is_prompt_set_stale: bool
     standard_scan_estimate: int
     quota: QuotaSummary
+    confidence_scans_enabled: bool = False
+    min_scheduled_scan_interval_hours: int | None = None
+
+    @property
+    def chart_trend(self) -> list[dict[str, object]]:
+        """JSON-safe trend data for Chart.js rendering."""
+        return [p.to_chart_dict() for p in self.trend]
 
 
 _ELIGIBLE_SCAN_STATUSES = (ScanStatus.COMPLETED, ScanStatus.PARTIAL)
@@ -292,6 +314,9 @@ class DashboardQueryService:
         # Quota
         quota = self._get_quota_summary(workspace_id)
 
+        # Entitlement flags for UI
+        ent = self._entitlements.get_effective_entitlements(workspace_id)
+
         return ProjectDashboardData(
             project=project,
             latest_scan=latest_scan,
@@ -304,6 +329,8 @@ class DashboardQueryService:
             is_prompt_set_stale=is_stale,
             standard_scan_estimate=estimate,
             quota=quota,
+            confidence_scans_enabled=ent.confidence_scans_enabled,
+            min_scheduled_scan_interval_hours=ent.min_scheduled_scan_interval_hours,
         )
 
     # ------------------------------------------------------------------
@@ -327,6 +354,98 @@ class DashboardQueryService:
         if scan is None or scan.workspace_id != workspace_id:
             return None
         return scan
+
+    def get_scan_evidence(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID, scan_id: uuid.UUID
+    ) -> list[dict[str, object]]:
+        """Return PromptRun evidence for a scan, scoped by workspace+project+scan."""
+        from app.services.scan_query_service import ScanQueryService
+
+        svc = ScanQueryService(self._session)
+        try:
+            runs = svc.list_runs(workspace_id, project_id, scan_id)
+        except Exception:
+            return []
+        evidence: list[dict[str, object]] = []
+        for run in runs:
+            evidence.append(
+                {
+                    "id": str(run.id),
+                    "provider": run.provider.value
+                    if hasattr(run.provider, "value")
+                    else str(run.provider),
+                    "prompt_type": str(run.prompt.prompt_type)
+                    if hasattr(run, "prompt") and run.prompt is not None
+                    else "",
+                    "status": run.status.value if hasattr(run.status, "value") else str(run.status),
+                    "response_text": run.response_text or "",
+                    "error_code": run.error_code,
+                    "sources": [{"title": s.title, "url": s.url} for s in (run.sources or [])]
+                    if hasattr(run, "sources") and run.sources
+                    else [],
+                }
+            )
+        return evidence
+
+    def get_scan_metrics_summary(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID, scan_id: uuid.UUID
+    ) -> dict[str, object]:
+        """Return a summary of scan metrics for display."""
+        with contextlib.suppress(Exception):
+            metrics = self._metrics.get_metrics(
+                workspace_id, project_id, scan_id, PromptType.NON_BRANDED
+            )
+            brand = next((e for e in metrics.entity_metrics if e.entity_type == "BRAND"), None)
+            return {
+                "planned_observations": metrics.planned_observations,
+                "successful_observations": metrics.successful_observations,
+                "failed_observations": metrics.planned_observations
+                - metrics.successful_observations,
+                "measurement_coverage": float(metrics.measurement_coverage)
+                if metrics.measurement_coverage is not None
+                else None,
+                "brand_visibility_rate": float(brand.visibility_rate)
+                if brand and brand.visibility_rate is not None
+                else None,
+                "brand_citation_rate": float(brand.owned_citation_rate)
+                if brand and brand.owned_citation_rate is not None
+                else None,
+            }
+        return {}
+
+    def get_confidence_result(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID, scan_id: uuid.UUID
+    ) -> dict[str, object] | None:
+        """Return confidence (reliability) metrics for a CONFIDENCE scan."""
+        with contextlib.suppress(Exception):
+            from app.services.confidence_metrics_service import ConfidenceMetricsService
+
+            svc = ConfidenceMetricsService(self._session)
+            result = svc.get_metrics(workspace_id, project_id, scan_id, PromptType.NON_BRANDED)
+            brand = next(
+                (e for e in result.entity_reliability if e.entity_type == "BRAND"),
+                None,
+            )
+            return {
+                "overall_confidence_level": result.overall_confidence_level,
+                "repeat_count": result.repeat_count,
+                "planned_observations": result.planned_observations,
+                "successful_observations": result.successful_observations,
+                "measurement_coverage": float(result.measurement_coverage)
+                if result.measurement_coverage is not None
+                else None,
+                "brand_confidence_level": brand.confidence_level if brand else None,
+                "brand_repeat_sufficiency": float(brand.repeat_sufficiency)
+                if brand and brand.repeat_sufficiency is not None
+                else None,
+                "brand_mention_stability": float(brand.mention_stability)
+                if brand and brand.mention_stability is not None
+                else None,
+                "brand_observed_range": float(brand.observed_visibility_range)
+                if brand and brand.observed_visibility_range is not None
+                else None,
+            }
+        return None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -392,22 +511,12 @@ class DashboardQueryService:
     def _latest_eligible_standard_scan(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID
     ) -> Scan | None:
-        return self._session.execute(
-            select(Scan)
-            .where(
-                Scan.workspace_id == workspace_id,
-                Scan.project_id == project_id,
-                Scan.scan_type.in_(_STANDARD_SCAN_TYPES),
-                Scan.status.in_(_ELIGIBLE_SCAN_STATUSES),
-            )
-            .order_by(Scan.created_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
+        """Return the most recent STANDARD scan with COMPLETED analysis.
 
-    def _recent_eligible_standard_scans(
-        self, workspace_id: uuid.UUID, project_id: uuid.UUID, limit: int = 12
-    ) -> list[Scan]:
-        return list(
+        If the latest terminal scan has a FAILED/PENDING/missing analysis,
+        we fall back to the previous eligible scan.
+        """
+        scans = list(
             self._session.execute(
                 select(Scan)
                 .where(
@@ -417,9 +526,50 @@ class DashboardQueryService:
                     Scan.status.in_(_ELIGIBLE_SCAN_STATUSES),
                 )
                 .order_by(Scan.created_at.desc())
-                .limit(limit)
+                .limit(20)
             ).scalars()
         )
+        for scan in scans:
+            analysis = self._session.execute(
+                select(ScanAnalysis).where(
+                    ScanAnalysis.scan_id == scan.id,
+                    ScanAnalysis.status == ScanAnalysisStatus.COMPLETED,
+                )
+            ).scalar_one_or_none()
+            if analysis is not None:
+                return scan
+        return None
+
+    def _recent_eligible_standard_scans(
+        self, workspace_id: uuid.UUID, project_id: uuid.UUID, limit: int = 12
+    ) -> list[Scan]:
+        """Return recent STANDARD scans with COMPLETED analysis for trend."""
+        scans = list(
+            self._session.execute(
+                select(Scan)
+                .where(
+                    Scan.workspace_id == workspace_id,
+                    Scan.project_id == project_id,
+                    Scan.scan_type.in_(_STANDARD_SCAN_TYPES),
+                    Scan.status.in_(_ELIGIBLE_SCAN_STATUSES),
+                )
+                .order_by(Scan.created_at.desc())
+                .limit(limit * 3)
+            ).scalars()
+        )
+        eligible: list[Scan] = []
+        for scan in scans:
+            analysis = self._session.execute(
+                select(ScanAnalysis).where(
+                    ScanAnalysis.scan_id == scan.id,
+                    ScanAnalysis.status == ScanAnalysisStatus.COMPLETED,
+                )
+            ).scalar_one_or_none()
+            if analysis is not None:
+                eligible.append(scan)
+                if len(eligible) >= limit:
+                    break
+        return eligible
 
     def _get_visibility_trend(
         self, workspace_id: uuid.UUID, project_id: uuid.UUID
