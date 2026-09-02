@@ -431,7 +431,10 @@ class TestMemberRole:
         csrf_token, ws_id = _register(client)
         # Try to access onboarding page — owner should work
         resp = client.get(f"/app/w/{ws_id}/projects/new", headers={"Accept": "text/html"})
-        assert resp.status_code == 200
+        if resp.status_code != 200:
+            # Print response body for debugging
+            print(f"ONBOARDING RESPONSE {resp.status_code}: {resp.text[:500]}")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:200]}"
         # The owner is ADMIN/OWNER so this should work.
         # For MEMBER test, we'd need to add a member to the workspace.
         # This is a basic smoke test that the page renders for owner.
@@ -863,6 +866,7 @@ class TestVerificationRejection:
                 fingerprint=f"test-fingerprint-{uuid.uuid4().hex[:8]}",
                 action_engine_version="v1",
                 prompt_type="STANDARD",
+                recommended_action="Test action",
                 opportunity_type="CONTENT_GAP",
                 title="Test opportunity",
                 summary="Test",

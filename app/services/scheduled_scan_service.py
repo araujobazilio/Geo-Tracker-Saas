@@ -611,18 +611,26 @@ class ScheduledScanService:
             self._record_audit("SCHEDULE_UPDATED", existing)
             return existing
 
-        schedule = ProjectScanSchedule(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            enabled=enabled,
-            interval_hours=interval_hours,
+        # Use SQLAlchemy Core insert to bypass potential ORM constructor issues
+        from sqlalchemy import insert
+
+        schedule_id = uuid.uuid4()
+        self._session.execute(
+            insert(ProjectScanSchedule).values(
+                id=schedule_id,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                enabled=enabled,
+                interval_hours=interval_hours,
+                next_run_at=next_run,
+                created_by_user_id=created_by_user_id,
+            )
         )
-        schedule.next_run_at = next_run
-        schedule.created_by_user_id = created_by_user_id
-        self._session.add(schedule)
         self._session.commit()
-        self._record_audit("SCHEDULE_CREATED", schedule)
-        return schedule
+        schedule = self._session.get(ProjectScanSchedule, schedule_id)
+        if schedule is not None:
+            self._record_audit("SCHEDULE_CREATED", schedule)
+        return schedule  # type: ignore[return-value]
 
     @staticmethod
     def _normalize_to_utc(dt: datetime) -> datetime:
