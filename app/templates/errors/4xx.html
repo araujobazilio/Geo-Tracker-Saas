@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}{{ status_code }} — GEO Tracker{% endblock %}
+
+{% block body %}
+<div class="h-full bg-gray-50 flex items-center justify-center">
+  <div class="card max-w-md">
+    <div class="card-body text-center">
+      <h1 class="text-3xl font-bold text-gray-900">{{ status_code }}</h1>
+      <p class="mt-2 text-sm text-gray-600">{{ message }}</p>
+      <a href="/app" class="btn btn-primary mt-6">Go to dashboard</a>
+    </div>
+  </div>
+</div>
+{% endblock %}

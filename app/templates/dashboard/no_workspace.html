@@ -9,6 +9,7 @@
         Your account is not linked to any workspace. Please contact support to get started.
       </p>
       <form method="POST" action="/logout" class="mt-6">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-ghost">Sign out</button>
       </form>
     </div>

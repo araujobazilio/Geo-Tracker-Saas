@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -94,28 +94,35 @@ def create_app() -> FastAPI:
     ) -> JSONResponse | HTMLResponse:
         # Return 404 to avoid revealing whether an inaccessible resource exists.
         if _is_web_request(request):
-            return _templates.TemplateResponse(
-                "errors/404.html", {"request": request}, status_code=404
-            )
+            return _templates.TemplateResponse(request, "errors/404.html", {}, status_code=404)
         return JSONResponse(
             status_code=404,
             content={"error": {"code": "not_found", "message": "Resource not found."}},
         )
 
     @app.exception_handler(AppError)
-    async def app_error_handler(request: Request, exc: AppError) -> JSONResponse | HTMLResponse:
+    async def app_error_handler(
+        request: Request, exc: AppError
+    ) -> JSONResponse | HTMLResponse | RedirectResponse:
         if _is_web_request(request):
-            if exc.status_code == 404:
+            status_code = exc.status_code
+            if status_code == 404:
+                return _templates.TemplateResponse(request, "errors/404.html", {}, status_code=404)
+            if status_code == 403:
+                return _templates.TemplateResponse(request, "errors/403.html", {}, status_code=403)
+            if status_code == 401:
+                return RedirectResponse(url="/login", status_code=302)
+            # Expected customer-facing errors (409/422/429): render a safe
+            # message page without exposing internal details.
+            if status_code in (409, 422, 429):
                 return _templates.TemplateResponse(
-                    "errors/404.html", {"request": request}, status_code=404
+                    request,
+                    "errors/4xx.html",
+                    {"status_code": status_code, "message": exc.message},
+                    status_code=status_code,
                 )
-            if exc.status_code == 403:
-                return _templates.TemplateResponse(
-                    "errors/403.html", {"request": request}, status_code=403
-                )
-            return _templates.TemplateResponse(
-                "errors/500.html", {"request": request}, status_code=500
-            )
+            # 500 and everything else: generic error page.
+            return _templates.TemplateResponse(request, "errors/500.html", {}, status_code=500)
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message}},

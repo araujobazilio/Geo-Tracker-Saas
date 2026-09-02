@@ -53,6 +53,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Node.js LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts"
+
       - name: Create test database
         run: |
           PGPASSWORD=geo_tracker_dev_password psql -h localhost -U geo_tracker -d geo_tracker -c "CREATE DATABASE geo_tracker_test;"
@@ -61,6 +66,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build:frontend
+
+      - name: Verify generated asset is current
+        run: git diff --exit-code -- app/static/css/app.css
 
       - name: Ruff check
         run: ruff check .
@@ -98,10 +112,50 @@ jobs:
           test -f app/templates/errors/404.html
           test -f app/templates/errors/403.html
           test -f app/templates/errors/500.html
+          test -f app/templates/errors/4xx.html
+          test -f app/templates/projects/settings.html
 
-      - name: Verify web app starts
+      - name: Verify web app starts (semantic route check)
         run: |
-          python -c "from app.main import create_app; app = create_app(); assert len(app.routes) > 90, f'Expected >90 routes, got {len(app.routes)}'"
+          python -c "
+          from app.main import create_app
+          app = create_app()
+          paths = {r.path for r in app.routes if hasattr(r, 'path')}
+          required = [
+              '/',
+              '/login',
+              '/register',
+              '/logout',
+              '/app',
+              '/app/w/{workspace_id}',
+              '/app/w/{workspace_id}/projects/new',
+              '/app/w/{workspace_id}/projects/{project_id}',
+              '/app/w/{workspace_id}/projects/{project_id}/scans',
+              '/app/w/{workspace_id}/projects/{project_id}/scans/{scan_id}',
+              '/app/w/{workspace_id}/projects/{project_id}/scans/{scan_id}/status',
+              '/app/w/{workspace_id}/projects/{project_id}/scans/{scan_id}/confidence',
+              '/app/w/{workspace_id}/projects/{project_id}/opportunities',
+              '/app/w/{workspace_id}/projects/{project_id}/opportunities/{opportunity_id}',
+              '/app/w/{workspace_id}/projects/{project_id}/opportunities/{opportunity_id}/transition',
+              '/app/w/{workspace_id}/projects/{project_id}/opportunities/{opportunity_id}/verify',
+              '/app/w/{workspace_id}/projects/{project_id}/schedule/enable',
+              '/app/w/{workspace_id}/projects/{project_id}/schedule/disable',
+              '/app/w/{workspace_id}/projects/{project_id}/settings',
+              '/app/w/{workspace_id}/projects/{project_id}/settings/brand',
+              '/app/w/{workspace_id}/projects/{project_id}/prompts/regenerate',
+              '/app/w/{workspace_id}/notifications',
+              '/app/w/{workspace_id}/notifications/{notification_id}/read',
+              '/app/w/{workspace_id}/notifications/mark-all-read',
+              '/app/w/{workspace_id}/settings/notifications',
+              '/health',
+              '/api/v1/auth/register',
+              '/api/v1/auth/login',
+              '/api/v1/auth/logout',
+          ]
+          missing = [p for p in required if p not in paths]
+          assert not missing, f'Missing required routes: {missing}'
+          print(f'All {len(required)} required routes verified')
+          "
 
       - name: Alembic migration to head
         run: alembic upgrade head

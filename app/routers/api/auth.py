@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Request, Response, status
 
 from app.config import Settings, get_settings
 from app.core.exceptions import AuthenticationError, RateLimitExceededError
+from app.core.session_cookie import clear_session_cookie, set_session_cookie
 from app.dependencies import (
     get_auth_service,
     get_client_ip,
@@ -44,30 +45,6 @@ from app.services.workspace_service import WorkspaceService
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
-def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
-    """Set the HttpOnly session cookie with security attributes."""
-    response.set_cookie(
-        key=settings.session_cookie_name,
-        value=token,
-        max_age=settings.session_ttl_seconds,
-        httponly=True,
-        secure=settings.session_cookie_secure,
-        samesite=settings.session_cookie_samesite,
-        path="/",
-    )
-
-
-def _clear_session_cookie(response: Response, settings: Settings) -> None:
-    """Clear the session cookie."""
-    response.delete_cookie(
-        key=settings.session_cookie_name,
-        path="/",
-        secure=settings.session_cookie_secure,
-        samesite=settings.session_cookie_samesite,
-        httponly=True,
-    )
-
-
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register(
     request: RegisterRequest,
@@ -82,7 +59,7 @@ def register(
         raise RateLimitExceededError("Too many registration attempts. Please try again later.")
 
     result = auth_service.register(request.email, request.password)
-    _set_session_cookie(response, result.session_token, settings)
+    set_session_cookie(response, result.session_token, settings)
     return UserResponse.model_validate(result.user)
 
 
@@ -117,7 +94,7 @@ def login(
 
     # Successful login — reset failure counter.
     rate_limiter.reset("login", client_ip)
-    _set_session_cookie(response, result.session_token, settings)
+    set_session_cookie(response, result.session_token, settings)
     return UserResponse.model_validate(result.user)
 
 
@@ -130,7 +107,7 @@ def logout(
     user: Annotated[User | None, Depends(get_current_user)],
 ) -> MessageResponse:
     """Revoke the session and clear the cookie. Idempotent."""
-    _clear_session_cookie(response, settings)
+    clear_session_cookie(response, settings)
     session_cookie = request.cookies.get(settings.session_cookie_name)
     if session_cookie:
         session_service.revoke_session(session_cookie)

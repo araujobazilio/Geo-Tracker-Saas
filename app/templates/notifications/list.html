@@ -5,6 +5,7 @@
   <div class="flex items-center justify-between">
     <h1 class="page-title">Notifications</h1>
     <form method="POST" action="/app/w/{{ workspace_id }}/notifications/mark-all-read" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <button type="submit" class="btn btn-ghost btn-sm">Mark all as read</button>
     </form>
   </div>
@@ -29,6 +30,7 @@
         <div class="flex gap-2">
           {% if not notif.read_at %}
           <form method="POST" action="/app/w/{{ workspace_id }}/notifications/{{ notif.id }}/read" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="btn btn-ghost btn-sm">Mark read</button>
           </form>
           {% endif %}

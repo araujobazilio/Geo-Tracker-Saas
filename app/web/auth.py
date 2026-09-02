@@ -1,8 +1,7 @@
 """Web authentication routes and shared cookie helpers.
 
-The cookie-set/clear helpers are extracted here so both the API auth
-router and the web auth router use the SAME implementation, avoiding
-divergent security behavior.
+Uses the shared session cookie utility from app.core.session_cookie
+to ensure identical security behavior with the API auth router.
 """
 
 from __future__ import annotations
@@ -20,6 +19,7 @@ from app.core.exceptions import (
     RateLimitExceededError,
     ValidationError,
 )
+from app.core.session_cookie import clear_session_cookie, set_session_cookie
 from app.dependencies import (
     get_auth_service,
     get_client_ip,
@@ -34,33 +34,6 @@ from app.services.rate_limiter import RateLimiter
 router = APIRouter(tags=["web-auth"])
 
 
-def set_session_cookie(response: Response, token: str, settings: Settings) -> None:
-    """Set the HttpOnly session cookie with security attributes.
-
-    Shared between API and web auth — do not duplicate this logic.
-    """
-    response.set_cookie(
-        key=settings.session_cookie_name,
-        value=token,
-        max_age=settings.session_ttl_seconds,
-        httponly=True,
-        secure=settings.session_cookie_secure,
-        samesite=settings.session_cookie_samesite,
-        path="/",
-    )
-
-
-def clear_session_cookie(response: Response, settings: Settings) -> None:
-    """Clear the session cookie. Shared between API and web auth."""
-    response.delete_cookie(
-        key=settings.session_cookie_name,
-        path="/",
-        secure=settings.session_cookie_secure,
-        samesite=settings.session_cookie_samesite,
-        httponly=True,
-    )
-
-
 def _safe_error(exc: Exception) -> str:
     """Map exceptions to customer-safe error messages (no internal details)."""
     if isinstance(exc, AuthenticationError):
@@ -72,6 +45,25 @@ def _safe_error(exc: Exception) -> str:
     if isinstance(exc, RateLimitExceededError):
         return "Too many attempts. Please try again later."
     return "Something went wrong. Please try again."
+
+
+def _safe_next_param(raw: str) -> str:
+    """Return a safe internal redirect path, or /app if the value is unsafe.
+
+    Rejects:
+    - External URLs (https://evil.example, //evil.example)
+    - Encoded external URLs
+    - Paths not starting with a single '/'
+    """
+    if not raw:
+        return "/app"
+    # Reject anything that doesn't start with a single '/'
+    if not raw.startswith("/") or raw.startswith("//"):
+        return "/app"
+    # Reject backslashes (browsers normalize them)
+    if raw.startswith("/\\"):
+        return "/app"
+    return raw
 
 
 @router.get("/login")
@@ -89,7 +81,6 @@ def login_page(
 @router.post("/login")
 def login_submit(
     request: Request,
-    response: Response,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
@@ -97,7 +88,7 @@ def login_submit(
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> Response:
-    """Process login form submission. Sets cookie and redirects on success."""
+    """Process login form submission. Sets cookie on the returned redirect."""
     templates = Jinja2Templates(directory="app/templates")
     if rate_limiter.is_limited("login", client_ip):
         return templates.TemplateResponse(
@@ -136,9 +127,10 @@ def login_submit(
         )
 
     rate_limiter.reset("login", client_ip)
-    set_session_cookie(response, result.session_token, settings)
-    next_url = request.query_params.get("next", "/app")
-    return RedirectResponse(url=next_url, status_code=302)
+    next_url = _safe_next_param(request.query_params.get("next", "/app"))
+    redirect = RedirectResponse(url=next_url, status_code=302)
+    set_session_cookie(redirect, result.session_token, settings)
+    return redirect
 
 
 @router.get("/register")
@@ -156,7 +148,6 @@ def register_page(
 @router.post("/register")
 def register_submit(
     request: Request,
-    response: Response,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
@@ -164,7 +155,7 @@ def register_submit(
     settings: Annotated[Settings, Depends(get_settings)],
     client_ip: Annotated[str, Depends(get_client_ip)],
 ) -> Response:
-    """Process registration form submission. Sets cookie and redirects on success."""
+    """Process registration form submission. Sets cookie on the returned redirect."""
     templates = Jinja2Templates(directory="app/templates")
     if not rate_limiter.check("register", client_ip):
         return templates.TemplateResponse(
@@ -208,22 +199,23 @@ def register_submit(
             status_code=500,
         )
 
-    set_session_cookie(response, result.session_token, settings)
-    return RedirectResponse(url="/app", status_code=302)
+    redirect = RedirectResponse(url="/app", status_code=302)
+    set_session_cookie(redirect, result.session_token, settings)
+    return redirect
 
 
 @router.post("/logout")
 def logout_submit(
     request: Request,
-    response: Response,
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
-    """Logout: clear cookie, revoke session, redirect to /login."""
-    from app.dependencies import get_session_service
-
-    clear_session_cookie(response, settings)
+    """Logout: clear cookie on the returned redirect, revoke session."""
+    redirect = RedirectResponse(url="/login", status_code=302)
+    clear_session_cookie(redirect, settings)
     session_cookie = request.cookies.get(settings.session_cookie_name)
     if session_cookie:
+        from app.dependencies import get_session_service
+
         svc = get_session_service()
         svc.revoke_session(session_cookie)
-    return RedirectResponse(url="/login", status_code=302)
+    return redirect

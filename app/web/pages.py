@@ -85,6 +85,10 @@ def _build_context(
         plan_name=plan_name,
     )
     ctx.extra.update(extra)
+    # Add user workspaces for the switcher
+    ws_svc = WorkspaceService(db)
+    user_workspaces = ws_svc.list_workspaces(user.id)
+    ctx.extra["user_workspaces"] = [{"id": str(ws.id), "name": ws.name} for ws in user_workspaces]
     return ctx
 
 
@@ -182,6 +186,10 @@ def project_dashboard(
     auth_service.require_membership(workspace_id, user.id)
     dashboard_svc = DashboardQueryService(db, entitlement_service=entitlement_service)
     data = dashboard_svc.get_project_dashboard(workspace_id, project_id)
+    # Generate a stable idempotency key for this page render.
+    # Two POSTs from the SAME rendered form use the same key.
+    # A new page render gets a new key.
+    run_scan_idempotency_key = str(uuid.uuid4())
     ctx = _build_context(
         request,
         user,
@@ -194,5 +202,6 @@ def project_dashboard(
         format_percent=format_percent,
         format_metric_or_none=format_metric_or_none,
         truncate=truncate,
+        run_scan_idempotency_key=run_scan_idempotency_key,
     )
     return templates.TemplateResponse(request, "projects/dashboard.html", ctx.to_dict())

@@ -1,0 +1,145 @@
+{% extends "app_base.html" %}
+{% block title %}{{ project.name }} — Settings — GEO Tracker{% endblock %}
+{% block content %}
+<div class="space-y-6">
+  <div>
+    <a href="/app/w/{{ workspace_id }}/projects/{{ project.id }}" class="link text-sm">← Back to project</a>
+    <h1 class="page-title mt-2">Project settings</h1>
+    <p class="text-sm text-gray-600">{{ project.name }}</p>
+  </div>
+
+  {% if request.query_params.get('saved') %}
+  <div class="alert alert-success">Settings saved.</div>
+  {% endif %}
+
+  <!-- Brand details -->
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Brand details</h2></div>
+    <div class="card-body">
+      {% if is_owner_or_admin %}
+      <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project.id }}/settings/brand" class="space-y-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div>
+          <label class="label">Project name</label>
+          <input type="text" name="name" value="{{ project.name }}" class="input">
+        </div>
+        <div>
+          <label class="label">Domain</label>
+          <input type="text" name="domain" value="{{ project.domain }}" class="input">
+        </div>
+        <div>
+          <label class="label">Brand name</label>
+          <input type="text" name="brand_name" value="{{ project.brand_name }}" class="input">
+        </div>
+        <div>
+          <label class="label">Brand aliases (comma-separated)</label>
+          <input type="text" name="brand_aliases" value="{{ project.brand_aliases | join(', ') if project.brand_aliases else '' }}" class="input">
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="label">Industry</label>
+            <input type="text" name="industry" value="{{ project.industry or '' }}" class="input">
+          </div>
+          <div>
+            <label class="label">Target audience</label>
+            <input type="text" name="target_audience" value="{{ project.target_audience or '' }}" class="input">
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="label">Target country</label>
+            <input type="text" name="target_country" value="{{ project.target_country or '' }}" class="input">
+          </div>
+          <div>
+            <label class="label">Target language</label>
+            <input type="text" name="target_language" value="{{ project.target_language or '' }}" class="input">
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Save brand details</button>
+      </form>
+      {% else %}
+      <table class="table">
+        <tbody>
+          <tr><td class="text-gray-600">Project name</td><td>{{ project.name }}</td></tr>
+          <tr><td class="text-gray-600">Domain</td><td>{{ project.domain }}</td></tr>
+          <tr><td class="text-gray-600">Brand name</td><td>{{ project.brand_name }}</td></tr>
+          <tr><td class="text-gray-600">Brand aliases</td><td>{{ project.brand_aliases | join(', ') if project.brand_aliases else '—' }}</td></tr>
+          <tr><td class="text-gray-600">Industry</td><td>{{ project.industry or '—' }}</td></tr>
+          <tr><td class="text-gray-600">Target audience</td><td>{{ project.target_audience or '—' }}</td></tr>
+          <tr><td class="text-gray-600">Target country</td><td>{{ project.target_country or '—' }}</td></tr>
+          <tr><td class="text-gray-600">Target language</td><td>{{ project.target_language or '—' }}</td></tr>
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Topics -->
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Tracking topics ({{ keywords|length }})</h2></div>
+    <div class="card-body">
+      {% if keywords %}
+      <table class="table">
+        <thead><tr><th>Topic</th><th>Intent</th><th>Funnel stage</th></tr></thead>
+        <tbody>
+          {% for kw in keywords %}
+          <tr>
+            <td>{{ kw.text }}</td>
+            <td>{{ kw.intent or '—' }}</td>
+            <td>{{ kw.funnel_stage or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty-text">No topics configured.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Competitors -->
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Competitors ({{ competitors|length }})</h2></div>
+    <div class="card-body">
+      {% if competitors %}
+      <table class="table">
+        <thead><tr><th>Name</th><th>Domain</th><th>Aliases</th></tr></thead>
+        <tbody>
+          {% for comp in competitors %}
+          <tr>
+            <td>{{ comp.name }}</td>
+            <td>{{ comp.domain or '—' }}</td>
+            <td>{{ comp.aliases | join(', ') if comp.aliases else '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty-text">No competitors configured.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Providers -->
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">AI providers ({{ providers|length }})</h2></div>
+    <div class="card-body">
+      {% if providers %}
+      <table class="table">
+        <thead><tr><th>Provider</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for prov in providers %}
+          <tr>
+            <td>{{ prov.provider }}</td>
+            <td>{% if prov.enabled %}<span class="badge badge-green">Enabled</span>{% else %}<span class="badge badge-gray">Disabled</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="empty-text">No providers configured.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

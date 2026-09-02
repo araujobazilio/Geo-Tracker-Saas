@@ -110,6 +110,12 @@
       </div>
     </div>
 
+    <!-- Hidden fields for JSON serialization of keywords/competitors -->
+    <input type="hidden" id="keywords-hidden" name="keywords" value="[]">
+    <input type="hidden" id="competitors-hidden" name="competitors" value="[]">
+    <!-- CSRF token for form submission -->
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
     <div class="flex justify-end">
       <button type="submit" class="btn btn-primary">Create project</button>
     </div>
@@ -173,9 +179,12 @@ function syncCompetitors() {
   var hidden = document.getElementById('competitors-hidden');
   if (hidden) hidden.value = JSON.stringify(comps);
 }
-</script>
 
-<!-- Hidden fields for JSON serialization of keywords/competitors -->
-<input type="hidden" id="keywords-hidden" name="keywords" value="[]">
-<input type="hidden" id="competitors-hidden" name="competitors" value="[]">
+// Synchronize hidden fields right before form submission so the backend
+// receives the latest JSON payloads for keywords and competitors.
+document.querySelector('form').addEventListener('submit', function(e) {
+    syncKeywords();
+    syncCompetitors();
+});
+</script>
 {% endblock %}

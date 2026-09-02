@@ -4,15 +4,21 @@ Validates CSRF tokens for state-changing requests (POST, PUT, PATCH, DELETE).
 
 Strategy:
   - The session stores a CSRF token (generated at session creation).
-  - The browser receives the CSRF token via GET /api/v1/auth/csrf.
-  - State-changing requests must include the token in the `X-CSRF-Token` header.
-  - The server validates the header token against the session's stored token
-    using constant-time comparison.
+  - The browser receives the CSRF token via GET /api/v1/auth/csrf or
+    the ``csrf_token`` template variable (rendered in a hidden form field
+    and in a ``<meta>`` tag for HTMX).
+  - State-changing requests must include the token EITHER:
+    - in the ``X-CSRF-Token`` header (HTMX, fetch, API clients), OR
+    - in the ``csrf_token`` field of an ``application/x-www-form-urlencoded``
+      or ``multipart/form-data`` body (native browser form submission).
+  - The server validates the presented token against the session's stored
+    token using constant-time comparison.
   - GET/HEAD/OPTIONS requests do not require CSRF protection.
 
 Exempt paths:
   - /api/v1/auth/login (no session yet)
   - /api/v1/auth/register (no session yet)
+  - /login, /register (web auth — no session yet)
   - /health, /ready (infrastructure)
 """
 
@@ -38,6 +44,9 @@ _EXEMPT_PATHS = {
     "/ready",
 }
 
+# Content types that may contain a csrf_token form field.
+_FORM_CONTENT_TYPES = {"application/x-www-form-urlencoded", "multipart/form-data"}
+
 
 class CSRFMiddleware(BaseHTTPMiddleware):
     """Validate CSRF tokens on state-changing requests."""
@@ -56,6 +65,46 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             )
         return self._session_service
 
+    async def _extract_csrf_token(self, request: Request) -> str:
+        """Extract CSRF token from header or form body.
+
+        For form bodies, we read the body and cache it so downstream
+        handlers can still access it via request.form() or request.body().
+        """
+        # 1. Check header first (HTMX, fetch, API clients).
+        header_token = request.headers.get("X-CSRF-Token", "")
+        if header_token:
+            return header_token
+
+        # 2. Check form body for native browser submissions.
+        content_type = request.headers.get("content-type", "").split(";")[0].strip()
+        if content_type not in _FORM_CONTENT_TYPES:
+            return ""
+
+        # Read and cache the body so it can be replayed for the actual handler.
+        body = await request.body()
+        if not body:
+            return ""
+
+        # Parse the form data from the cached body.
+        try:
+            from urllib.parse import parse_qs
+
+            if content_type == "multipart/form-data":
+                # For multipart, use Starlette's form parser with the cached body.
+                # We need to set _body so request.form() can reuse it.
+                request._body = body
+                form = await request.form()
+                token = form.get("csrf_token", "")
+                return str(token) if token else ""
+            else:
+                # For urlencoded, parse directly.
+                parsed = parse_qs(body.decode("utf-8", errors="replace"))
+                values = parsed.get("csrf_token", [])
+                return values[0] if values else ""
+        except Exception:
+            return ""
+
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if request.method not in _PROTECTED_METHODS:
             return await call_next(request)
@@ -71,16 +120,16 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         if not session_cookie:
             return await call_next(request)
 
-        csrf_header = request.headers.get("X-CSRF-Token", "")
+        csrf_token = await self._extract_csrf_token(request)
 
-        if not csrf_header:
+        if not csrf_token:
             return JSONResponse(
                 status_code=403,
                 content={"error": {"code": "csrf_error", "message": "CSRF token required."}},
             )
 
         svc = self._get_session_service()
-        if not svc.validate_csrf(session_cookie, csrf_header):
+        if not svc.validate_csrf(session_cookie, csrf_token):
             return JSONResponse(
                 status_code=403,
                 content={"error": {"code": "csrf_error", "message": "Invalid CSRF token."}},

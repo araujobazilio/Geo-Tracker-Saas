@@ -26,18 +26,53 @@
     </div>
   </div>
 
+  {% if verification %}
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Verification result</h2></div>
+    <div class="card-body space-y-3">
+      <div class="flex items-center gap-2">
+        {% if verification_outcome == 'RESOLVED' %}
+        <span class="badge badge-green">{{ verification_outcome_label(verification_outcome) }}</span>
+        {% elif verification_outcome == 'IMPROVED' %}
+        <span class="badge badge-blue">{{ verification_outcome_label(verification_outcome) }}</span>
+        {% elif verification_outcome == 'REGRESSED' %}
+        <span class="badge badge-red">{{ verification_outcome_label(verification_outcome) }}</span>
+        {% elif verification_outcome == 'INCONCLUSIVE' %}
+        <span class="badge badge-yellow">{{ verification_outcome_label(verification_outcome) }}</span>
+        {% else %}
+        <span class="badge badge-gray">{{ verification_outcome_label(verification_outcome) }}</span>
+        {% endif %}
+        <span class="text-xs text-gray-500">{{ verification.created_at.strftime('%Y-%m-%d') if verification.created_at else '—' }}</span>
+      </div>
+      <p class="text-sm text-gray-700">{{ verification_outcome_explanation(verification_outcome) }}</p>
+      {% if verification_scan %}
+      <table class="table">
+        <tbody>
+          <tr><td class="text-gray-600">Verification scan</td><td>{{ verification_scan.status }}</td></tr>
+          <tr><td class="text-gray-600">Started</td><td>{{ verification_scan.started_at.strftime('%Y-%m-%d %H:%M') if verification_scan.started_at else '—' }}</td></tr>
+          <tr><td class="text-gray-600">Completed</td><td>{{ verification_scan.completed_at.strftime('%Y-%m-%d %H:%M') if verification_scan.completed_at else '—' }}</td></tr>
+        </tbody>
+      </table>
+      {% endif %}
+      <p class="text-xs text-gray-500">Verification compares measurements before and after implementation. It does not prove that the implementation caused the change.</p>
+    </div>
+  </div>
+  {% endif %}
+
   {% if is_owner_or_admin %}
   <div class="card">
     <div class="card-header"><h2 class="card-title">Actions</h2></div>
     <div class="card-body space-y-3">
       {% if opportunity.status == 'OPEN' %}
       <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/transition" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="new_status" value="IN_PROGRESS">
         <button type="submit" class="btn btn-secondary btn-sm">Mark as in progress</button>
       </form>
       {% endif %}
       {% if opportunity.status == 'IN_PROGRESS' %}
       <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/transition" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="new_status" value="IMPLEMENTED">
         <button type="submit" class="btn btn-primary btn-sm">Mark as implemented</button>
       </form>
@@ -45,6 +80,7 @@
       {% endif %}
       {% if opportunity.status in ['OPEN', 'IN_PROGRESS'] %}
       <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/transition" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="new_status" value="DISMISSED">
         <button type="submit" class="btn btn-ghost btn-sm">Dismiss</button>
       </form>
@@ -54,7 +90,8 @@
         <h3 class="font-medium text-sm">Verify result</h3>
         <p class="text-xs text-gray-500 mt-1">This runs a new targeted measurement. It consumes normal AI Checks for successful observations.</p>
         <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/opportunities/{{ opportunity.id }}/verify" class="mt-2">
-          <input type="hidden" name="idempotency_key" value="{{ request.query_params.get('key', '') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="idempotency_key" value="{{ verify_idempotency_key }}">
           <button type="submit" class="btn btn-primary btn-sm">Verify result</button>
         </form>
       </div>

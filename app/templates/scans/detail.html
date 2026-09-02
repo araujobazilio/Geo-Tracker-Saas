@@ -32,5 +32,109 @@
       </table>
     </div>
   </div>
+
+  <!-- Metrics summary -->
+  {% if metrics_summary and metrics_summary.successful_observations is defined %}
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">Measurement summary</h2></div>
+    <div class="card-body">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div>
+          <p class="text-sm text-gray-600">Planned AI Checks</p>
+          <p class="text-2xl font-semibold">{{ metrics_summary.planned_observations }}</p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Successful observations</p>
+          <p class="text-2xl font-semibold text-green-600">{{ metrics_summary.successful_observations }}</p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Failed observations</p>
+          <p class="text-2xl font-semibold text-red-600">{{ metrics_summary.failed_observations }}</p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Coverage</p>
+          <p class="text-2xl font-semibold">
+            {% if metrics_summary.measurement_coverage is not none %}
+            {{ "%.1f"|format(metrics_summary.measurement_coverage) }}%
+            {% else %}
+            —
+            {% endif %}
+          </p>
+        </div>
+      </div>
+      {% if metrics_summary.brand_visibility_rate is not none %}
+      <div class="mt-4 grid grid-cols-2 gap-4">
+        <div>
+          <p class="text-sm text-gray-600">Brand visibility</p>
+          <p class="text-2xl font-semibold">{{ "%.1f"|format(metrics_summary.brand_visibility_rate) }}%</p>
+        </div>
+        <div>
+          <p class="text-sm text-gray-600">Owned citation rate</p>
+          <p class="text-2xl font-semibold">
+            {% if metrics_summary.brand_citation_rate is not none %}
+            {{ "%.1f"|format(metrics_summary.brand_citation_rate) }}%
+            {% else %}
+            —
+            {% endif %}
+          </p>
+        </div>
+      </div>
+      {% endif %}
+      {% if is_owner_or_admin and scan.scan_type == 'STANDARD' and scan.status in ['COMPLETED', 'PARTIAL'] %}
+      <div class="mt-4 border-t pt-4">
+        <form method="POST" action="/app/w/{{ workspace_id }}/projects/{{ project_id }}/scans/{{ scan.id }}/confidence" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="idempotency_key" value="{{ request.query_params.get('key', '') }}">
+          <button type="submit" class="btn btn-secondary btn-sm">Check reliability</button>
+        </form>
+        <p class="text-xs text-gray-500 mt-1">Repeat this measurement to see how stable the result is.</p>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Evidence / AI measurement requests -->
+  {% if evidence and evidence|length > 0 %}
+  <div class="card">
+    <div class="card-header"><h2 class="card-title">AI measurement requests</h2></div>
+    <div class="card-body">
+      <div class="space-y-3">
+        {% for run in evidence %}
+        <details class="border rounded p-3">
+          <summary class="cursor-pointer font-medium">
+            <span class="badge badge-blue">{{ run.provider }}</span>
+            <span class="ml-2 text-sm text-gray-600">{{ run.prompt_type }}</span>
+            {% if run.status == 'SUCCEEDED' %}
+            <span class="ml-2 badge badge-green">Completed</span>
+            {% elif run.status == 'FAILED' %}
+            <span class="ml-2 badge badge-red">Measurement unavailable</span>
+            {% else %}
+            <span class="ml-2 badge badge-gray">{{ run.status }}</span>
+            {% endif %}
+          </summary>
+          <div class="mt-3 space-y-2">
+            {% if run.status == 'FAILED' %}
+            <p class="text-sm text-gray-600">Measurement unavailable. The AI provider did not return a usable response for this prompt.</p>
+            {% elif run.response_text %}
+            <div class="bg-gray-50 rounded p-3 text-sm whitespace-pre-wrap">{{ run.response_text[:500] }}{% if run.response_text|length > 500 %}…{% endif %}</div>
+            {% endif %}
+            {% if run.sources and run.sources|length > 0 %}
+            <div>
+              <p class="text-sm font-medium text-gray-700">Sources cited:</p>
+              <ul class="list-disc list-inside text-sm text-gray-600">
+                {% for src in run.sources %}
+                <li>{{ src.title }}{% if src.url %} — <a href="{{ src.url }}" target="_blank" rel="noopener noreferrer" class="link">{{ src.url[:60] }}{% if src.url|length > 60 %}…{% endif %}</a>{% endif %}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

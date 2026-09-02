@@ -7,6 +7,16 @@
     <div class="sidebar-header">
       <a href="/app/w/{{ workspace_id }}" class="sidebar-brand">GEO Tracker</a>
     </div>
+    {% if user_workspaces and user_workspaces|length > 1 %}
+    <div class="sidebar-workspace-switcher">
+      <label for="workspace-switch" class="text-xs text-gray-500">Workspace</label>
+      <select id="workspace-switch" onchange="window.location.href = this.value;" class="select">
+        {% for ws in user_workspaces %}
+        <option value="/app/w/{{ ws.id }}" {% if ws.id == workspace_id %}selected{% endif %}>{{ ws.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
     <nav class="sidebar-nav">
       <a href="/app/w/{{ workspace_id }}" class="nav-item {% if request.url.path == '/app/w/' ~ workspace_id %}nav-active{% endif %}">
         <span class="nav-icon">○</span> Overview
@@ -27,6 +37,7 @@
         <span class="user-role">{{ role }}</span>
       </div>
       <form method="POST" action="/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-ghost btn-sm">Sign out</button>
       </form>
     </div>
