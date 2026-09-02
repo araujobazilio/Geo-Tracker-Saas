@@ -301,15 +301,16 @@ jobs:
 
       - name: Validate Nginx config syntax
         run: |
-          # Create temporary dummy cert files for syntax validation.
+          # Create temporary dummy cert files matching nginx.conf filenames.
           mkdir -p /tmp/nginx-tls
           openssl req -x509 -nodes -days 1 \
             -newkey rsa:2048 \
-            -keyout /tmp/nginx-tls/dummy.key \
-            -out /tmp/nginx-tls/dummy.crt \
+            -keyout /tmp/nginx-tls/privkey.pem \
+            -out /tmp/nginx-tls/fullchain.pem \
             -subj "/CN=localhost" 2>/dev/null
-          # Validate nginx config by mounting it into the nginx image.
+          # Mount as conf.d/default.conf (same as docker-compose.prod.yml).
+          # The nginx:alpine image includes /etc/nginx/conf.d/*.conf by default.
           docker run --rm \
-            -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro \
+            -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
             -v /tmp/nginx-tls:/etc/nginx/tls:ro \
             nginx:1.27-alpine nginx -t
