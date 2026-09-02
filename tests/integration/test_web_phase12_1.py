@@ -176,6 +176,27 @@ def _get_db_session():
     return Session(engine)
 
 
+def _get_prompt_set_id(project_id: str) -> uuid.UUID:
+    """Get the first prompt_set_id for a project (created during onboarding)."""
+    from app.models.prompt_set import PromptSet
+
+    session = _get_db_session()
+    try:
+        from sqlalchemy import select
+
+        result = session.execute(
+            select(PromptSet.id)
+            .where(PromptSet.project_id == uuid.UUID(project_id))
+            .order_by(PromptSet.created_at)
+            .limit(1)
+        ).scalar_one_or_none()
+        if result is None:
+            raise RuntimeError(f"No PromptSet found for project {project_id}")
+        return result
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # 1. Web Auth Cookie Tests
 # ---------------------------------------------------------------------------
@@ -408,7 +429,7 @@ class TestMemberRole:
     def test_member_cannot_access_onboarding(self, client: TestClient, clean_redis) -> None:
         csrf_token, ws_id = _register(client)
         # Try to access onboarding page — owner should work
-        resp = client.get(f"/app/w/{ws_id}/projects/new")
+        resp = client.get(f"/app/w/{ws_id}/projects/new", headers={"Accept": "text/html"})
         assert resp.status_code == 200
         # The owner is ADMIN/OWNER so this should work.
         # For MEMBER test, we'd need to add a member to the workspace.
@@ -526,9 +547,9 @@ class TestDashboardAndChart:
         project_resp = client.post(
             f"/api/v1/workspaces/{ws_id}/projects",
             json={
-                "name": "NaN Test",
-                "domain": "nan.example.com",
-                "brand_name": "NaNBrand",
+                "name": "Float Test",
+                "domain": "float.example.com",
+                "brand_name": "FloatBrand",
                 "keywords": [{"text": "test"}],
                 "providers": ["OPENAI"],
             },
@@ -572,9 +593,13 @@ class TestPollingTermination:
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
                 scan_type=ScanType.STANDARD,
                 status=ScanStatus.PENDING,
                 idempotency_key="test-poll-1",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
             )
             session.add(scan)
             session.commit()
@@ -610,9 +635,13 @@ class TestPollingTermination:
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
                 scan_type=ScanType.STANDARD,
                 status=ScanStatus.COMPLETED,
                 idempotency_key="test-poll-2",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
             )
             session.add(scan)
             session.commit()
@@ -655,9 +684,13 @@ class TestScanDetailTenantSecurity:
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id_a),
                 project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
                 scan_type=ScanType.STANDARD,
                 status=ScanStatus.COMPLETED,
                 idempotency_key="test-tenant-scan",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
             )
             session.add(scan)
             session.commit()
@@ -712,9 +745,13 @@ class TestDashboardAnalysisSelection:
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
                 scan_type=ScanType.STANDARD,
                 status=ScanStatus.COMPLETED,
                 idempotency_key="analysis-a",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
             )
             session.add(scan_a)
             session.flush()
@@ -731,9 +768,13 @@ class TestDashboardAnalysisSelection:
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                prompt_set_id=_get_prompt_set_id(project_id),
                 scan_type=ScanType.STANDARD,
                 status=ScanStatus.COMPLETED,
                 idempotency_key="analysis-b",
+                prompt_count=1,
+                provider_count=1,
+                planned_ai_checks=1,
             )
             session.add(scan_b)
             session.flush()
@@ -820,7 +861,7 @@ class TestVerificationRejection:
                 project_id=uuid.UUID(project_id),
                 opportunity_type="CONTENT_GAP",
                 title="Test opportunity",
-                description="Test",
+                summary="Test",
                 priority=OpportunityPriority.HIGH,
                 status=OpportunityStatus.IMPLEMENTED,
             )

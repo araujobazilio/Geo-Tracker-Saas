@@ -66,6 +66,7 @@ def onboarding_page(
     ]
 
     return templates.TemplateResponse(
+        request,
         "projects/onboarding.html",
         {
             "request": request,
@@ -113,6 +114,7 @@ async def onboarding_submit(
             if p in ent.allowed_providers
         ]
         return templates.TemplateResponse(
+            request,
             "projects/onboarding.html",
             {
                 "request": request,
