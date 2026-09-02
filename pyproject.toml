@@ -129,6 +129,11 @@ filterwarnings = [
     "ignore:.*asyncio.iscoroutinefunction.*:DeprecationWarning",
     "ignore:.*asyncio.get_event_loop.*:DeprecationWarning",
     "ignore:.*asyncio.set_event_loop_policy.*:DeprecationWarning",
+    # anyio 4.x deprecated the anyio.abc.BlockingPortal alias in favor of
+    # anyio.from_thread.BlockingPortal. starlette's testclient imports it
+    # at module level, triggering this warning during collection on Python
+    # 3.11. Ignore it so the suite remains runnable across Python versions.
+    "ignore:.*anyio.abc.BlockingPortal alias is deprecated.*:DeprecationWarning",
 ]
 
 # =============================================================================
