@@ -862,6 +862,7 @@ class TestVerificationRejection:
                 project_id=uuid.UUID(project_id),
                 fingerprint=f"test-fingerprint-{uuid.uuid4().hex[:8]}",
                 action_engine_version="v1",
+                prompt_type="STANDARD",
                 opportunity_type="CONTENT_GAP",
                 title="Test opportunity",
                 summary="Test",

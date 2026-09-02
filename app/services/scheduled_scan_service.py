@@ -616,9 +616,9 @@ class ScheduledScanService:
             project_id=project_id,
             enabled=enabled,
             interval_hours=interval_hours,
-            next_run_at=next_run,
-            created_by_user_id=created_by_user_id,
         )
+        schedule.next_run_at = next_run
+        schedule.created_by_user_id = created_by_user_id
         self._session.add(schedule)
         self._session.commit()
         self._record_audit("SCHEDULE_CREATED", schedule)

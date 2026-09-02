@@ -32,9 +32,9 @@ from app.services.project_onboarding_service import (
     ProjectOnboardingService,
 )
 from app.services.workspace_auth_service import WorkspaceAuthorizationService
-from app.web.context import resolve_role
 from app.web.dependencies import get_web_csrf_token, require_web_user
 from app.web.forms import parse_onboarding_form
+from app.web.pages import _build_context
 from app.web.view_models import provider_label
 
 router = APIRouter(tags=["web-onboarding"])
@@ -65,23 +65,21 @@ def onboarding_page(
         if p in ent.allowed_providers
     ]
 
-    return templates.TemplateResponse(
+    ctx = _build_context(
         request,
-        "projects/onboarding.html",
-        {
-            "request": request,
-            "user": user,
-            "workspace_id": str(workspace_id),
-            "csrf_token": csrf_token,
-            "allowed_providers": allowed_providers,
-            "max_keywords": ent.max_keywords_per_project,
-            "max_competitors": ent.max_competitors_per_project,
-            "role": resolve_role(auth_service, workspace_id, user.id).value,
-            "unread_notifications": 0,
-            "errors": {},
-            "form_data": {},
-        },
+        user,
+        workspace_id,
+        csrf_token,
+        db,
+        auth_service,
+        entitlement_service,
+        allowed_providers=allowed_providers,
+        max_keywords=ent.max_keywords_per_project,
+        max_competitors=ent.max_competitors_per_project,
+        errors={},
+        form_data={},
     )
+    return templates.TemplateResponse(request, "projects/onboarding.html", ctx.to_dict())
 
 
 @router.post(
@@ -114,21 +112,24 @@ async def onboarding_submit(
             for p in LLMProvider
             if p in ent.allowed_providers
         ]
+        ctx = _build_context(
+            request,
+            user,
+            workspace_id,
+            csrf_token,
+            db,
+            auth_service,
+            entitlement_service,
+            allowed_providers=allowed_providers,
+            max_keywords=ent.max_keywords_per_project,
+            max_competitors=ent.max_competitors_per_project,
+            errors=parsed.errors,
+            form_data=form_data,
+        )
         return templates.TemplateResponse(
             request,
             "projects/onboarding.html",
-            {
-                "request": request,
-                "user": user,
-                "workspace_id": str(workspace_id),
-                "csrf_token": csrf_token,
-                "allowed_providers": allowed_providers,
-                "max_keywords": ent.max_keywords_per_project,
-                "max_competitors": ent.max_competitors_per_project,
-                "errors": parsed.errors,
-                "form_data": form_data,
-                "unread_notifications": 0,
-            },
+            ctx.to_dict(),
             status_code=422,
         )
 
