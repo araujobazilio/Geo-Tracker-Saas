@@ -859,6 +859,7 @@ class TestVerificationRejection:
                 id=uuid.uuid4(),
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
+                fingerprint=f"test-fingerprint-{uuid.uuid4().hex[:8]}",
                 opportunity_type="CONTENT_GAP",
                 title="Test opportunity",
                 summary="Test",

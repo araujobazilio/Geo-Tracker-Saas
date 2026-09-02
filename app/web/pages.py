@@ -28,7 +28,13 @@ from app.services.workspace_service import WorkspaceService
 from app.web.context import WebContext, resolve_role
 from app.web.dashboard_service import DashboardQueryService
 from app.web.dependencies import get_web_csrf_token, get_web_user, require_web_user
-from app.web.view_models import format_metric_or_none, format_percent, truncate
+from app.web.view_models import (
+    format_metric_or_none,
+    format_percent,
+    scan_status_badge,
+    scan_status_label,
+    truncate,
+)
 
 router = APIRouter(tags=["web-pages"])
 templates = Jinja2Templates(directory="app/templates")
@@ -202,6 +208,8 @@ def project_dashboard(
         format_percent=format_percent,
         format_metric_or_none=format_metric_or_none,
         truncate=truncate,
+        scan_status_badge=scan_status_badge,
+        scan_status_label=scan_status_label,
         run_scan_idempotency_key=run_scan_idempotency_key,
     )
     return templates.TemplateResponse(request, "projects/dashboard.html", ctx.to_dict())
