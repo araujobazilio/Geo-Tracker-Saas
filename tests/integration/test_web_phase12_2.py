@@ -167,6 +167,7 @@ def _seed_billing_for_workspace(ws_id: str) -> None:
             max_competitors_per_project=20,
             max_team_members=10,
             monthly_ai_checks=100,
+            min_scheduled_scan_interval_hours=1,
             confidence_scans_enabled=True,
             verification_scans_enabled=True,
         )

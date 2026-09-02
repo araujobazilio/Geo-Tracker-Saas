@@ -77,6 +77,7 @@ def onboarding_page(
             "max_keywords": ent.max_keywords_per_project,
             "max_competitors": ent.max_competitors_per_project,
             "role": resolve_role(auth_service, workspace_id, user.id).value,
+            "unread_notifications": 0,
             "errors": {},
             "form_data": {},
         },
@@ -126,6 +127,7 @@ async def onboarding_submit(
                 "max_competitors": ent.max_competitors_per_project,
                 "errors": parsed.errors,
                 "form_data": form_data,
+                "unread_notifications": 0,
             },
             status_code=422,
         )

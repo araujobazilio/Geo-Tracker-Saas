@@ -112,6 +112,7 @@ def _seed_billing_for_workspace(ws_id: str) -> None:
             max_competitors_per_project=20,
             max_team_members=10,
             monthly_ai_checks=100,
+            min_scheduled_scan_interval_hours=1,
             confidence_scans_enabled=True,
             verification_scans_enabled=True,
         )
@@ -860,6 +861,7 @@ class TestVerificationRejection:
                 workspace_id=uuid.UUID(ws_id),
                 project_id=uuid.UUID(project_id),
                 fingerprint=f"test-fingerprint-{uuid.uuid4().hex[:8]}",
+                action_engine_version="v1",
                 opportunity_type="CONTENT_GAP",
                 title="Test opportunity",
                 summary="Test",
@@ -942,7 +944,11 @@ class TestScheduleWeb:
             data={"csrf_token": csrf_token, "interval_hours": "168"},
             follow_redirects=False,
         )
-        assert resp.status_code == 302
+        assert resp.status_code == 302, f"Expected 302, got {resp.status_code}: {resp.text}"
+        redirect_url = resp.headers.get("location", "")
+        assert (
+            "error=" not in redirect_url
+        ), f"Schedule enable redirected with error: {redirect_url}"
 
         # Verify schedule was created in DB
         from app.models.project_scan_schedule import ProjectScanSchedule
