@@ -208,7 +208,10 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           FORWARDED_ALLOW_IPS: 172.16.0.0/12
         run: |
+          # Create a dummy .env.production so docker compose can resolve env_file.
+          cp .env.production.example .env.production
           docker compose -f docker-compose.prod.yml config -q
+          rm -f .env.production
 
       - name: Verify production compose has no public DB/Redis ports
         run: |
