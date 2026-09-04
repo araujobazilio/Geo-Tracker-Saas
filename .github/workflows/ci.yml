@@ -223,14 +223,14 @@ jobs:
         run: |
           # Verify that copying .env.production.example and replacing placeholders
           # does NOT produce unresolved-variable interpolation warnings.
-          cp .env.production.example .env.production.ci
-          sed -i 's|APP_SECRET_KEY=<generate-a-64+char-random-string>|APP_SECRET_KEY=ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci|' .env.production.ci
-          sed -i 's|DATABASE_PASSWORD=<strong-production-password>|DATABASE_PASSWORD=ci-dummy-password|' .env.production.ci
-          sed -i 's|ALLOWED_HOSTS=your-domain.com,www.your-domain.com|ALLOWED_HOSTS=ci.example.test|' .env.production.ci
-          sed -i 's|APP_PUBLIC_BASE_URL=https://your-domain.com|APP_PUBLIC_BASE_URL=https://ci.example.test|' .env.production.ci
-          sed -i 's|GIT_SHA=|GIT_SHA=${{ github.sha }}|' .env.production.ci
-          STDERR=$(docker compose --env-file .env.production.ci -f docker-compose.prod.yml config -q 2>&1 >/dev/null)
-          rm -f .env.production.ci
+          cp .env.production.example .env.production
+          sed -i 's|APP_SECRET_KEY=<generate-a-64+char-random-string>|APP_SECRET_KEY=ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci|' .env.production
+          sed -i 's|DATABASE_PASSWORD=<strong-production-password>|DATABASE_PASSWORD=ci-dummy-password|' .env.production
+          sed -i 's|ALLOWED_HOSTS=your-domain.com,www.your-domain.com|ALLOWED_HOSTS=ci.example.test|' .env.production
+          sed -i 's|APP_PUBLIC_BASE_URL=https://your-domain.com|APP_PUBLIC_BASE_URL=https://ci.example.test|' .env.production
+          sed -i 's|GIT_SHA=|GIT_SHA=${{ github.sha }}|' .env.production
+          STDERR=$(docker compose --env-file .env.production -f docker-compose.prod.yml config -q 2>&1 >/dev/null)
+          rm -f .env.production
           echo "Stderr: $STDERR"
           if echo "$STDERR" | grep -q "DATABASE_USER"; then
             echo "FAIL: unresolved DATABASE_USER warning in compose config"
