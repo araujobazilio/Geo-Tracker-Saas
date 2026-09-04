@@ -176,7 +176,7 @@ services:
     healthcheck:
       # Use the Nginx-local liveness endpoint, not the app /health.
       # nginx:alpine does not include curl; use wget which is available.
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/nginx-health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/nginx-health"]
       interval: 30s
       timeout: 5s
       retries: 3

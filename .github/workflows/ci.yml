@@ -456,7 +456,7 @@ jobs:
             --network geo-ci-nginx-test \
             -p 127.0.0.1:18003:443 \
             -p 127.0.0.1:18004:80 \
-            --health-cmd="wget -q -O /dev/null http://localhost/nginx-health || exit 1" \
+            --health-cmd="wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1" \
             --health-interval=5s \
             --health-timeout=3s \
             --health-retries=3 \
@@ -479,7 +479,7 @@ jobs:
           done
           echo "Nginx container health: $NGINX_CONTAINER_HEALTH"
           # Verify Nginx /nginx-health from inside the container (restricted to 127.0.0.1).
-          NGINX_HEALTH_INTERNAL=$(docker exec geo-ci-nginx wget -q -O - http://localhost/nginx-health 2>/dev/null || echo "FAIL")
+          NGINX_HEALTH_INTERNAL=$(docker exec geo-ci-nginx wget -q -O - http://127.0.0.1/nginx-health 2>/dev/null || echo "FAIL")
           echo "Nginx /nginx-health (internal): $NGINX_HEALTH_INTERNAL"
           # Verify authorized Host through Nginx gets 200 on /health.
           HEALTH_OK=$(curl -sk -o /dev/null -w "%{http_code}" \
