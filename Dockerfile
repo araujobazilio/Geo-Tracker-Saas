@@ -91,8 +91,14 @@ USER geo
 EXPOSE 8000
 
 # Healthcheck: liveness probe (no external dependencies).
+# In production, TrustedHostMiddleware rejects requests whose Host header
+# is not in ALLOWED_HOSTS.  Derive the healthcheck Host from the first
+# ALLOWED_HOSTS entry so the probe is always authorized.  If ALLOWED_HOSTS
+# is empty (dev/test), fall back to localhost.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -fsS http://localhost:8000/health || exit 1
+    CMD HOST=$(echo "$ALLOWED_HOSTS" | cut -d',' -f1 | tr -d ' ') && \
+        [ -n "$HOST" ] || HOST=localhost && \
+        curl -fsS -H "Host: $HOST" http://localhost:8000/health || exit 1
 
 # Production command: no --reload, bounded workers.
 # For a small VPS, 2 workers is conservative. Override via docker-compose.
