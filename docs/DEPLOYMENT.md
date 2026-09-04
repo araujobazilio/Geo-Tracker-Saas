@@ -64,6 +64,18 @@ invariant is violated (empty/placeholder `APP_SECRET_KEY`, missing
 placeholder, `DEV_SEED_ENABLED=true`, or missing SMTP settings when
 `EMAIL_ENABLED=true`). See `docs/SECURITY.md` Phase 13.
 
+> **Note on `DATABASE_URL`**: Do not define `DATABASE_URL` in
+> `.env.production`. The production Compose file constructs it from
+> `DATABASE_USER`, `DATABASE_PASSWORD`, and `DATABASE_NAME`. Defining it
+> in the env file with `${...}` references causes Docker Compose
+> unresolved-variable interpolation warnings.
+
+> **Note on healthchecks**: The Dockerfile and Compose app healthcheck
+> derive the `Host` header from the first `ALLOWED_HOSTS` entry so the
+> probe is authorized by `TrustedHostMiddleware` in production. The
+> Nginx container has its own local `/nginx-health` liveness endpoint
+> that does not proxy to FastAPI.
+
 ## Image tagging by Git SHA
 
 Every release is built and tagged by the full Git SHA of the commit being

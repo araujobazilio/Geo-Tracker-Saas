@@ -79,7 +79,14 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      # Derive the Host header from ALLOWED_HOSTS so the probe is
+      # authorized by TrustedHostMiddleware in production.
+      test:
+        - CMD-SHELL
+        - >-
+          HOST=$(echo "$ALLOWED_HOSTS" | cut -d',' -f1 | tr -d ' ') &&
+          [ -n "$HOST" ] || HOST=localhost &&
+          curl -fsS -H "Host: $HOST" http://localhost:8000/health
       interval: 30s
       timeout: 5s
       retries: 3
@@ -167,8 +174,9 @@ services:
       app:
         condition: service_healthy
     healthcheck:
+      # Use the Nginx-local liveness endpoint, not the app /health.
       # nginx:alpine does not include curl; use wget which is available.
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/nginx-health"]
       interval: 30s
       timeout: 5s
       retries: 3

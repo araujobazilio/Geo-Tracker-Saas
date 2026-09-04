@@ -210,8 +210,41 @@ jobs:
         run: |
           # Create a dummy .env.production so docker compose can resolve env_file.
           cp .env.production.example .env.production
+          # Replace placeholder secrets with safe CI values.
+          sed -i 's|APP_SECRET_KEY=<generate-a-64+char-random-string>|APP_SECRET_KEY=ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci|' .env.production
+          sed -i 's|DATABASE_PASSWORD=<strong-production-password>|DATABASE_PASSWORD=ci-dummy-password|' .env.production
+          sed -i 's|ALLOWED_HOSTS=your-domain.com,www.your-domain.com|ALLOWED_HOSTS=ci.example.test|' .env.production
+          sed -i 's|APP_PUBLIC_BASE_URL=https://your-domain.com|APP_PUBLIC_BASE_URL=https://ci.example.test|' .env.production
+          sed -i 's|GIT_SHA=|GIT_SHA=${{ github.sha }}|' .env.production
           docker compose -f docker-compose.prod.yml config -q
           rm -f .env.production
+
+      - name: Compose env warning regression gate
+        run: |
+          # Verify that copying .env.production.example and replacing placeholders
+          # does NOT produce unresolved-variable interpolation warnings.
+          cp .env.production.example .env.production
+          sed -i 's|APP_SECRET_KEY=<generate-a-64+char-random-string>|APP_SECRET_KEY=ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci|' .env.production
+          sed -i 's|DATABASE_PASSWORD=<strong-production-password>|DATABASE_PASSWORD=ci-dummy-password|' .env.production
+          sed -i 's|ALLOWED_HOSTS=your-domain.com,www.your-domain.com|ALLOWED_HOSTS=ci.example.test|' .env.production
+          sed -i 's|APP_PUBLIC_BASE_URL=https://your-domain.com|APP_PUBLIC_BASE_URL=https://ci.example.test|' .env.production
+          sed -i 's|GIT_SHA=|GIT_SHA=${{ github.sha }}|' .env.production
+          STDERR=$(docker compose --env-file .env.production -f docker-compose.prod.yml config -q 2>&1 >/dev/null)
+          rm -f .env.production
+          echo "Stderr: $STDERR"
+          if echo "$STDERR" | grep -q "DATABASE_USER"; then
+            echo "FAIL: unresolved DATABASE_USER warning in compose config"
+            exit 1
+          fi
+          if echo "$STDERR" | grep -q "DATABASE_PASSWORD"; then
+            echo "FAIL: unresolved DATABASE_PASSWORD warning in compose config"
+            exit 1
+          fi
+          if echo "$STDERR" | grep -q "DATABASE_NAME"; then
+            echo "FAIL: unresolved DATABASE_NAME warning in compose config"
+            exit 1
+          fi
+          echo "OK: no unresolved-variable interpolation warnings"
 
       - name: Verify production compose has no public DB/Redis ports
         run: |
@@ -268,10 +301,9 @@ jobs:
           fi
           echo "OK: /app/.env not found in production image"
 
-      - name: Production image health smoke
+      - name: Production image health smoke (test mode)
         run: |
-          # Run the production image and verify /health responds.
-          # Override CMD to use a single worker (no need for 2 in smoke test).
+          # Run the production image in test mode and verify /health responds.
           docker run --rm -d --name geo-tracker-smoke -p 18001:8000 \
             -e APP_ENV=test \
             -e APP_SECRET_KEY=ci-smoke-test-secret-not-for-production-use \
@@ -280,7 +312,6 @@ jobs:
             -e LOG_JSON=false \
             geo-tracker-ci:${{ github.sha }} \
             python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-          # Wait for uvicorn to start (retry loop, max 30s).
           for i in $(seq 1 30); do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:18001/health 2>/dev/null || echo "000")
             if [ "$STATUS" = "200" ]; then
@@ -293,11 +324,75 @@ jobs:
           docker stop geo-tracker-smoke 2>/dev/null || true
           if [ "$STATUS" != "200" ]; then
             echo "FAIL: /health did not return 200 within 30s"
-            # Print container logs for debugging.
             docker logs geo-tracker-smoke 2>/dev/null || true
             exit 1
           fi
-          echo "OK: /health returned 200"
+          echo "OK: /health returned 200 (test mode)"
+
+      - name: Production image health smoke (production mode)
+        run: |
+          # Run the production image in APP_ENV=production with real
+          # TrustedHostMiddleware enforcement. Use the image's REAL
+          # healthcheck (do not override CMD or HEALTHCHECK).
+          docker run --rm -d --name geo-tracker-prod-smoke \
+            -p 127.0.0.1:18002:8000 \
+            -e APP_ENV=production \
+            -e APP_SECRET_KEY=ci-prod-smoke-secret-not-for-production-use-1234567890 \
+            -e ALLOWED_HOSTS=ci.example.test \
+            -e APP_PUBLIC_BASE_URL=https://ci.example.test \
+            -e DATABASE_URL=postgresql+psycopg://geo_tracker:ci-prod-db-password@localhost:5432/geo_tracker_test \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e LOG_JSON=false \
+            -e REGISTRATION_MODE=closed \
+            -e SESSION_COOKIE_SECURE=true \
+            -e DEV_SEED_ENABLED=false \
+            -e EMAIL_ENABLED=false \
+            geo-tracker-ci:${{ github.sha }}
+          # Wait for Docker to report the container healthy (real healthcheck).
+          # The Dockerfile healthcheck has --start-period=15s --interval=30s,
+          # so allow up to 120s for the first successful probe.
+          for i in $(seq 1 120); do
+            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-tracker-prod-smoke 2>/dev/null || echo "none")
+            if [ "$HEALTH" = "healthy" ]; then
+              echo "Container healthy after ${i}s"
+              break
+            fi
+            if [ "$HEALTH" = "unhealthy" ]; then
+              echo "Container unhealthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          echo "Container health: $HEALTH"
+          if [ "$HEALTH" != "healthy" ]; then
+            echo "FAIL: container did not become healthy within 120s"
+            echo "=== Container logs ==="
+            docker logs geo-tracker-prod-smoke 2>&1 || true
+            echo "=== Health check log ==="
+            docker inspect --format='{{json .State.Health}}' geo-tracker-prod-smoke 2>/dev/null || true
+            docker stop geo-tracker-prod-smoke 2>/dev/null || true
+            exit 1
+          fi
+          # Verify authorized Host gets 200 on /health.
+          STATUS_OK=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: ci.example.test" \
+            http://127.0.0.1:18002/health 2>/dev/null || echo "000")
+          echo "Authorized Host /health: $STATUS_OK"
+          # Verify unauthorized Host gets 400 on /health.
+          STATUS_BAD=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: malicious.example.test" \
+            http://127.0.0.1:18002/health 2>/dev/null || echo "000")
+          echo "Unauthorized Host /health: $STATUS_BAD"
+          docker stop geo-tracker-prod-smoke 2>/dev/null || true
+          if [ "$STATUS_OK" != "200" ]; then
+            echo "FAIL: authorized Host did not get 200"
+            exit 1
+          fi
+          if [ "$STATUS_BAD" != "400" ]; then
+            echo "FAIL: unauthorized Host did not get 400"
+            exit 1
+          fi
+          echo "OK: production-mode health smoke passed"
 
       - name: Validate Nginx config syntax
         run: |
@@ -315,3 +410,105 @@ jobs:
             -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
             -v /tmp/nginx-tls:/etc/nginx/tls:ro \
             nginx:1.27-alpine nginx -t
+
+      - name: Nginx runtime smoke (Host forwarding + health)
+        run: |
+          # Create a temporary isolated Docker network.
+          docker network create geo-ci-nginx-test
+          # Start the production app image on the network with alias "app".
+          docker run --rm -d --name geo-ci-app \
+            --network geo-ci-nginx-test \
+            --network-alias app \
+            -e APP_ENV=production \
+            -e APP_SECRET_KEY=ci-nginx-smoke-secret-not-for-production-use-1234567 \
+            -e ALLOWED_HOSTS=ci.example.test \
+            -e APP_PUBLIC_BASE_URL=https://ci.example.test \
+            -e DATABASE_URL=postgresql+psycopg://geo_tracker:ci-prod-db-password@localhost:5432/geo_tracker_test \
+            -e REDIS_URL=redis://localhost:6379/0 \
+            -e LOG_JSON=false \
+            -e REGISTRATION_MODE=closed \
+            -e SESSION_COOKIE_SECURE=true \
+            -e DEV_SEED_ENABLED=false \
+            -e EMAIL_ENABLED=false \
+            geo-tracker-ci:${{ github.sha }}
+          # Wait for app to be healthy (allow up to 120s for healthcheck).
+          for i in $(seq 1 120); do
+            HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-ci-app 2>/dev/null || echo "none")
+            if [ "$HEALTH" = "healthy" ]; then
+              echo "App healthy after ${i}s"
+              break
+            fi
+            if [ "$HEALTH" = "unhealthy" ]; then
+              echo "App unhealthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          if [ "$HEALTH" != "healthy" ]; then
+            echo "FAIL: app did not become healthy"
+            docker logs geo-ci-app 2>/dev/null || true
+            docker stop geo-ci-app 2>/dev/null || true
+            docker network rm geo-ci-nginx-test 2>/dev/null || true
+            exit 1
+          fi
+          # Start Nginx on the same network.
+          docker run --rm -d --name geo-ci-nginx \
+            --network geo-ci-nginx-test \
+            -p 127.0.0.1:18003:443 \
+            -p 127.0.0.1:18004:80 \
+            --health-cmd="wget -q -O /dev/null http://127.0.0.1/nginx-health || exit 1" \
+            --health-interval=5s \
+            --health-timeout=3s \
+            --health-retries=3 \
+            --health-start-period=2s \
+            -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+            -v /tmp/nginx-tls:/etc/nginx/tls:ro \
+            nginx:1.27-alpine
+          # Wait for Nginx container to become healthy (uses /nginx-health).
+          for i in $(seq 1 30); do
+            NGINX_CONTAINER_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-ci-nginx 2>/dev/null || echo "none")
+            if [ "$NGINX_CONTAINER_HEALTH" = "healthy" ]; then
+              echo "Nginx healthy after ${i}s"
+              break
+            fi
+            if [ "$NGINX_CONTAINER_HEALTH" = "unhealthy" ]; then
+              echo "Nginx unhealthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          echo "Nginx container health: $NGINX_CONTAINER_HEALTH"
+          # Verify Nginx /nginx-health from inside the container (restricted to 127.0.0.1).
+          NGINX_HEALTH_INTERNAL=$(docker exec geo-ci-nginx wget -q -O - http://127.0.0.1/nginx-health 2>/dev/null || echo "FAIL")
+          echo "Nginx /nginx-health (internal): $NGINX_HEALTH_INTERNAL"
+          # Verify authorized Host through Nginx gets 200 on /health.
+          HEALTH_OK=$(curl -sk -o /dev/null -w "%{http_code}" \
+            -H "Host: ci.example.test" \
+            https://127.0.0.1:18003/health 2>/dev/null || echo "000")
+          echo "Authorized Host /health via Nginx: $HEALTH_OK"
+          # Verify unauthorized Host through Nginx gets 400.
+          HEALTH_BAD=$(curl -sk -o /dev/null -w "%{http_code}" \
+            -H "Host: malicious.example.test" \
+            https://127.0.0.1:18003/health 2>/dev/null || echo "000")
+          echo "Unauthorized Host /health via Nginx: $HEALTH_BAD"
+          # Cleanup.
+          docker stop geo-ci-nginx geo-ci-app 2>/dev/null || true
+          docker network rm geo-ci-nginx-test 2>/dev/null || true
+          # Assertions.
+          if [ "$NGINX_CONTAINER_HEALTH" != "healthy" ]; then
+            echo "FAIL: Nginx container did not become healthy"
+            exit 1
+          fi
+          if [ "$NGINX_HEALTH_INTERNAL" != "ok" ]; then
+            echo "FAIL: Nginx /nginx-health internal probe did not return ok"
+            exit 1
+          fi
+          if [ "$HEALTH_OK" != "200" ]; then
+            echo "FAIL: authorized Host /health via Nginx did not return 200"
+            exit 1
+          fi
+          if [ "$HEALTH_BAD" != "400" ]; then
+            echo "FAIL: unauthorized Host /health via Nginx did not return 400"
+            exit 1
+          fi
+          echo "OK: Nginx runtime smoke passed"
