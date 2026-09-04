@@ -44,6 +44,11 @@ def _extract_dockerfile_healthcheck(content: str) -> str:
 def _extract_nginx_location_block(content: str, location: str) -> str:
     """Extract a nginx location block using brace-depth matching."""
     idx = content.index(location)
+    return _extract_nginx_location_block_at(content, idx)
+
+
+def _extract_nginx_location_block_at(content: str, idx: int) -> str:
+    """Extract a nginx location block starting at the given index."""
     # Find the opening brace after the location directive.
     brace_start = content.index("{", idx)
     depth = 1
@@ -199,10 +204,25 @@ class TestNginxHealthConfig:
         assert "X-Request-ID" in block
 
     def test_normal_proxy_forwards_host(self, nginx_content: str) -> None:
-        """The normal proxy location / must still forward Host."""
+        """The normal proxy location / must still forward Host.
+
+        There may be multiple "location /" blocks (e.g. a port 80 redirect).
+        We need the HTTPS server block that actually proxies to the app.
+        """
         assert "location / {" in nginx_content, "Must have a catch-all location /"
-        block = _extract_nginx_location_block(nginx_content, "location / {")
-        assert "proxy_set_header Host" in block
+        # Iterate over all "location / {" occurrences and find the proxying one.
+        search_from = 0
+        found = False
+        while True:
+            idx = nginx_content.find("location / {", search_from)
+            if idx == -1:
+                break
+            block = _extract_nginx_location_block_at(nginx_content, idx)
+            if "proxy_pass" in block and "proxy_set_header Host" in block:
+                found = True
+                break
+            search_from = idx + 1
+        assert found, "Must have a proxying location / with Host header"
 
     def test_nginx_health_endpoint_exists(self, nginx_content: str) -> None:
         """Nginx must have a local /nginx-health endpoint."""

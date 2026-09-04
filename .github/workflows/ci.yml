@@ -456,6 +456,11 @@ jobs:
             --network geo-ci-nginx-test \
             -p 127.0.0.1:18003:443 \
             -p 127.0.0.1:18004:80 \
+            --health-cmd="wget -q -O /dev/null http://localhost/nginx-health || exit 1" \
+            --health-interval=5s \
+            --health-timeout=3s \
+            --health-retries=3 \
+            --health-start-period=2s \
             -v $(pwd)/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
             -v /tmp/nginx-tls:/etc/nginx/tls:ro \
             nginx:1.27-alpine
@@ -464,6 +469,10 @@ jobs:
             NGINX_CONTAINER_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-ci-nginx 2>/dev/null || echo "none")
             if [ "$NGINX_CONTAINER_HEALTH" = "healthy" ]; then
               echo "Nginx healthy after ${i}s"
+              break
+            fi
+            if [ "$NGINX_CONTAINER_HEALTH" = "unhealthy" ]; then
+              echo "Nginx unhealthy after ${i}s"
               break
             fi
             sleep 1
