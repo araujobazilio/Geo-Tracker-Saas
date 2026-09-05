@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -269,9 +270,17 @@ class TestCheckMode:
             _OPENAI_GPT56_TERRA.output_tokens_include_reasoning
         )
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = existing
-        mock_session.execute.return_value = mock_result
+        # First execute(): exact pricing_key lookup -> returns existing.
+        # Second execute(): overlap query -> returns empty list.
+        exact_result = MagicMock()
+        exact_result.scalar_one_or_none.return_value = existing
+
+        overlap_result = MagicMock()
+        overlap_scalars = MagicMock()
+        overlap_scalars.all.return_value = []
+        overlap_result.scalars.return_value = overlap_scalars
+
+        mock_session.execute.side_effect = [exact_result, overlap_result]
 
         with patch("app.db.session.get_session_factory", return_value=lambda: mock_session):
             ret = main(["--check"])
@@ -369,9 +378,17 @@ class TestApplyMode:
             _OPENAI_GPT56_TERRA.output_tokens_include_reasoning
         )
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = existing
-        mock_session.execute.return_value = mock_result
+        # First execute(): exact pricing_key lookup -> existing.
+        # Second execute(): overlap query -> empty list.
+        exact_result = MagicMock()
+        exact_result.scalar_one_or_none.return_value = existing
+
+        overlap_result = MagicMock()
+        overlap_scalars = MagicMock()
+        overlap_scalars.all.return_value = []
+        overlap_result.scalars.return_value = overlap_scalars
+
+        mock_session.execute.side_effect = [exact_result, overlap_result]
 
         with patch("app.db.session.get_session_factory", return_value=lambda: mock_session):
             ret = main(["--apply"])
@@ -414,5 +431,101 @@ class TestApplyMode:
             ret = main(["--apply"])
 
         assert ret == EXIT_FAIL
+        assert mock_session.rollback.called, "Must rollback on conflict"
+        assert not mock_session.commit.called, "Must not commit on conflict"
+
+
+class TestReadyOverlapConsistencyGuard:
+    """Phase 13.5.5.1 - exact key exists + canonical match + distinct overlap.
+
+    The operator must NOT report READY when a distinct overlapping rule
+    exists, because PricingService.resolve() would raise
+    PricingConfigurationError for that same state.
+    """
+
+    def _make_matching_existing(self) -> MagicMock:
+        """Build a mock existing rule that matches all canonical fields."""
+        existing = MagicMock()
+        existing.id = uuid.uuid4()
+        existing.provider = _OPENAI_GPT56_TERRA.provider
+        existing.provider_surface = _OPENAI_GPT56_TERRA.provider_surface
+        existing.model = _OPENAI_GPT56_TERRA.model
+        existing.effective_from = _OPENAI_GPT56_TERRA.effective_from
+        existing.effective_to = _OPENAI_GPT56_TERRA.effective_to
+        existing.input_per_million_usd = _OPENAI_GPT56_TERRA.input_per_million_usd
+        existing.cached_input_per_million_usd = _OPENAI_GPT56_TERRA.cached_input_per_million_usd
+        existing.cache_write_per_million_usd = _OPENAI_GPT56_TERRA.cache_write_per_million_usd
+        existing.output_per_million_usd = _OPENAI_GPT56_TERRA.output_per_million_usd
+        existing.reasoning_per_million_usd = _OPENAI_GPT56_TERRA.reasoning_per_million_usd
+        existing.citation_per_million_usd = _OPENAI_GPT56_TERRA.citation_per_million_usd
+        existing.search_per_1000_usd = _OPENAI_GPT56_TERRA.search_per_1000_usd
+        existing.request_fee_usd = _OPENAI_GPT56_TERRA.request_fee_usd
+        existing.input_tokens_include_cached = _OPENAI_GPT56_TERRA.input_tokens_include_cached
+        existing.output_tokens_include_reasoning = (
+            _OPENAI_GPT56_TERRA.output_tokens_include_reasoning
+        )
+        return existing
+
+    def _make_overlap_mock(self) -> MagicMock:
+        """Build a mock overlapping rule (different pricing_key)."""
+        overlap = MagicMock()
+        overlap.pricing_key = "openai:responses:gpt-5.6-terra:earlier"
+        return overlap
+
+    def test_check_conflict_on_exact_match_with_overlap(self) -> None:
+        """Exact key exists + matches + distinct overlap => --check CONFLICT."""
+        from scripts.seed_provider_pricing import main
+
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+
+        existing = self._make_matching_existing()
+        overlap_rule = self._make_overlap_mock()
+
+        # First execute(): exact pricing_key lookup -> existing.
+        # Second execute(): overlap query -> returns [overlap_rule].
+        exact_result = MagicMock()
+        exact_result.scalar_one_or_none.return_value = existing
+
+        overlap_result = MagicMock()
+        overlap_scalars = MagicMock()
+        overlap_scalars.all.return_value = [overlap_rule]
+        overlap_result.scalars.return_value = overlap_scalars
+
+        mock_session.execute.side_effect = [exact_result, overlap_result]
+
+        with patch("app.db.session.get_session_factory", return_value=lambda: mock_session):
+            ret = main(["--check"])
+
+        assert ret == EXIT_FAIL, "Must fail when exact match + overlap exists"
+        assert not mock_session.commit.called
+
+    def test_apply_conflict_on_exact_match_with_overlap(self) -> None:
+        """Exact key exists + matches + distinct overlap => --apply CONFLICT."""
+        from scripts.seed_provider_pricing import main
+
+        mock_session = MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.__exit__.return_value = False
+
+        existing = self._make_matching_existing()
+        overlap_rule = self._make_overlap_mock()
+
+        exact_result = MagicMock()
+        exact_result.scalar_one_or_none.return_value = existing
+
+        overlap_result = MagicMock()
+        overlap_scalars = MagicMock()
+        overlap_scalars.all.return_value = [overlap_rule]
+        overlap_result.scalars.return_value = overlap_scalars
+
+        mock_session.execute.side_effect = [exact_result, overlap_result]
+
+        with patch("app.db.session.get_session_factory", return_value=lambda: mock_session):
+            ret = main(["--apply"])
+
+        assert ret == EXIT_FAIL, "Must fail when exact match + overlap exists"
+        assert not mock_session.add.called, "Zero writes on conflict"
         assert mock_session.rollback.called, "Must rollback on conflict"
         assert not mock_session.commit.called, "Must not commit on conflict"
