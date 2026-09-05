@@ -411,7 +411,24 @@ jobs:
             -v /tmp/nginx-tls:/etc/nginx/tls:ro \
             nginx:1.27-alpine nginx -t
 
-      - name: Nginx runtime smoke (Host forwarding + health)
+      - name: Verify production image contains real static asset
+        run: |
+          # Verify the production image actually contains the compiled CSS
+          # asset used by the UI. It must be a regular file and non-empty.
+          STATIC_PATH="/app/app/static/css/app.css"
+          echo "Checking $STATIC_PATH in production image..."
+          docker run --rm --entrypoint sh geo-tracker-ci:${{ github.sha }} -c "
+            test -f '$STATIC_PATH' || { echo 'FAIL: $STATIC_PATH does not exist'; exit 1; }
+            SIZE=\$(wc -c < '$STATIC_PATH')
+            echo 'Size: '\$SIZE' bytes'
+            if [ \"\$SIZE\" -le 0 ]; then
+              echo 'FAIL: $STATIC_PATH is empty'
+              exit 1
+            fi
+            echo 'OK: $STATIC_PATH exists and is non-empty'
+          "
+
+      - name: Nginx runtime smoke (Host forwarding + health + static)
         run: |
           # Create a temporary isolated Docker network.
           docker network create geo-ci-nginx-test
@@ -491,7 +508,22 @@ jobs:
             -H "Host: malicious.example.test" \
             https://127.0.0.1:18003/health 2>/dev/null || echo "000")
           echo "Unauthorized Host /health via Nginx: $HEALTH_BAD"
+          # Verify authorized Host can fetch /static/css/app.css through Nginx.
+          STATIC_OK=$(curl -sk -o /tmp/static-app.css -w "%{http_code}" \
+            -H "Host: ci.example.test" \
+            https://127.0.0.1:18003/static/css/app.css 2>/dev/null || echo "000")
+          STATIC_SIZE=$(wc -c < /tmp/static-app.css 2>/dev/null || echo "0")
+          echo "Authorized Host /static/css/app.css via Nginx: $STATIC_OK (size: $STATIC_SIZE bytes)"
+          STATIC_CONTENT_TYPE=$(curl -skI -H "Host: ci.example.test" \
+            https://127.0.0.1:18003/static/css/app.css 2>/dev/null | grep -i "^content-type:" | tr -d '\r' || echo "")
+          echo "Authorized Host /static Content-Type: $STATIC_CONTENT_TYPE"
+          # Verify unauthorized Host gets 400 on /static/css/app.css.
+          STATIC_BAD=$(curl -sk -o /dev/null -w "%{http_code}" \
+            -H "Host: malicious.example.test" \
+            https://127.0.0.1:18003/static/css/app.css 2>/dev/null || echo "000")
+          echo "Unauthorized Host /static/css/app.css via Nginx: $STATIC_BAD"
           # Cleanup.
+          rm -f /tmp/static-app.css
           docker stop geo-ci-nginx geo-ci-app 2>/dev/null || true
           docker network rm geo-ci-nginx-test 2>/dev/null || true
           # Assertions.
@@ -509,6 +541,18 @@ jobs:
           fi
           if [ "$HEALTH_BAD" != "400" ]; then
             echo "FAIL: unauthorized Host /health via Nginx did not return 400"
+            exit 1
+          fi
+          if [ "$STATIC_OK" != "200" ]; then
+            echo "FAIL: authorized Host /static/css/app.css via Nginx did not return 200"
+            exit 1
+          fi
+          if [ "$STATIC_SIZE" -le 0 ]; then
+            echo "FAIL: /static/css/app.css response body is empty"
+            exit 1
+          fi
+          if [ "$STATIC_BAD" != "400" ]; then
+            echo "FAIL: unauthorized Host /static/css/app.css did not return 400 (got $STATIC_BAD)"
             exit 1
           fi
           echo "OK: Nginx runtime smoke passed"

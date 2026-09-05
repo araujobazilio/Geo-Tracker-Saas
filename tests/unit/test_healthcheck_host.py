@@ -62,6 +62,51 @@ def _extract_nginx_location_block_at(content: str, idx: int) -> str:
     return content[idx:pos]
 
 
+def _find_all_location_blocks(content: str) -> list[tuple[str, str]]:
+    """Find all nginx location blocks and return (location_directive, block_text) pairs.
+
+    Uses brace-depth matching to correctly extract nested blocks.
+    """
+    results: list[tuple[str, str]] = []
+    search_from = 0
+    while True:
+        idx = content.find("location", search_from)
+        if idx == -1:
+            break
+        # Find the opening brace after the location directive.
+        brace_start = content.find("{", idx)
+        if brace_start == -1:
+            break
+        # Extract the location directive line (up to the brace).
+        directive = content[idx:brace_start].strip()
+        # Extract the block using brace-depth matching.
+        depth = 1
+        pos = brace_start + 1
+        while depth > 0 and pos < len(content):
+            if content[pos] == "{":
+                depth += 1
+            elif content[pos] == "}":
+                depth -= 1
+            pos += 1
+        block = content[idx:pos]
+        results.append((directive, block))
+        search_from = pos
+    return results
+
+
+def _find_proxy_locations(content: str) -> list[tuple[str, str]]:
+    """Find all location blocks that contain proxy_pass http://geo_app.
+
+    Returns a list of (location_directive, block_text) pairs.
+    """
+    all_blocks = _find_all_location_blocks(content)
+    proxy_blocks: list[tuple[str, str]] = []
+    for directive, block in all_blocks:
+        if "proxy_pass http://geo_app" in block:
+            proxy_blocks.append((directive, block))
+    return proxy_blocks
+
+
 class TestDockerfileHealthcheck:
     """Test the production Dockerfile HEALTHCHECK command."""
 
@@ -275,3 +320,123 @@ class TestEnvTemplateNoInterpolationWarnings:
                 assert (
                     "${" not in line
                 ), f"DATABASE_URL in template must not use ${{...}} references: {line}"
+
+
+class TestStaticProxyHostForwarding:
+    """Test that /static/ location forwards Host and standard proxy headers."""
+
+    @pytest.fixture()
+    def nginx_content(self) -> str:
+        return (_REPO_ROOT / "docker" / "nginx" / "nginx.conf").read_text()
+
+    def test_static_location_exists(self, nginx_content: str) -> None:
+        """The /static/ location must exist."""
+        assert "location /static/" in nginx_content, "Must have a /static/ location"
+
+    def test_static_proxies_to_geo_app(self, nginx_content: str) -> None:
+        """/static/ must proxy to geo_app."""
+        block = _extract_nginx_location_block(nginx_content, "location /static/")
+        assert "proxy_pass http://geo_app" in block, "/static/ must proxy to geo_app"
+
+    def test_static_forwards_host(self, nginx_content: str) -> None:
+        """/static/ must forward Host $host to preserve the public hostname."""
+        block = _extract_nginx_location_block(nginx_content, "location /static/")
+        assert (
+            "proxy_set_header Host $host" in block
+        ), "/static/ must forward Host $host so TrustedHostMiddleware authorizes it"
+
+    def test_static_forwards_standard_proxy_headers(self, nginx_content: str) -> None:
+        """/static/ must forward X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, X-Request-ID."""
+        block = _extract_nginx_location_block(nginx_content, "location /static/")
+        assert "X-Real-IP" in block, "/static/ must forward X-Real-IP"
+        assert "X-Forwarded-For" in block, "/static/ must forward X-Forwarded-For"
+        assert "X-Forwarded-Proto" in block, "/static/ must forward X-Forwarded-Proto"
+        assert "X-Request-ID" in block, "/static/ must forward X-Request-ID"
+
+    def test_static_preserves_caching(self, nginx_content: str) -> None:
+        """/static/ must preserve bounded caching behavior."""
+        block = _extract_nginx_location_block(nginx_content, "location /static/")
+        assert (
+            "proxy_cache_valid" in block
+        ), "/static/ must preserve proxy_cache_valid caching directive"
+        assert "Cache-Control" in block, "/static/ must preserve Cache-Control header"
+
+    def test_static_uses_safe_x_forwarded_for(self, nginx_content: str) -> None:
+        """/static/ must NOT use $proxy_add_x_forwarded_for (attacker-appendable)."""
+        block = _extract_nginx_location_block(nginx_content, "location /static/")
+        assert "$proxy_add_x_forwarded_for" not in block, (
+            "/static/ must not use $proxy_add_x_forwarded_for "
+            "(permits attacker-supplied X-Forwarded-For appending)"
+        )
+
+
+class TestAllProxyLocationsForwardHost:
+    """Generic invariant: EVERY location with proxy_pass http://geo_app
+    must forward Host $host and standard proxy headers.
+
+    This is a future-proofing test: if a new proxied location is added
+    without Host forwarding, this test will fail with a useful message
+    identifying the offending location.
+    """
+
+    @pytest.fixture()
+    def nginx_content(self) -> str:
+        return (_REPO_ROOT / "docker" / "nginx" / "nginx.conf").read_text()
+
+    @pytest.fixture()
+    def proxy_locations(self, nginx_content: str) -> list[tuple[str, str]]:
+        return _find_proxy_locations(nginx_content)
+
+    def test_at_least_one_proxy_location(self, proxy_locations: list[tuple[str, str]]) -> None:
+        """There must be at least one location proxying to geo_app."""
+        assert len(proxy_locations) > 0, "Must have at least one proxy_pass http://geo_app location"
+
+    def test_all_proxy_locations_forward_host(self, proxy_locations: list[tuple[str, str]]) -> None:
+        """Every location with proxy_pass http://geo_app must forward Host $host."""
+        offenders: list[str] = []
+        for directive, block in proxy_locations:
+            if "proxy_set_header Host $host" not in block:
+                offenders.append(directive)
+        assert not offenders, (
+            "These proxy locations do NOT forward Host $host (would cause "
+            "TrustedHostMiddleware 400 rejection): " + ", ".join(offenders)
+        )
+
+    def test_all_proxy_locations_forward_standard_headers(
+        self, proxy_locations: list[tuple[str, str]]
+    ) -> None:
+        """Every location with proxy_pass http://geo_app must forward
+        X-Real-IP, X-Forwarded-For, X-Forwarded-Proto, X-Request-ID."""
+        required = [
+            "X-Real-IP",
+            "X-Forwarded-For",
+            "X-Forwarded-Proto",
+            "X-Request-ID",
+        ]
+        offenders: list[str] = []
+        for directive, block in proxy_locations:
+            missing = [h for h in required if h not in block]
+            if missing:
+                offenders.append(f"{directive} (missing: {', '.join(missing)})")
+        assert not offenders, (
+            "These proxy locations are missing standard proxy headers: " + "; ".join(offenders)
+        )
+
+    def test_no_proxy_location_uses_unsafe_x_forwarded_for(
+        self, proxy_locations: list[tuple[str, str]]
+    ) -> None:
+        """No proxy location may use $proxy_add_x_forwarded_for."""
+        offenders: list[str] = []
+        for directive, block in proxy_locations:
+            if "$proxy_add_x_forwarded_for" in block:
+                offenders.append(directive)
+        assert not offenders, (
+            "These proxy locations use $proxy_add_x_forwarded_for "
+            "(permits attacker-supplied X-Forwarded-For appending): " + ", ".join(offenders)
+        )
+
+    def test_nginx_health_does_not_proxy(self, nginx_content: str) -> None:
+        """/nginx-health must NOT appear in the proxy locations list."""
+        proxy_locations = _find_proxy_locations(nginx_content)
+        for directive, _block in proxy_locations:
+            assert "/nginx-health" not in directive, "/nginx-health must NOT proxy to geo_app"
