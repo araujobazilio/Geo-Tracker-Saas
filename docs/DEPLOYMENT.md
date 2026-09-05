@@ -158,7 +158,77 @@ docker compose -f docker-compose.prod.yml run --rm migrate
 Inspect the output. A migration that errors must be treated as a release
 blocker — do not proceed to step 4. Investigate, fix, and re-run.
 
-### 4. Start / restart services
+### 4. Seed / reconcile plan catalog
+
+Seed the internal PlanDefinitions and their allowed providers:
+
+```bash
+docker compose -f docker-compose.prod.yml exec app \
+  python -m scripts.seed_plans
+```
+
+This creates the `beta_internal` plan and reconciles PlanProvider rows.
+PlanProvider entitlements answer: "this workspace may use OpenAI".
+
+### 5. CHECK provider pricing
+
+Before any real scan can execute, the application needs verified
+ProviderPriceRule evidence. Check whether the expected pricing is
+already present (read-only, zero writes):
+
+```bash
+docker compose -f docker-compose.prod.yml exec app \
+  python -m scripts.seed_provider_pricing --check
+```
+
+Output is one of:
+- `MISSING` — the rule does not exist yet.
+- `READY` — the rule exists and all canonical values match.
+- `CONFLICT` — the pricing_key exists but values differ, or an
+  overlapping rule was detected. Resolve before proceeding.
+
+### 6. APPLY verified provider pricing (if missing)
+
+If the check reports `MISSING`, apply the pinned pricing evidence:
+
+```bash
+docker compose -f docker-compose.prod.yml exec app \
+  python -m scripts.seed_provider_pricing --apply
+```
+
+This is idempotent: re-running `--apply` on a `READY` rule makes zero
+writes. If a conflict is detected, the operator fails closed and rolls
+back — no partial writes are committed.
+
+ProviderPriceRule answers: "the application has verified accounting
+evidence for this exact OpenAI model/surface/time".
+
+**PlanProvider entitlement and ProviderPriceRule pricing are different:**
+- `PlanProvider`: "this workspace may use OpenAI"
+- `ProviderPriceRule`: "the application has verified accounting evidence
+  for this exact OpenAI model/surface/time"
+
+One must never imply the other. A workspace may be entitled to use
+OpenAI (PlanProvider) but if no ProviderPriceRule exists for the
+configured model, scans will fail with `PricingRuleNotFoundError` when
+`PRICING_REQUIRE_RULE_FOR_EXECUTION=true`.
+
+### 7. Configure provider API key / model
+
+Set the provider API key and scan model in `.env.production`:
+
+```dotenv
+OPENAI_API_KEY=<your-key>
+OPENAI_SCAN_MODEL=gpt-5.6-terra
+```
+
+Then recreate the app and worker containers to pick up the new env:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --no-deps --force-recreate app worker
+```
+
+### 8. Start / restart services
 
 Bring up the long-running services with the new image:
 
@@ -170,7 +240,7 @@ Because the image tag changed, `up -d` recreates `app`, `worker`, and
 `beat` from `geo-tracker:${GIT_SHA}`. `postgres` and `redis` are
 recreated only if their configuration changed (data volumes persist).
 
-### 5. Readiness check
+### 9. Readiness check
 
 Wait for the app healthcheck to pass, then probe readiness directly.
 `/ready` verifies PostgreSQL and Redis connectivity, not just liveness:
@@ -184,7 +254,7 @@ A `200` with `"status":"ready"` means the app can serve traffic. A
 `503` means PostgreSQL or Redis is not reachable from the app — check
 `docker compose logs app` and the `postgres`/`redis` healthchecks.
 
-### 6. Smoke test
+### 10. Smoke test
 
 Run a small functional check against the live stack:
 

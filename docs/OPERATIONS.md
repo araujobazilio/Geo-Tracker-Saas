@@ -382,6 +382,54 @@ Symptom: notifications not arriving; `email_deliveries` backlog grows.
    The task is idempotent: a row already `SENT` returns
    `already_sent`; a `FAILED` row is re-claimed and retried.
 
+## Provider pricing bootstrap
+
+Before any real scan can execute, the application needs verified
+`ProviderPriceRule` evidence for the exact provider/surface/model
+combination. When `PRICING_REQUIRE_RULE_FOR_EXECUTION=true` (the
+production default), a missing rule causes `PricingRuleNotFoundError`
+and the scan fails before any provider call is made.
+
+### Check pricing status (read-only)
+
+```bash
+docker compose -f docker-compose.prod.yml exec app \
+  python -m scripts.seed_provider_pricing --check
+```
+
+Reports `MISSING`, `READY`, or `CONFLICT` for each pinned rule.
+Performs zero writes.
+
+### Apply pinned pricing evidence
+
+```bash
+docker compose -f docker-compose.prod.yml exec app \
+  python -m scripts.seed_provider_pricing --apply
+```
+
+Creates the rule if missing. Idempotent: re-running on a `READY` rule
+makes zero writes. Fails closed on conflict (no partial writes).
+
+### Entitlement vs pricing
+
+- `PlanProvider` (entitlement): "this workspace may use OpenAI"
+- `ProviderPriceRule` (pricing): "the application has verified
+  accounting evidence for this exact OpenAI model/surface/time"
+
+One must never imply the other. A workspace may be entitled to use
+OpenAI, but if no `ProviderPriceRule` exists for the configured
+`OPENAI_SCAN_MODEL`, scans will fail with `PricingRuleNotFoundError`.
+
+### Currently pinned models
+
+| Provider | Surface | Model | Effective | Pricing key |
+|----------|---------|-------|-----------|-------------|
+| OPENAI | OPENAI_RESPONSES_API | gpt-5.6-terra | 2026-07-30 | `openai:responses:gpt-5.6-terra:2026-07-30` |
+
+All pricing is pinned in source code (`scripts/seed_provider_pricing.py`)
+and verified against official provider documentation. No runtime
+internet pricing fetch occurs.
+
 ## Celery worker concurrency
 
 For closed beta, the production worker runs with **`--concurrency=1`**
