@@ -720,3 +720,42 @@ jobs:
             exit 1
           fi
           echo "OK: real Compose app health smoke passed"
+
+      - name: Production image beta provisioning import smoke
+        run: |
+          # Verify the operator script shipped in the production image
+          # can resolve all its app.* imports. This catches defects like
+          # the Phase 13.5.4 bug where WorkspaceMember was imported from
+          # a nonexistent app.models.workspace_member module.
+          docker run --rm --entrypoint python geo-tracker-ci:${{ github.sha }} -c "
+          import ast, importlib, sys
+
+          script_path = '/app/scripts/provision_beta_user.py'
+          source = open(script_path).read()
+          tree = ast.parse(source)
+
+          failures = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.ImportFrom):
+                  module = node.module or ''
+                  if module.startswith('app.'):
+                      try:
+                          mod = importlib.import_module(module)
+                      except ModuleNotFoundError as exc:
+                          failures.append(f'Cannot import {module}: {exc}')
+                          continue
+                      for alias in node.names:
+                          if not hasattr(mod, alias.name):
+                              failures.append(f'{module} has no attribute {alias.name}')
+
+          if failures:
+              for f in failures:
+                  print(f'FAIL: {f}', file=sys.stderr)
+              sys.exit(1)
+
+          # Specifically verify WorkspaceMember resolves from the correct module.
+          from app.models.workspace import Workspace, WorkspaceMember
+          print('OK: all app.* imports in provision_beta_user.py resolve')
+          print(f'Workspace: {Workspace}')
+          print(f'WorkspaceMember: {WorkspaceMember}')
+          "
