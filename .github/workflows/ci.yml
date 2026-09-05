@@ -702,11 +702,13 @@ jobs:
             exit 1
           fi
           # Verify authorized Host gets 200 via direct app probe.
-          AUTH_OK=$(docker exec geo-compose-health-ci-app-1 curl -fsS -o /dev/null -w "%{http_code}" \
+          # Use curl without -f so curl does not exit non-zero on 400,
+          # which would cause the || echo fallback to append "000".
+          AUTH_OK=$(docker exec geo-compose-health-ci-app-1 curl -s -o /dev/null -w "%{http_code}" \
             -H "Host: ci.example.test" http://localhost:8000/health 2>/dev/null || echo "000")
           echo "Authorized Host /health (direct app): $AUTH_OK"
           # Verify unauthorized Host gets 400 via direct app probe.
-          AUTH_BAD=$(docker exec geo-compose-health-ci-app-1 curl -fsS -o /dev/null -w "%{http_code}" \
+          AUTH_BAD=$(docker exec geo-compose-health-ci-app-1 curl -s -o /dev/null -w "%{http_code}" \
             -H "Host: malicious.example.test" http://localhost:8000/health 2>/dev/null || echo "000")
           echo "Unauthorized Host /health (direct app): $AUTH_BAD"
           if [ "$AUTH_OK" != "200" ]; then
