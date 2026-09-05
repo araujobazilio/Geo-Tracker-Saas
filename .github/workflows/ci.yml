@@ -244,6 +244,14 @@ jobs:
             echo "FAIL: unresolved DATABASE_NAME warning in compose config"
             exit 1
           fi
+          if echo "$STDERR" | grep -q '"HOST" variable is not set'; then
+            echo "FAIL: unresolved HOST variable interpolation warning"
+            exit 1
+          fi
+          if echo "$STDERR" | grep -q '"ALLOWED_HOSTS" variable is not set'; then
+            echo "FAIL: unresolved ALLOWED_HOSTS variable interpolation warning"
+            exit 1
+          fi
           echo "OK: no unresolved-variable interpolation warnings"
 
       - name: Verify production compose has no public DB/Redis ports
@@ -556,3 +564,159 @@ jobs:
             exit 1
           fi
           echo "OK: Nginx runtime smoke passed"
+
+      - name: Compose config rendered healthcheck assertion
+        run: |
+          # Reproduce the exact VPS discovery: render the Compose config
+          # and verify the healthcheck does NOT have an empty Host header
+          # or broken [ -n "" ] output.
+          cp .env.production.example .env.production
+          sed -i 's|APP_SECRET_KEY=<generate-a-64+char-random-string>|APP_SECRET_KEY=ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci|' .env.production
+          sed -i 's|DATABASE_PASSWORD=<strong-production-password>|DATABASE_PASSWORD=ci-compose-render-pw|' .env.production
+          sed -i 's|ALLOWED_HOSTS=your-domain.com,www.your-domain.com|ALLOWED_HOSTS=ci.example.test|' .env.production
+          sed -i 's|APP_PUBLIC_BASE_URL=https://your-domain.com|APP_PUBLIC_BASE_URL=https://ci.example.test|' .env.production
+          sed -i 's|GIT_SHA=|GIT_SHA=${{ github.sha }}|' .env.production
+          # Render config as JSON and extract the app healthcheck test.
+          CONFIG_JSON=$(docker compose --env-file .env.production -f docker-compose.prod.yml config --format json 2>/dev/null)
+          rm -f .env.production
+          # Extract the healthcheck test command from the rendered JSON.
+          HC_TEST=$(echo "$CONFIG_JSON" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          app = data.get('services', {}).get('app', {})
+          hc = app.get('healthcheck', {})
+          test = hc.get('test', [])
+          print(' '.join(test) if isinstance(test, list) else str(test))
+          ")
+          echo "Rendered healthcheck: $HC_TEST"
+          # Assert no empty Host header.
+          if echo "$HC_TEST" | grep -q 'Host: $'; then
+            echo "FAIL: rendered healthcheck has empty Host header"
+            exit 1
+          fi
+          if echo "$HC_TEST" | grep -q '\[ -n "" \]'; then
+            echo "FAIL: rendered healthcheck has broken [ -n empty ] check"
+            exit 1
+          fi
+          # Assert runtime HOST reference is preserved (should be $HOST, not empty).
+          if ! echo "$HC_TEST" | grep -q '\$HOST'; then
+            echo "FAIL: rendered healthcheck does not contain runtime \$HOST reference"
+            exit 1
+          fi
+          # Assert ALLOWED_HOSTS is referenced at runtime.
+          if ! echo "$HC_TEST" | grep -q 'ALLOWED_HOSTS'; then
+            echo "FAIL: rendered healthcheck does not reference ALLOWED_HOSTS"
+            exit 1
+          fi
+          # Assert no localhost Host fallback in production compose.
+          if echo "$HC_TEST" | grep -q 'HOST=localhost'; then
+            echo "FAIL: rendered healthcheck has localhost Host fallback"
+            exit 1
+          fi
+          echo "OK: rendered healthcheck is runtime-safe"
+
+      - name: Real Compose app health smoke
+        run: |
+          # Exercise the REAL docker-compose.prod.yml healthcheck override.
+          # This is the test that was missing — previous CI only tested the
+          # Dockerfile HEALTHCHECK via direct docker run, not the Compose
+          # healthcheck that actually runs in production.
+          cp .env.production.example .env.production
+          sed -i 's|APP_SECRET_KEY=<generate-a-64+char-random-string>|APP_SECRET_KEY=ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci|' .env.production
+          sed -i 's|DATABASE_PASSWORD=<strong-production-password>|DATABASE_PASSWORD=ci-compose-smoke-pw|' .env.production
+          sed -i 's|ALLOWED_HOSTS=your-domain.com,www.your-domain.com|ALLOWED_HOSTS=ci.example.test|' .env.production
+          sed -i 's|APP_PUBLIC_BASE_URL=https://your-domain.com|APP_PUBLIC_BASE_URL=https://ci.example.test|' .env.production
+          sed -i 's|GIT_SHA=|GIT_SHA=${{ github.sha }}|' .env.production
+          # Tag the already-built image so Compose can use it with --no-build.
+          docker tag geo-tracker-ci:${{ github.sha }} geo-tracker:${{ github.sha }}
+          # Start only postgres, redis, and app (no nginx needed).
+          docker compose \
+            --project-name geo-compose-health-ci \
+            --env-file .env.production \
+            -f docker-compose.prod.yml \
+            up -d --no-build postgres redis app
+          # Ensure cleanup happens even on failure.
+          cleanup() {
+            docker compose \
+              --project-name geo-compose-health-ci \
+              --env-file .env.production \
+              -f docker-compose.prod.yml \
+              down -v --remove-orphans 2>/dev/null || true
+            rm -f .env.production
+          }
+          trap cleanup EXIT
+          # Wait for postgres and redis to be healthy.
+          for i in $(seq 1 60); do
+            PG_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-compose-health-ci-postgres-1 2>/dev/null || echo "none")
+            RD_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-compose-health-ci-redis-1 2>/dev/null || echo "none")
+            if [ "$PG_HEALTH" = "healthy" ] && [ "$RD_HEALTH" = "healthy" ]; then
+              echo "Postgres and Redis healthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          echo "Postgres health: $PG_HEALTH"
+          echo "Redis health: $RD_HEALTH"
+          if [ "$PG_HEALTH" != "healthy" ]; then
+            echo "FAIL: postgres did not become healthy"
+            exit 1
+          fi
+          if [ "$RD_HEALTH" != "healthy" ]; then
+            echo "FAIL: redis did not become healthy"
+            exit 1
+          fi
+          # Wait for app to become healthy via the REAL Compose healthcheck.
+          for i in $(seq 1 120); do
+            APP_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' geo-compose-health-ci-app-1 2>/dev/null || echo "none")
+            if [ "$APP_HEALTH" = "healthy" ]; then
+              echo "App healthy after ${i}s (via real Compose healthcheck)"
+              break
+            fi
+            if [ "$APP_HEALTH" = "unhealthy" ]; then
+              echo "App unhealthy after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          echo "App health: $APP_HEALTH"
+          # Inspect the actual healthcheck command configured by Compose.
+          APP_HC_CMD=$(docker inspect --format='{{json .Config.Healthcheck.Test}}' geo-compose-health-ci-app-1 2>/dev/null || echo "")
+          echo "App healthcheck command: $APP_HC_CMD"
+          # Verify the healthcheck command contains runtime HOST reference.
+          if ! echo "$APP_HC_CMD" | grep -q 'HOST'; then
+            echo "FAIL: Compose healthcheck command does not reference HOST"
+            exit 1
+          fi
+          if ! echo "$APP_HC_CMD" | grep -q 'ALLOWED_HOSTS'; then
+            echo "FAIL: Compose healthcheck command does not reference ALLOWED_HOSTS"
+            exit 1
+          fi
+          # Verify no empty Host header in the configured command.
+          if echo "$APP_HC_CMD" | grep -q 'Host: $\"'; then
+            echo "FAIL: Compose healthcheck has empty Host header"
+            exit 1
+          fi
+          if [ "$APP_HEALTH" != "healthy" ]; then
+            echo "FAIL: app did not become healthy via real Compose healthcheck"
+            docker logs geo-compose-health-ci-app-1 2>/dev/null || true
+            exit 1
+          fi
+          # Verify authorized Host gets 200 via direct app probe.
+          # Use curl without -f so curl does not exit non-zero on 400,
+          # which would cause the || echo fallback to append "000".
+          AUTH_OK=$(docker exec geo-compose-health-ci-app-1 curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: ci.example.test" http://localhost:8000/health 2>/dev/null || echo "000")
+          echo "Authorized Host /health (direct app): $AUTH_OK"
+          # Verify unauthorized Host gets 400 via direct app probe.
+          AUTH_BAD=$(docker exec geo-compose-health-ci-app-1 curl -s -o /dev/null -w "%{http_code}" \
+            -H "Host: malicious.example.test" http://localhost:8000/health 2>/dev/null || echo "000")
+          echo "Unauthorized Host /health (direct app): $AUTH_BAD"
+          if [ "$AUTH_OK" != "200" ]; then
+            echo "FAIL: authorized Host /health did not return 200"
+            exit 1
+          fi
+          if [ "$AUTH_BAD" != "400" ]; then
+            echo "FAIL: unauthorized Host /health did not return 400"
+            exit 1
+          fi
+          echo "OK: real Compose app health smoke passed"

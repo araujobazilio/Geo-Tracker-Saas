@@ -191,17 +191,31 @@ class TestComposeAppHealthcheck:
         assert "/health" in test_str
 
     def test_app_healthcheck_does_not_hardcode_localhost_host(self, compose_data: dict) -> None:
-        """The app healthcheck must not hardcode Host: localhost."""
+        """The app healthcheck must not hardcode Host: localhost.
+
+        Production compose must fail-closed if ALLOWED_HOSTS is empty,
+        NOT fall back to localhost as the Host header.
+        localhost as a connection target (http://localhost:8000) is fine.
+        """
         app = compose_data.get("services", {}).get("app", {})
         healthcheck = app.get("healthcheck", {})
         test = healthcheck.get("test", [])
         test_str = " ".join(test) if isinstance(test, list) else str(test)
         # Must set a Host header.
         assert "Host" in test_str, "App healthcheck must set a Host header"
-        # Must not hardcode "Host: localhost" as the production Host.
-        # The localhost fallback for empty ALLOWED_HOSTS is OK.
-        # But the primary Host must come from ALLOWED_HOSTS.
+        # Must derive Host from ALLOWED_HOSTS.
         assert "ALLOWED_HOSTS" in test_str
+        # Must NOT have a localhost Host fallback (e.g. "HOST=localhost" or
+        # "Host: localhost"). localhost as a connection target is OK.
+        import re
+
+        assert not re.search(r"HOST=localhost", test_str), (
+            "Production compose healthcheck must NOT fall back to HOST=localhost "
+            "(fail-closed when ALLOWED_HOSTS is empty)"
+        )
+        assert not re.search(
+            r"Host:\s*localhost", test_str, re.IGNORECASE
+        ), "Production compose healthcheck must NOT use Host: localhost"
 
     def test_compose_does_not_require_localhost_in_allowed_hosts(self, compose_data: dict) -> None:
         """Production compose must not depend on adding localhost to ALLOWED_HOSTS."""
@@ -211,6 +225,151 @@ class TestComposeAppHealthcheck:
         # That's correct. We just verify compose doesn't inject localhost.
         if "ALLOWED_HOSTS" in env:
             assert "localhost" not in str(env["ALLOWED_HOSTS"]).lower()
+
+
+class TestComposeHealthcheckInterpolationSafety:
+    """Test that the Compose app healthcheck uses $$-escaped variables.
+
+    Docker Compose interpolates $VAR before the command reaches the container.
+    Variables that must be evaluated INSIDE the container shell at runtime
+    must be escaped as $$VAR so Compose passes them through as $VAR.
+
+    This is a regression test for the real VPS defect where $HOST was
+    interpolated to an empty string by Compose, causing the healthcheck
+    to send an empty Host header.
+    """
+
+    @pytest.fixture()
+    def compose_raw(self) -> str:
+        """Read the raw YAML text (not parsed) to inspect $$ escaping."""
+        return (_REPO_ROOT / "docker-compose.prod.yml").read_text()
+
+    @pytest.fixture()
+    def compose_data(self) -> dict:
+        content = (_REPO_ROOT / "docker-compose.prod.yml").read_text()
+        return yaml.safe_load(content)
+
+    def test_compose_uses_escaped_host_variable(self, compose_raw: str) -> None:
+        """The Compose healthcheck must use $$HOST, not $HOST.
+
+        $HOST would be interpolated by Compose to an empty string.
+        $$HOST is passed through as $HOST to the container shell.
+        """
+        # Find the healthcheck section in the raw YAML.
+        assert "$$HOST" in compose_raw, (
+            "Compose healthcheck must use $$HOST (escaped) so Compose does "
+            "not interpolate it to empty"
+        )
+
+    def test_compose_uses_escaped_allowed_hosts_variable(self, compose_raw: str) -> None:
+        """The Compose healthcheck must use $$ALLOWED_HOSTS, not $ALLOWED_HOSTS."""
+        assert "$$ALLOWED_HOSTS" in compose_raw, (
+            "Compose healthcheck must use $$ALLOWED_HOSTS (escaped) so Compose "
+            "does not interpolate it to empty"
+        )
+
+    def test_compose_healthcheck_no_unescaped_host(self, compose_raw: str) -> None:
+        """The Compose healthcheck must NOT contain unescaped $HOST.
+
+        Unescaped $HOST would be interpolated by Compose to an empty string,
+        causing the healthcheck to fail with an empty Host header.
+        """
+        # Find the healthcheck test section and verify no unescaped $HOST.
+        # We look for $HOST that is NOT preceded by another $ (i.e., not $$HOST).
+        # Use regex: find $HOST not preceded by $.
+        import re
+
+        # Find all $HOST occurrences and check they are $$HOST
+        for match in re.finditer(r"\$HOST", compose_raw):
+            pos = match.start()
+            if pos > 0 and compose_raw[pos - 1] == "$":
+                continue  # This is $$HOST, which is correct
+            # Check if this is in the healthcheck section
+            # Find the healthcheck section
+            hc_idx = compose_raw.find("healthcheck:")
+            if hc_idx == -1:
+                continue
+            # Find the next service or end of app service
+            next_service = compose_raw.find("\n  ", hc_idx + 100)
+            if next_service == -1:
+                next_service = len(compose_raw)
+            if hc_idx < pos < next_service:
+                pytest.fail(
+                    f"Unescaped $HOST found in Compose healthcheck at position {pos}. "
+                    "Use $$HOST to prevent Compose interpolation."
+                )
+
+    def test_compose_healthcheck_targets_health(self, compose_data: dict) -> None:
+        """The Compose healthcheck must target /health."""
+        app = compose_data.get("services", {}).get("app", {})
+        healthcheck = app.get("healthcheck", {})
+        test = healthcheck.get("test", [])
+        test_str = " ".join(test) if isinstance(test, list) else str(test)
+        assert "/health" in test_str
+
+    def test_compose_healthcheck_no_localhost_fallback(self, compose_data: dict) -> None:
+        """Production Compose healthcheck must NOT fall back to localhost
+        as the Host header.
+
+        If ALLOWED_HOSTS is empty, the healthcheck must fail-closed.
+        localhost as a connection target (http://localhost:8000) is fine.
+        This is production -- not dev/test.
+        """
+        import re
+
+        app = compose_data.get("services", {}).get("app", {})
+        healthcheck = app.get("healthcheck", {})
+        test = healthcheck.get("test", [])
+        test_str = " ".join(test) if isinstance(test, list) else str(test)
+        # Must NOT have a localhost Host fallback (e.g. "HOST=localhost").
+        assert not re.search(
+            r"HOST=localhost", test_str
+        ), "Production compose healthcheck must NOT fall back to HOST=localhost"
+        assert not re.search(
+            r"Host:\s*localhost", test_str, re.IGNORECASE
+        ), "Production compose healthcheck must NOT use Host: localhost"
+
+    def test_compose_healthcheck_no_secrets(self, compose_data: dict) -> None:
+        """The Compose healthcheck must not contain secrets."""
+        app = compose_data.get("services", {}).get("app", {})
+        healthcheck = app.get("healthcheck", {})
+        test = healthcheck.get("test", [])
+        test_str = " ".join(test) if isinstance(test, list) else str(test)
+        assert "SECRET" not in test_str.upper()
+        assert "PASSWORD" not in test_str.upper()
+        assert "API_KEY" not in test_str.upper()
+
+    def test_compose_healthcheck_has_host_header(self, compose_data: dict) -> None:
+        """The Compose healthcheck must set a Host header."""
+        app = compose_data.get("services", {}).get("app", {})
+        healthcheck = app.get("healthcheck", {})
+        test = healthcheck.get("test", [])
+        test_str = " ".join(test) if isinstance(test, list) else str(test)
+        assert "Host" in test_str, "Compose healthcheck must set a Host header"
+
+    def test_compose_healthcheck_fail_closed_on_empty_allowed_hosts(
+        self, compose_data: dict
+    ) -> None:
+        """If ALLOWED_HOSTS is empty, the healthcheck must fail (not succeed
+        with localhost).
+
+        The command uses: [ -n "$$HOST" ] && curl ...
+        If HOST is empty, the && chain short-circuits and curl never runs,
+        so the healthcheck fails. This is the fail-closed behavior.
+        """
+        app = compose_data.get("services", {}).get("app", {})
+        healthcheck = app.get("healthcheck", {})
+        test = healthcheck.get("test", [])
+        test_str = " ".join(test) if isinstance(test, list) else str(test)
+        # The [ -n "$$HOST" ] check ensures the healthcheck fails if HOST is empty.
+        assert "-n" in test_str, (
+            "Compose healthcheck must have [ -n $$HOST ] to fail-closed "
+            "when ALLOWED_HOSTS is empty"
+        )
+        # There must be no || fallback that would succeed with an empty host.
+        assert (
+            "||" not in test_str or "localhost" not in test_str
+        ), "Compose healthcheck must not have a fallback that bypasses empty HOST"
 
 
 class TestNginxHealthConfig:

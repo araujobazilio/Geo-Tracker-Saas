@@ -81,12 +81,17 @@ services:
     healthcheck:
       # Derive the Host header from ALLOWED_HOSTS so the probe is
       # authorized by TrustedHostMiddleware in production.
+      # IMPORTANT: $$ escaping is required so Docker Compose does NOT
+      # interpolate these variables at config-render time.  They must be
+      # evaluated INSIDE the container shell at healthcheck execution time.
+      # Production fail-closed: if ALLOWED_HOSTS is empty, the healthcheck
+      # must NOT fall back to localhost — it must fail.
       test:
         - CMD-SHELL
         - >-
-          HOST=$(echo "$ALLOWED_HOSTS" | cut -d',' -f1 | tr -d ' ') &&
-          [ -n "$HOST" ] || HOST=localhost &&
-          curl -fsS -H "Host: $HOST" http://localhost:8000/health
+          HOST=$$(printf '%s' "$$ALLOWED_HOSTS" | cut -d',' -f1 | tr -d ' ') &&
+          [ -n "$$HOST" ] &&
+          curl -fsS -H "Host: $$HOST" http://localhost:8000/health
       interval: 30s
       timeout: 5s
       retries: 3
