@@ -77,8 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     from app.models.billing import BillingAccount
     from app.models.plan_definition import PlanDefinition
     from app.models.user import User
-    from app.models.workspace import Workspace
-    from app.models.workspace_member import WorkspaceMember
+    from app.models.workspace import Workspace, WorkspaceMember
 
     factory = get_session_factory()
     normalized = normalize_email(args.email)
