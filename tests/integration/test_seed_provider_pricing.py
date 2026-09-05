@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core.enums import LLMProvider, ProviderSurface
-from app.core.exceptions import PricingRuleNotFoundError
+from app.core.exceptions import PricingConfigurationError, PricingRuleNotFoundError
 from app.models.pricing import ProviderPriceRule
 from app.services.pricing_service import PricingService
 
@@ -338,3 +338,271 @@ class TestPricingResolutionIntegration:
                     datetime(2026, 7, 29, tzinfo=UTC),
                 )
         engine.dispose()
+
+
+class TestReadyOverlapConsistencyIntegration:
+    """Phase 13.5.5.1 - exact pinned rule + distinct overlapping rule.
+
+    Proves the operator and PricingService.resolve() agree: when an
+    overlapping rule exists alongside the exact pinned rule, the operator
+    reports CONFLICT (not READY) and resolve() raises
+    PricingConfigurationError.
+    """
+
+    def _seed_pinned_rule(self, prepared_test_db: str) -> None:
+        """Apply the pinned rule via the operator."""
+        engine = _new_engine(prepared_test_db)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with patch("app.db.session.get_session_factory", return_value=factory):
+            main(["--apply"])
+        engine.dispose()
+
+    def _seed_overlap_rule(self, prepared_test_db: str) -> None:
+        """Insert a distinct overlapping rule via a separate session."""
+        engine = _new_engine(prepared_test_db)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with factory() as osession:
+            overlap = ProviderPriceRule(
+                pricing_key="openai:responses:gpt-5.6-terra:earlier",
+                provider=LLMProvider.OPENAI,
+                provider_surface=ProviderSurface.OPENAI_RESPONSES_API,
+                model="gpt-5.6-terra",
+                effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+                effective_to=None,
+                input_per_million_usd=Decimal("1.00"),
+                cached_input_per_million_usd=Decimal("0.10"),
+                cache_write_per_million_usd=Decimal("1.25"),
+                output_per_million_usd=Decimal("6.00"),
+                reasoning_per_million_usd=Decimal("6.00"),
+                citation_per_million_usd=None,
+                search_per_1000_usd=Decimal("5.00"),
+                request_fee_usd=None,
+                input_tokens_include_cached=True,
+                output_tokens_include_reasoning=True,
+                verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+                source_url="https://example.test/earlier",
+                notes="Earlier overlapping rule for testing",
+            )
+            osession.add(overlap)
+            osession.commit()
+        engine.dispose()
+
+    def test_check_conflict_on_exact_match_with_overlap(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """Exact pinned rule + overlapping rule => --check CONFLICT."""
+        self._seed_pinned_rule(prepared_test_db)
+        self._seed_overlap_rule(prepared_test_db)
+
+        with patch("app.db.session.get_session_factory", return_value=provision_factory):
+            ret = main(["--check"])
+        assert ret == EXIT_FAIL, "Must report CONFLICT, not READY"
+
+    def test_apply_conflict_on_exact_match_with_overlap(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """Exact pinned rule + overlapping rule => --apply CONFLICT, zero writes."""
+        self._seed_pinned_rule(prepared_test_db)
+        self._seed_overlap_rule(prepared_test_db)
+
+        # Count before
+        engine = _new_engine(prepared_test_db)
+        with engine.connect() as conn:
+            count_before = conn.execute(
+                text("SELECT COUNT(*) FROM provider_price_rules")
+            ).scalar_one()
+
+        with patch("app.db.session.get_session_factory", return_value=provision_factory):
+            ret = main(["--apply"])
+        assert ret == EXIT_FAIL
+
+        # Count after must be unchanged (zero writes)
+        with engine.connect() as conn:
+            count_after = conn.execute(
+                text("SELECT COUNT(*) FROM provider_price_rules")
+            ).scalar_one()
+        engine.dispose()
+        assert count_after == count_before, "Zero writes on conflict"
+
+    def test_existing_rows_untouched_on_conflict(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """Existing rows must remain untouched when --apply detects conflict."""
+        self._seed_pinned_rule(prepared_test_db)
+        self._seed_overlap_rule(prepared_test_db)
+
+        # Capture the pinned rule's values before --apply
+        engine = _new_engine(prepared_test_db)
+        verify_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with verify_factory() as vsession:
+            before = vsession.execute(
+                select(ProviderPriceRule).where(
+                    ProviderPriceRule.pricing_key == "openai:responses:gpt-5.6-terra:2026-07-30"
+                )
+            ).scalar_one()
+            pinned_id = before.id
+            pinned_input_price = before.input_per_million_usd
+
+        with patch("app.db.session.get_session_factory", return_value=provision_factory):
+            main(["--apply"])
+
+        # Verify the pinned rule is unchanged
+        with verify_factory() as vsession:
+            after = vsession.execute(
+                select(ProviderPriceRule).where(ProviderPriceRule.id == pinned_id)
+            ).scalar_one()
+            assert after.input_per_million_usd == pinned_input_price
+        engine.dispose()
+
+    def test_pricing_service_raises_on_overlap(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """PricingService.resolve() raises PricingConfigurationError on overlap.
+
+        This proves the runtime resolver and the operator agree: the
+        overlapping state is ambiguous and must not be reported as READY.
+        """
+        self._seed_pinned_rule(prepared_test_db)
+        self._seed_overlap_rule(prepared_test_db)
+
+        engine = _new_engine(prepared_test_db)
+        verify_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with verify_factory() as vsession:
+            service = PricingService(vsession)
+            with pytest.raises(PricingConfigurationError):
+                service.resolve(
+                    LLMProvider.OPENAI,
+                    ProviderSurface.OPENAI_RESPONSES_API,
+                    "gpt-5.6-terra",
+                    datetime(2026, 9, 5, tzinfo=UTC),
+                )
+        engine.dispose()
+
+
+class TestOverlapBoundarySemantics:
+    """Phase 13.5.5.1 - half-open interval [from, to) boundary tests.
+
+    PricingService.resolve() uses:
+        effective_from <= execution_time
+        AND execution_time < effective_to
+
+    The operator's overlap detection must use the same semantics.
+    """
+
+    def _seed_pinned(self, prepared_test_db: str) -> None:
+        """Apply the pinned rule via the operator."""
+        engine = _new_engine(prepared_test_db)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with patch("app.db.session.get_session_factory", return_value=factory):
+            main(["--apply"])
+        engine.dispose()
+
+    def _seed_rule(
+        self,
+        prepared_test_db: str,
+        pricing_key: str,
+        effective_from: datetime,
+        effective_to: datetime | None,
+    ) -> None:
+        """Insert a custom rule via a separate session."""
+        engine = _new_engine(prepared_test_db)
+        factory = sessionmaker(bind=engine, expire_on_commit=False)
+        with factory() as osession:
+            rule = ProviderPriceRule(
+                pricing_key=pricing_key,
+                provider=LLMProvider.OPENAI,
+                provider_surface=ProviderSurface.OPENAI_RESPONSES_API,
+                model="gpt-5.6-terra",
+                effective_from=effective_from,
+                effective_to=effective_to,
+                input_per_million_usd=Decimal("1.00"),
+                cached_input_per_million_usd=Decimal("0.10"),
+                cache_write_per_million_usd=Decimal("1.25"),
+                output_per_million_usd=Decimal("6.00"),
+                reasoning_per_million_usd=Decimal("6.00"),
+                citation_per_million_usd=None,
+                search_per_1000_usd=Decimal("5.00"),
+                request_fee_usd=None,
+                input_tokens_include_cached=True,
+                output_tokens_include_reasoning=True,
+                verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+                source_url="https://example.test/boundary",
+                notes="Boundary test rule",
+            )
+            osession.add(rule)
+            osession.commit()
+        engine.dispose()
+
+    def test_rule_ending_exactly_at_pinned_from_is_not_overlap(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """Historical rule ending exactly at pinned.effective_from is NOT overlap.
+
+        existing.effective_to == pinned.effective_from means the existing
+        interval is [from, pinned.effective_from) and the pinned interval
+        starts at pinned.effective_from. No overlap.
+        """
+        self._seed_pinned(prepared_test_db)
+        self._seed_rule(
+            prepared_test_db,
+            pricing_key="openai:responses:gpt-5.6-terra:historical",
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+            effective_to=datetime(2026, 7, 30, tzinfo=UTC),  # exactly at pinned.from
+        )
+
+        with patch("app.db.session.get_session_factory", return_value=provision_factory):
+            ret = main(["--check"])
+        assert ret == EXIT_OK, "Rule ending at pinned.effective_from is NOT an overlap"
+
+    def test_rule_ending_after_pinned_from_is_overlap(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """Rule ending after pinned.effective_from IS an overlap."""
+        self._seed_pinned(prepared_test_db)
+        self._seed_rule(
+            prepared_test_db,
+            pricing_key="openai:responses:gpt-5.6-terra:overlapping-end",
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+            effective_to=datetime(2026, 8, 1, tzinfo=UTC),  # after pinned.from
+        )
+
+        with patch("app.db.session.get_session_factory", return_value=provision_factory):
+            ret = main(["--check"])
+        assert ret == EXIT_FAIL, "Rule ending after pinned.effective_from IS an overlap"
+
+    def test_open_ended_rule_covering_pinned_from_is_overlap(
+        self,
+        db_session: Session,
+        provision_factory: sessionmaker[Session],
+        prepared_test_db: str,
+    ) -> None:
+        """Open-ended rule covering pinned.effective_from IS an overlap."""
+        self._seed_pinned(prepared_test_db)
+        self._seed_rule(
+            prepared_test_db,
+            pricing_key="openai:responses:gpt-5.6-terra:open-earlier",
+            effective_from=datetime(2026, 1, 1, tzinfo=UTC),
+            effective_to=None,  # open-ended
+        )
+
+        with patch("app.db.session.get_session_factory", return_value=provision_factory):
+            ret = main(["--check"])
+        assert ret == EXIT_FAIL, "Open-ended rule covering pinned.from IS an overlap"

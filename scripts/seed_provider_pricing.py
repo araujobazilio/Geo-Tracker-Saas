@@ -193,41 +193,55 @@ def _format_conflict(
 def _check_overlapping(
     session: object,
     pinned: PinnedPriceRule,
+    exclude_id: object | None = None,
 ) -> str | None:
     """Check for overlapping effective rules for the same provider/surface/model.
 
     Returns a conflict message if an overlap is found, None otherwise.
-    Excludes the exact pricing_key (that's handled separately).
+    If *exclude_id* is provided, that primary-key row is excluded from the
+    overlap query (used when the exact pinned rule already exists, so the
+    rule itself is not counted as an overlap of itself).
+
+    Overlap semantics use half-open intervals [from, to), consistent with
+    PricingService.resolve():
+        existing.effective_from < pinned.effective_to
+        AND (existing.effective_to IS NULL OR existing.effective_to > pinned.effective_from)
+
+    A rule ending exactly at pinned.effective_from (effective_to == effective_from)
+    is NOT an overlap because the pinned interval starts at effective_from and
+    the existing interval ends just before it.
     """
     from sqlalchemy import or_, select
 
     from app.models.pricing import ProviderPriceRule
 
-    overlapping = (
-        session.execute(
-            select(ProviderPriceRule).where(
-                ProviderPriceRule.provider == pinned.provider,
-                ProviderPriceRule.provider_surface == pinned.provider_surface,
-                ProviderPriceRule.model == pinned.model,
-                ProviderPriceRule.pricing_key != pinned.pricing_key,
-                # Overlap: existing.effective_from < pinned.effective_to
-                #          AND existing.effective_to > pinned.effective_from
-                # If pinned has no effective_to, it's open-ended.
-                ProviderPriceRule.effective_from
-                < (
-                    pinned.effective_to
-                    if pinned.effective_to is not None
-                    else datetime(9999, 12, 31, tzinfo=UTC)
-                ),
-                or_(
-                    ProviderPriceRule.effective_to.is_(None),
-                    ProviderPriceRule.effective_to > pinned.effective_from,
-                ),
-            )
-        )
-        .scalars()
-        .all()
-    )
+    conditions = [
+        ProviderPriceRule.provider == pinned.provider,
+        ProviderPriceRule.provider_surface == pinned.provider_surface,
+        ProviderPriceRule.model == pinned.model,
+        ProviderPriceRule.effective_from
+        < (
+            pinned.effective_to
+            if pinned.effective_to is not None
+            else datetime(9999, 12, 31, tzinfo=UTC)
+        ),
+        or_(
+            ProviderPriceRule.effective_to.is_(None),
+            ProviderPriceRule.effective_to > pinned.effective_from,
+        ),
+    ]
+
+    # Exclude the exact pinned rule by primary key when it already exists.
+    # This is more precise than excluding by pricing_key: it ensures only
+    # the exact row is skipped, not a coincidental same-key row.
+    if exclude_id is not None:
+        conditions.append(ProviderPriceRule.id != exclude_id)
+    else:
+        # When the exact rule does not exist, exclude by pricing_key to
+        # avoid matching any stale row with the same key.
+        conditions.append(ProviderPriceRule.pricing_key != pinned.pricing_key)
+
+    overlapping = session.execute(select(ProviderPriceRule).where(*conditions)).scalars().all()
 
     if overlapping:
         keys = [r.pricing_key for r in overlapping]
@@ -239,34 +253,31 @@ def _check_overlapping(
     return None
 
 
-def _check_one(session: object, pinned: PinnedPriceRule) -> str:
-    """Check the status of one pinned rule.  Returns MISSING/READY/CONFLICT."""
-    from sqlalchemy import select
+@dataclass(frozen=True)
+class _InspectionResult:
+    """Shared inspection result for --check and --apply.
 
-    from app.models.pricing import ProviderPriceRule
+    Guarantees that both modes use identical validation semantics.
+    """
 
-    existing = session.execute(
-        select(ProviderPriceRule).where(ProviderPriceRule.pricing_key == pinned.pricing_key)
-    ).scalar_one_or_none()
-
-    if existing is None:
-        # Check for overlapping rules before declaring MISSING (safe to create).
-        overlap = _check_overlapping(session, pinned)
-        if overlap:
-            return STATUS_CONFLICT
-        return STATUS_MISSING
-
-    if _values_match(_rule_to_dict(pinned), _existing_to_dict(existing)):
-        return STATUS_READY
-
-    return STATUS_CONFLICT
+    status: str  # MISSING, READY, or CONFLICT
+    conflict_msg: str | None
+    existing: object | None  # The exact-matching persisted rule, if any
 
 
-def _apply_one(session: object, pinned: PinnedPriceRule) -> tuple[str, str | None]:
-    """Apply one pinned rule.
+def _inspect(session: object, pinned: PinnedPriceRule) -> _InspectionResult:
+    """Shared validation logic for --check and --apply.
 
-    Returns (status, conflict_message).
-    status is one of: CREATED, READY, CONFLICT.
+    Decision flow (see Phase 13.5.5.1 truth table):
+      1. Load exact pricing_key if present.
+      2. If exact rule exists:
+         a. Compare canonical fields; mismatch => CONFLICT immediately.
+         b. If match => continue (do NOT return READY yet).
+      3. Run overlap detection, excluding the exact rule by PK ID if it exists.
+      4. If any distinct overlapping rule exists => CONFLICT.
+      5. Only after canonical AND overlap validation:
+         - exact rule exists => READY
+         - exact rule missing => MISSING
     """
     from sqlalchemy import select
 
@@ -277,16 +288,65 @@ def _apply_one(session: object, pinned: PinnedPriceRule) -> tuple[str, str | Non
     ).scalar_one_or_none()
 
     if existing is not None:
-        if _values_match(_rule_to_dict(pinned), _existing_to_dict(existing)):
-            return ("READY", None)
-        return ("CONFLICT", _format_conflict(pinned, existing))
+        if not _values_match(_rule_to_dict(pinned), _existing_to_dict(existing)):
+            return _InspectionResult(
+                status=STATUS_CONFLICT,
+                conflict_msg=_format_conflict(pinned, existing),
+                existing=existing,
+            )
+        # Canonical values match — but we must still check for overlaps
+        # from OTHER rules before declaring READY.
+        exclude_id = getattr(existing, "id", None)
+        overlap = _check_overlapping(session, pinned, exclude_id=exclude_id)
+        if overlap:
+            return _InspectionResult(
+                status=STATUS_CONFLICT,
+                conflict_msg=overlap,
+                existing=existing,
+            )
+        return _InspectionResult(
+            status=STATUS_READY,
+            conflict_msg=None,
+            existing=existing,
+        )
 
     # No existing rule with this pricing_key — check for overlaps.
-    overlap = _check_overlapping(session, pinned)
+    overlap = _check_overlapping(session, pinned, exclude_id=None)
     if overlap:
-        return ("CONFLICT", overlap)
+        return _InspectionResult(
+            status=STATUS_CONFLICT,
+            conflict_msg=overlap,
+            existing=None,
+        )
+    return _InspectionResult(
+        status=STATUS_MISSING,
+        conflict_msg=None,
+        existing=None,
+    )
 
-    # Create the rule.
+
+def _check_one(session: object, pinned: PinnedPriceRule) -> str:
+    """Check the status of one pinned rule.  Returns MISSING/READY/CONFLICT."""
+    return _inspect(session, pinned).status
+
+
+def _apply_one(session: object, pinned: PinnedPriceRule) -> tuple[str, str | None]:
+    """Apply one pinned rule.
+
+    Returns (status, conflict_message).
+    status is one of: CREATED, READY, CONFLICT.
+    """
+    result = _inspect(session, pinned)
+
+    if result.status == STATUS_CONFLICT:
+        return ("CONFLICT", result.conflict_msg)
+
+    if result.status == STATUS_READY:
+        return ("READY", None)
+
+    # STATUS_MISSING — safe to create.
+    from app.models.pricing import ProviderPriceRule
+
     rule = ProviderPriceRule(
         pricing_key=pinned.pricing_key,
         provider=pinned.provider,
@@ -336,19 +396,11 @@ def main(argv: list[str] | None = None) -> int:
         # Read-only mode: zero writes.
         with factory() as session:
             for pinned in _PINNED_RULES:
-                status = _check_one(session, pinned)
-                print(f"{pinned.pricing_key}: {status}")
-                if status == STATUS_CONFLICT:
-                    # Report detail for conflict.
-                    existing = session.execute(
-                        _select_by_key(pinned.pricing_key)
-                    ).scalar_one_or_none()
-                    if existing is not None:
-                        print(_format_conflict(pinned, existing))
-                    else:
-                        overlap = _check_overlapping(session, pinned)
-                        if overlap:
-                            print(overlap)
+                result = _inspect(session, pinned)
+                print(f"{pinned.pricing_key}: {result.status}")
+                if result.status == STATUS_CONFLICT:
+                    if result.conflict_msg:
+                        print(result.conflict_msg)
                     print("ERROR: Pricing conflict detected. Resolve before proceeding.")
                     return EXIT_FAIL
         print("OK: check complete")
@@ -385,15 +437,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Should not reach here (mutually exclusive required group).
     return EXIT_FAIL
-
-
-def _select_by_key(pricing_key: str):
-    """Build a select for ProviderPriceRule by pricing_key."""
-    from sqlalchemy import select
-
-    from app.models.pricing import ProviderPriceRule
-
-    return select(ProviderPriceRule).where(ProviderPriceRule.pricing_key == pricing_key)
 
 
 if __name__ == "__main__":
