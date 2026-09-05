@@ -759,3 +759,42 @@ jobs:
           print(f'Workspace: {Workspace}')
           print(f'WorkspaceMember: {WorkspaceMember}')
           "
+
+      - name: Production image provider pricing operator smoke
+        run: |
+          # Verify the pricing bootstrap operator is included in the
+          # production image and imports/loads correctly.
+          docker run --rm --entrypoint python geo-tracker-ci:${{ github.sha }} -c "
+          import ast, importlib, sys
+
+          script_path = '/app/scripts/seed_provider_pricing.py'
+          source = open(script_path).read()
+          tree = ast.parse(source)
+
+          failures = []
+          for node in ast.walk(tree):
+              if isinstance(node, ast.ImportFrom):
+                  module = node.module or ''
+                  if module.startswith('app.'):
+                      try:
+                          mod = importlib.import_module(module)
+                      except ModuleNotFoundError as exc:
+                          failures.append(f'Cannot import {module}: {exc}')
+                          continue
+                      for alias in node.names:
+                          if not hasattr(mod, alias.name):
+                              failures.append(f'{module} has no attribute {alias.name}')
+
+          if failures:
+              for f in failures:
+                  print(f'FAIL: {f}', file=sys.stderr)
+              sys.exit(1)
+
+          # Verify the operator can load and has the expected CLI interface.
+          from scripts.seed_provider_pricing import main, _OPENAI_GPT56_TERRA
+          assert _OPENAI_GPT56_TERRA.model == 'gpt-5.6-terra'
+          assert _OPENAI_GPT56_TERRA.pricing_key == 'openai:responses:gpt-5.6-terra:2026-07-30'
+          print('OK: seed_provider_pricing operator loads correctly')
+          print(f'Pinned model: {_OPENAI_GPT56_TERRA.model}')
+          print(f'Pricing key: {_OPENAI_GPT56_TERRA.pricing_key}')
+          "
