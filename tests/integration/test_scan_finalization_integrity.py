@@ -690,7 +690,14 @@ def test_stale_pending_with_dispatch_failure_is_recovered(db_session: Session) -
 
 
 def test_stale_running_recovery_preserves_succeeded_runs(db_session: Session) -> None:
-    """Stale RUNNING recovery marks only unresolved runs FAILED, preserves SUCCEEDED."""
+    """Stale RUNNING recovery marks only unresolved runs FAILED, preserves SUCCEEDED.
+
+    REACHABLE scenario: worker claimed and executed run[0] (SUCCEEDED with
+    full accounting), then crashed before claiming run[1] (stays PENDING).
+    Scan is left RUNNING (stale).  Recovery terminalizes the PENDING run
+    as FAILED and finalizes the scan as PARTIAL — without touching the
+    SUCCEEDED run's evidence, UsageEvent, or cost.
+    """
     workspace, user, project, _, _ = _seed(db_session, prompt_count=2)
     _add_price(db_session)
     adapter = FakeAdapter(
@@ -700,23 +707,36 @@ def test_stale_running_recovery_preserves_succeeded_runs(db_session: Session) ->
     )
     scan = _create(db_session, workspace, project, user, FakeDispatcher(), key="stale-running")
 
-    # Execute fully (both runs succeed, scan COMPLETED).
-    _execute(db_session, scan.id, adapter)
-    db_session.expire_all()
+    # Set scan to RUNNING with stale started_at (simulates dispatched worker).
     scan = db_session.get(Scan, scan.id)
-    assert scan is not None and scan.status == ScanStatus.COMPLETED
-
-    # Manually revert one run to RUNNING and scan to RUNNING to simulate
-    # a worker that died mid-execution after recording evidence.
-    run = _runs(db_session, scan.id)[0]
-    run.status = PromptRunStatus.RUNNING
+    assert scan is not None
     scan.status = ScanStatus.RUNNING
     scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
-    scan.successful_runs = 0
-    scan.failed_runs = 0
     db_session.commit()
     db_session.expire_all()
 
+    # Execute ONLY run[0]; run[1] stays PENDING (never claimed).
+    runs = _runs(db_session, scan.id)
+    execution = ScanExecutionService(
+        _factory(db_session),
+        registry=FakeRegistry(adapter),  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+    asyncio.run(execution._execute_run(runs[0].id))
+    db_session.expire_all()
+
+    # Verify pre-recovery state: 1 SUCCEEDED (accounted), 1 PENDING, scan RUNNING.
+    scan = db_session.get(Scan, scan.id)
+    assert scan is not None and scan.status == ScanStatus.RUNNING
+    runs = _runs(db_session, scan.id)
+    assert runs[0].status == PromptRunStatus.SUCCEEDED
+    assert runs[0].usage_event_id is not None
+    assert runs[1].status == PromptRunStatus.PENDING
+    assert runs[1].usage_event_id is None
+
+    pre_usage_events = _count(db_session, UsageEvent, UsageEvent.project_id == project.id)
+
+    # Recovery: 0 RUNNING runs, 1 PENDING → mark as FAILED → PARTIAL.
     ScanRecoveryService(db_session, settings=_settings(stale_after=60)).recover_stale_scans(
         datetime.now(UTC)
     )
@@ -728,6 +748,97 @@ def test_stale_running_recovery_preserves_succeeded_runs(db_session: Session) ->
     statuses = {run.status for run in runs}
     assert PromptRunStatus.SUCCEEDED in statuses
     assert PromptRunStatus.FAILED in statuses
+
+    # SUCCEEDED run evidence preserved.
+    succeeded = [r for r in runs if r.status == PromptRunStatus.SUCCEEDED]
+    assert len(succeeded) == 1
+    assert succeeded[0].usage_event_id is not None
+    assert succeeded[0].cost_usd is not None
+
+    # No new UsageEvents from recovery (PENDING → FAILED is zero-cost).
+    post_usage_events = _count(db_session, UsageEvent, UsageEvent.project_id == project.id)
+    assert post_usage_events == pre_usage_events
+
+    # No provider replay.
+    assert len(adapter.requests) == 1
+
+
+def test_stale_running_with_claimed_run_blocks_recovery(db_session: Session) -> None:
+    """A stale RUNNING scan with a genuinely RUNNING PromptRun (claimed but
+    not executed) MUST block recovery.
+
+    REACHABLE scenario: worker claimed run[0] (PENDING → RUNNING + started_at),
+    then crashed before calling the provider.  Run[1] stays PENDING.  The
+    RUNNING run is economically uncertain (POST may have been sent) — recovery
+    must NOT terminalize it as zero-cost FAILED.
+
+    Expected: scan remains RUNNING, quota ACTIVE, no provider replay,
+    no new UsageEvents, no finalize.
+    """
+    workspace, user, project, _, _ = _seed(db_session, prompt_count=2)
+    _add_price(db_session)
+    adapter = FakeAdapter(LLMProvider.OPENAI, SURFACE)
+    scan = _create(db_session, workspace, project, user, FakeDispatcher(), key="stale-claimed")
+
+    # Set scan to RUNNING with stale started_at.
+    scan = db_session.get(Scan, scan.id)
+    assert scan is not None
+    scan.status = ScanStatus.RUNNING
+    scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+    db_session.expire_all()
+
+    # Claim run[0] (PENDING → RUNNING + started_at) without executing provider.
+    # This is the REACHABLE state after _claim_run commits but before
+    # adapter.execute() is called.
+    runs = _runs(db_session, scan.id)
+    execution = ScanExecutionService(
+        _factory(db_session),
+        registry=FakeRegistry(adapter),  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+    claimed = execution._claim_run(runs[0].id)
+    assert claimed is not None
+    db_session.expire_all()
+
+    # Verify pre-recovery state: 1 RUNNING (claimed), 1 PENDING, scan RUNNING.
+    scan = db_session.get(Scan, scan.id)
+    assert scan is not None and scan.status == ScanStatus.RUNNING
+    runs = _runs(db_session, scan.id)
+    assert runs[0].status == PromptRunStatus.RUNNING
+    assert runs[0].started_at is not None
+    assert runs[0].usage_event_id is None
+    assert runs[1].status == PromptRunStatus.PENDING
+
+    pre_usage_events = _count(db_session, UsageEvent, UsageEvent.project_id == project.id)
+
+    # Recovery MUST block (RUNNING PromptRun present).
+    ScanRecoveryService(db_session, settings=_settings(stale_after=60)).recover_stale_scans(
+        datetime.now(UTC)
+    )
+    db_session.expire_all()
+
+    # Scan remains RUNNING (not terminalized).
+    scan = db_session.get(Scan, scan.id)
+    assert scan is not None
+    assert scan.status == ScanStatus.RUNNING
+
+    # Runs unchanged: 1 RUNNING, 1 PENDING.
+    runs = _runs(db_session, scan.id)
+    assert runs[0].status == PromptRunStatus.RUNNING
+    assert runs[1].status == PromptRunStatus.PENDING
+
+    # No new UsageEvents.
+    post_usage_events = _count(db_session, UsageEvent, UsageEvent.project_id == project.id)
+    assert post_usage_events == pre_usage_events
+
+    # No provider replay.
+    assert len(adapter.requests) == 0
+
+    # Quota reservation remains ACTIVE (protected).
+    reservation = db_session.get(QuotaReservation, scan.quota_reservation_id)
+    assert reservation is not None
+    assert reservation.status == QuotaReservationStatus.ACTIVE
 
 
 # ---------------------------------------------------------------------------

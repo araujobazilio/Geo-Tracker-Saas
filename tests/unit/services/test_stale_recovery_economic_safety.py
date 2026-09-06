@@ -1,7 +1,7 @@
 """Unit tests for stale recovery economic safety (Phase 13.5.10D).
 
 Verifies that ScanRecoveryService does NOT terminalize scans with
-RUNNING PromptRuns — because a RUNNING run means the provider call
+RUNNING PromptRuns -- because a RUNNING run means the provider call
 may have been billed, and generic FAILED + quota release would
 recreate the original cost-zero bug.
 """
@@ -37,13 +37,22 @@ def _make_scan(
 
 
 def _make_run(
-    *, status: PromptRunStatus = PromptRunStatus.RUNNING, error_code: str | None = None
+    *,
+    status: PromptRunStatus = PromptRunStatus.RUNNING,
+    error_code: str | None = None,
+    usage_event_id: uuid.UUID | None = None,
+    provider_request_id: str | None = None,
+    input_tokens: int | None = None,
 ) -> Any:
     run = MagicMock(spec=PromptRun)
     run.id = uuid.uuid4()
     run.status = status
     run.error_code = error_code
-    run.provider_request_id = "req_001" if status == PromptRunStatus.RUNNING else None
+    run.usage_event_id = usage_event_id
+    run.provider_request_id = provider_request_id or (
+        "req_001" if status == PromptRunStatus.RUNNING else None
+    )
+    run.input_tokens = input_tokens
     return run
 
 
@@ -113,7 +122,7 @@ def _make_recovery_service(
 
 
 def test_stale_pending_scan_is_recovered_normally() -> None:
-    """Stale PENDING scan with no RUNNING runs → safe to fail/release quota."""
+    """Stale PENDING scan with no RUNNING runs -> safe to fail/release quota."""
     scan = _make_scan(status=ScanStatus.PENDING)
     scan.started_at = None
     scan.created_at = datetime.now(UTC) - timedelta(hours=3)
@@ -135,7 +144,7 @@ def test_stale_pending_scan_is_recovered_normally() -> None:
 
 
 def test_stale_running_with_running_prompt_run_not_recovered() -> None:
-    """Stale RUNNING scan with RUNNING PromptRun → NOT recovered.
+    """Stale RUNNING scan with RUNNING PromptRun -> NOT recovered.
     No finalize, no quota release, no mark_unresolved_failed."""
     scan = _make_scan(status=ScanStatus.RUNNING)
     run = _make_run(status=PromptRunStatus.RUNNING)
@@ -158,7 +167,7 @@ def test_stale_running_with_running_prompt_run_not_recovered() -> None:
 
 def test_stale_running_with_accounting_unresolved_not_recovered() -> None:
     """Stale RUNNING scan with RUNNING PromptRun + ACCOUNTING_UNRESOLVED
-    → NOT recovered.  Requires manual reconciliation."""
+    -> NOT recovered.  Requires manual reconciliation."""
     scan = _make_scan(status=ScanStatus.RUNNING)
     run = _make_run(
         status=PromptRunStatus.RUNNING,
@@ -183,9 +192,9 @@ def test_stale_running_with_accounting_unresolved_not_recovered() -> None:
 
 def test_stale_running_all_succeeded_is_recovered() -> None:
     """Stale RUNNING scan with no RUNNING runs (all SUCCEEDED/FAILED)
-    → safe to finalize."""
+    -> safe to finalize."""
     scan = _make_scan(status=ScanStatus.RUNNING)
-    # No RUNNING runs — all already terminal
+    # No RUNNING runs -- all already terminal
     session = MagicMock()
     service = _make_recovery_service(
         session,
@@ -203,7 +212,7 @@ def test_stale_running_all_succeeded_is_recovered() -> None:
 
 
 def test_mixed_succeeded_pending_running_not_recovered() -> None:
-    """Scan with SUCCEEDED + PENDING + RUNNING → NOT recovered because
+    """Scan with SUCCEEDED + PENDING + RUNNING -> NOT recovered because
     of the RUNNING run (economic uncertainty)."""
     scan = _make_scan(status=ScanStatus.RUNNING)
     running_run = _make_run(status=PromptRunStatus.RUNNING)
@@ -239,6 +248,70 @@ def test_no_provider_replay_in_recovery() -> None:
     # Recovery should not touch any provider
     service._recover_one(scan.id, datetime.now(UTC) - timedelta(hours=2), datetime.now(UTC))
 
-    # No provider calls made — just DB operations
+    # No provider calls made -- just DB operations
     # The key assertion is that mark_unresolved_failed was NOT called
     service._runs.mark_unresolved_failed.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_stale_running_unknown_running_no_evidence_blocks_recovery() -> None:
+    """RUNNING PromptRun with no provider evidence, no usage_event_id,
+    and no error_code -> NOT recovered (UNKNOWN_RUNNING).
+
+    This state is indistinguishable from a crash after sending the POST
+    but before receiving the response.  Recovery must block.
+    """
+    scan = _make_scan(status=ScanStatus.RUNNING)
+    run = _make_run(
+        status=PromptRunStatus.RUNNING,
+        error_code=None,
+        usage_event_id=None,
+        provider_request_id=None,
+        input_tokens=None,
+    )
+
+    session = MagicMock()
+    service = _make_recovery_service(
+        session,
+        scans=[scan],
+        running_runs=[run],
+    )
+
+    result = service._recover_one(
+        scan.id, datetime.now(UTC) - timedelta(hours=2), datetime.now(UTC)
+    )
+
+    assert result is False
+    service._runs.mark_unresolved_failed.assert_not_called()  # type: ignore[attr-defined]
+    service._finalizer.finalize.assert_not_called()  # type: ignore[attr-defined]
+
+
+def test_stale_running_response_evidence_unaccounted_blocks_recovery() -> None:
+    """RUNNING PromptRun with provider evidence (provider_request_id SET)
+    but no usage_event_id and no ACCOUNTING_UNRESOLVED -> NOT recovered.
+
+    Provider was called and returned a response, but accounting was not
+    durably completed.  Recovery must block.
+    """
+    scan = _make_scan(status=ScanStatus.RUNNING)
+    run = _make_run(
+        status=PromptRunStatus.RUNNING,
+        error_code=None,
+        usage_event_id=None,
+        provider_request_id="req-evidence",
+        input_tokens=100,
+    )
+
+    session = MagicMock()
+    service = _make_recovery_service(
+        session,
+        scans=[scan],
+        running_runs=[run],
+    )
+
+    result = service._recover_one(
+        scan.id, datetime.now(UTC) - timedelta(hours=2), datetime.now(UTC)
+    )
+
+    assert result is False
+    service._runs.mark_unresolved_failed.assert_not_called()  # type: ignore[attr-defined]
+    service._finalizer.finalize.assert_not_called()  # type: ignore[attr-defined]

@@ -14,6 +14,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
 import uuid
@@ -46,6 +47,7 @@ from app.models import (
     Scan,
 )
 from app.services.opportunity_workflow_service import OpportunityWorkflowService
+from app.services.scan_execution_service import ScanExecutionService
 from app.services.scan_finalization_service import ScanRecoveryService
 
 # Re-export the fake adapters and helpers from test_verification_phase10
@@ -58,11 +60,13 @@ from tests.integration.test_verification_phase10 import (
     _connection_factory,
     _create_verification,
     _execute,
+    _factory,
     _full_pipeline,
     _get_first_opportunity,
     _refresh_actions,
     _registry,
     _seed,
+    _settings,
 )
 
 pytestmark = pytest.mark.integration
@@ -184,6 +188,33 @@ def _setup_implemented_opportunity(
 
 
 def db_session_expire(db: Session) -> None:
+    db.expire_all()
+
+
+def _execute_n_runs(
+    db: Session,
+    scan_id: uuid.UUID,
+    registry: ScriptedRegistry,
+    n: int,
+) -> None:
+    """Execute only the first N PromptRuns of a scan via _execute_run.
+
+    Leaves remaining runs PENDING (never claimed).  The scan must already
+    be RUNNING.  This simulates a REACHABLE stale scenario: worker claimed
+    and executed some runs, then crashed before claiming the rest.
+    """
+    runs = list(
+        db.execute(
+            select(PromptRun).where(PromptRun.scan_id == scan_id).order_by(PromptRun.id)
+        ).scalars()
+    )
+    execution = ScanExecutionService(
+        _factory(db),
+        registry=registry,  # type: ignore[arg-type]
+        settings=_settings(),
+    )
+    for i in range(n):
+        asyncio.run(execution._execute_run(runs[i].id))
     db.expire_all()
 
 
@@ -343,31 +374,23 @@ def test_stale_running_verification_partial_success_analyzes(
     """A stale RUNNING VERIFICATION scan with some successful runs is
     recovered to PARTIAL.
 
-    The successful evidence is preserved. Deterministic analysis +
-    evaluation run locally using only the persisted successful
-    observations.
+    REACHABLE scenario: worker claimed and executed 3 runs (SUCCEEDED with
+    full accounting), then crashed before claiming the remaining 2 runs
+    (stay PENDING).  Scan is left RUNNING (stale).  Recovery terminalizes
+    the 2 PENDING runs as FAILED, finalizes the scan as PARTIAL, and
+    runs deterministic analysis + evaluation using only the persisted
+    successful observations.
 
     No provider replay. No new UsageEvents from recovery.
     """
-    from app.providers.errors import ProviderResponseError
-
     ws, user, project, opp, _bl_scan, _bl_reg, _bl_disp = _setup_implemented_opportunity(
         db_session, prompt_count=5, key_suffix="pr"
     )
 
-    # Create a verification scan with mixed outcomes: 3 succeed, 2 fail.
+    # Create a verification scan — all runs start PENDING.
     ver_registry = _registry(
         [LLMProvider.OPENAI],
         mention_mode="brand",
-        outcomes={
-            LLMProvider.OPENAI: [
-                None,
-                None,
-                None,
-                ProviderResponseError("fail"),
-                ProviderResponseError("fail"),
-            ]
-        },
     )
     ver_dispatcher = FakeDispatcher()
     result = _create_verification(
@@ -376,42 +399,30 @@ def test_stale_running_verification_partial_success_analyzes(
     ver_scan_id = result.scan.id
     ver_id = result.verification.id
 
-    # Execute the scan — 3 succeed, 2 fail. Scan becomes PARTIAL or COMPLETED.
-    # But we need to simulate a stale RUNNING state. So execute partially:
-    # execute only 3 runs, then mark the scan RUNNING and stale.
-    # Actually, the easiest way is to execute all runs (which finalizes),
-    # then revert the scan to RUNNING with only the successful runs
-    # preserved and the failed ones reverted to RUNNING.
-
-    # Execute all runs normally.
-    _execute(db_session, ver_scan_id, ver_registry)
-    db_session_expire(db_session)
-
-    # After execution, the scan is finalized (PARTIAL since 3/5 succeeded).
+    # Set scan to RUNNING with stale started_at (simulates dispatched worker).
     scan = db_session.get(Scan, ver_scan_id)
     assert scan is not None
-    assert scan.status in (ScanStatus.PARTIAL, ScanStatus.COMPLETED)
-
-    # Now simulate a stale RUNNING state: revert the scan to RUNNING,
-    # and revert the 2 failed runs to RUNNING (unresolved).
     scan.status = ScanStatus.RUNNING
     scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
-    scan.completed_at = None
-    scan.successful_runs = 0
-    scan.failed_runs = 0
+    db_session.commit()
+    db_session_expire(db_session)
 
+    # Execute ONLY 3 runs; the remaining 2 stay PENDING (never claimed).
+    _execute_n_runs(db_session, ver_scan_id, ver_registry, n=3)
+    db_session_expire(db_session)
+
+    # Verify pre-recovery state: 3 SUCCEEDED, 2 PENDING, scan RUNNING.
+    scan = db_session.get(Scan, ver_scan_id)
+    assert scan is not None and scan.status == ScanStatus.RUNNING
     runs = list(
         db_session.execute(select(PromptRun).where(PromptRun.scan_id == ver_scan_id)).scalars()
     )
-    failed_runs = [r for r in runs if r.status == PromptRunStatus.FAILED]
-    for run in failed_runs:
-        run.status = PromptRunStatus.RUNNING
-        run.completed_at = None
-        run.error_code = None
-        run.error_message = None
-
-    db_session.commit()
-    db_session_expire(db_session)
+    succeeded = [r for r in runs if r.status == PromptRunStatus.SUCCEEDED]
+    pending = [r for r in runs if r.status == PromptRunStatus.PENDING]
+    assert len(succeeded) == 3
+    assert len(pending) == 2
+    for r in succeeded:
+        assert r.usage_event_id is not None
 
     # Capture pre-recovery economics.
     pre_provider_requests = _count_provider_requests(ver_registry)
@@ -445,7 +456,7 @@ def test_stale_running_verification_partial_success_analyzes(
     # No provider replay.
     assert _count_provider_requests(ver_registry) == pre_provider_requests
 
-    # No new UsageEvents from recovery.
+    # No new UsageEvents from recovery (PENDING → FAILED is zero-cost).
     assert _count_usage_events(db_session, ver_scan_id) == pre_usage_events
 
     # AI Checks unchanged (only successful runs have committed checks).
@@ -476,27 +487,23 @@ def test_analysis_failure_during_recovery_terminalizes(
     VERIFICATION scan, the verification MUST be terminalized as
     INCONCLUSIVE / ANALYSIS_NOT_COMPLETED.
 
-    Reuses Phase 10.3 durable-analysis reconciliation.
+    REACHABLE scenario: worker claimed and executed 3 runs (SUCCEEDED),
+    then crashed before claiming the remaining 2 (stay PENDING).  Scan
+    is left RUNNING (stale).  Recovery terminalizes the 2 PENDING runs
+    as FAILED, finalizes the scan as PARTIAL, and attempts analysis.
+    The patched _run_analysis raises, proving recovery reaches the
+    analysis phase.  The verification is terminalized as INCONCLUSIVE.
+
     No provider replay.
     """
-    from app.providers.errors import ProviderResponseError
-
     ws, user, project, opp, _bl_scan, _bl_reg, _bl_disp = _setup_implemented_opportunity(
         db_session, prompt_count=5, key_suffix="af"
     )
 
+    # Create a verification scan — all runs start PENDING.
     ver_registry = _registry(
         [LLMProvider.OPENAI],
         mention_mode="brand",
-        outcomes={
-            LLMProvider.OPENAI: [
-                None,
-                None,
-                None,
-                ProviderResponseError("fail"),
-                ProviderResponseError("fail"),
-            ]
-        },
     )
     ver_dispatcher = FakeDispatcher()
     result = _create_verification(
@@ -505,57 +512,16 @@ def test_analysis_failure_during_recovery_terminalizes(
     ver_scan_id = result.scan.id
     ver_id = result.verification.id
 
-    # Execute all runs, then simulate stale RUNNING.
-    _execute(db_session, ver_scan_id, ver_registry)
-    db_session_expire(db_session)
-
+    # Set scan to RUNNING with stale started_at (simulates dispatched worker).
     scan = db_session.get(Scan, ver_scan_id)
     assert scan is not None
     scan.status = ScanStatus.RUNNING
     scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
-    scan.completed_at = None
-    scan.successful_runs = 0
-    scan.failed_runs = 0
-
-    runs = list(
-        db_session.execute(select(PromptRun).where(PromptRun.scan_id == ver_scan_id)).scalars()
-    )
-    failed_runs = [r for r in runs if r.status == PromptRunStatus.FAILED]
-    for run in failed_runs:
-        run.status = PromptRunStatus.RUNNING
-        run.completed_at = None
-        run.error_code = None
-        run.error_message = None
-
     db_session.commit()
     db_session_expire(db_session)
 
-    # Revert the existing COMPLETED analysis to FAILED so recovery's
-    # analyze() retries it and actually calls _run_analysis (which we
-    # patch to raise). Use raw SQL to bypass ORM cache and ensure the
-    # update is committed to the database.
-    from app.models.analysis import ANALYSIS_VERSION
-
-    db_session.execute(
-        text(
-            "UPDATE scan_analyses SET status = 'FAILED', "
-            "failure_code = 'PRE_RECOVERY_RESET', "
-            "failure_message = 'Reset for recovery test' "
-            "WHERE scan_id = :sid AND analysis_version = :ver"
-        ),
-        {"sid": str(ver_scan_id), "ver": ANALYSIS_VERSION},
-    )
-    # Also revert the verification to PENDING so _reconcile_analysis_failure
-    # can terminalize it (it only acts on PENDING verifications).
-    db_session.execute(
-        text(
-            "UPDATE opportunity_verifications SET outcome = 'PENDING', "
-            "reason_code = NULL, evaluation_message = NULL, "
-            "evaluated_at = NULL WHERE id = :vid"
-        ),
-        {"vid": str(ver_id)},
-    )
-    db_session.commit()
+    # Execute ONLY 3 runs; the remaining 2 stay PENDING (never claimed).
+    _execute_n_runs(db_session, ver_scan_id, ver_registry, n=3)
     db_session_expire(db_session)
 
     pre_provider_requests = _count_provider_requests(ver_registry)
@@ -564,8 +530,11 @@ def test_analysis_failure_during_recovery_terminalizes(
     from app.services.scan_analysis_service import ScanAnalysisService
 
     original_run_analysis = ScanAnalysisService._run_analysis
+    analysis_called = False
 
     def exploding_run_analysis(self: ScanAnalysisService, scan: Scan, analysis: Any) -> Any:
+        nonlocal analysis_called
+        analysis_called = True
         raise RuntimeError("Unexpected analysis failure during recovery")
 
     ScanAnalysisService._run_analysis = exploding_run_analysis  # type: ignore[method-assign]
@@ -579,13 +548,16 @@ def test_analysis_failure_during_recovery_terminalizes(
         ScanAnalysisService._run_analysis = original_run_analysis  # type: ignore[method-assign]
     db_session_expire(db_session)
 
+    # _run_analysis was actually reached and called by recovery.
+    assert analysis_called, "Recovery did not reach the analysis phase."
+
     # Scan is PARTIAL.
     ver_scan = db_session.get(Scan, ver_scan_id)
     assert ver_scan is not None
     assert ver_scan.status == ScanStatus.PARTIAL
 
     # ScanAnalysis is FAILED (persisted by the failure transaction).
-    from app.models.analysis import ScanAnalysis
+    from app.models.analysis import ANALYSIS_VERSION, ScanAnalysis
 
     analysis = (
         db_session.execute(
@@ -624,9 +596,15 @@ def test_ephemeral_evaluation_error_during_recovery_preserves_pending(
     an unexpected transient error during recovery, the verification
     MAY remain PENDING for manual retry.
 
+    REACHABLE scenario: worker claimed and executed 4 runs (SUCCEEDED),
+    then crashed before claiming the remaining 1 (stays PENDING).  Scan
+    is left RUNNING (stale).  Recovery terminalizes the PENDING run as
+    FAILED, finalizes the scan as PARTIAL, runs analysis (COMPLETED),
+    and attempts evaluation — which raises an ephemeral error.  The
+    verification remains PENDING for manual retry.
+
     No provider replay.
     """
-
     ws, user, project, opp, _bl_scan, _bl_reg, _bl_disp = _setup_implemented_opportunity(
         db_session, prompt_count=5, key_suffix="ee"
     )
@@ -640,40 +618,16 @@ def test_ephemeral_evaluation_error_during_recovery_preserves_pending(
     ver_scan_id = result.scan.id
     ver_id = result.verification.id
 
-    # Execute all runs, then simulate stale RUNNING.
-    _execute(db_session, ver_scan_id, ver_registry)
-    db_session_expire(db_session)
-
+    # Set scan to RUNNING with stale started_at (simulates dispatched worker).
     scan = db_session.get(Scan, ver_scan_id)
     assert scan is not None
-    # Revert one run to RUNNING to make the scan stale.
     scan.status = ScanStatus.RUNNING
     scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
-    scan.completed_at = None
-    scan.successful_runs = 0
-    scan.failed_runs = 0
-
-    runs = list(
-        db_session.execute(select(PromptRun).where(PromptRun.scan_id == ver_scan_id)).scalars()
-    )
-    # Revert just one run to RUNNING.
-    runs[0].status = PromptRunStatus.RUNNING
-    runs[0].completed_at = None
-    runs[0].error_code = None
-    runs[0].error_message = None
-
     db_session.commit()
     db_session_expire(db_session)
 
-    # Revert the verification to PENDING so recovery's evaluation
-    # actually calls evaluate (which we patch to raise).
-    ver = db_session.get(OpportunityVerification, ver_id)
-    assert ver is not None
-    ver.outcome = VerificationOutcome.PENDING
-    ver.reason_code = None
-    ver.evaluation_message = None
-    ver.evaluated_at = None
-    db_session.commit()
+    # Execute ONLY 4 runs; the remaining 1 stays PENDING (never claimed).
+    _execute_n_runs(db_session, ver_scan_id, ver_registry, n=4)
     db_session_expire(db_session)
 
     pre_provider_requests = _count_provider_requests(ver_registry)
@@ -803,26 +757,20 @@ def test_recovery_economics_no_double_charge(db_session: Session) -> None:
     exactly once. Recovered unresolved runs get 0 AI Checks. No new
     UsageEvents from recovery analysis/evaluation. Reservation released.
     Provider call count unchanged.
-    """
-    from app.providers.errors import ProviderResponseError
 
+    REACHABLE scenario: worker claimed and executed 3 runs (SUCCEEDED with
+    full accounting), then crashed before claiming the remaining 2 (stay
+    PENDING).  Scan is left RUNNING (stale).  Recovery terminalizes the 2
+    PENDING runs as FAILED (zero-cost), finalizes the scan as PARTIAL.
+    """
     ws, user, project, opp, _bl_scan, _bl_reg, _bl_disp = _setup_implemented_opportunity(
         db_session, prompt_count=5, key_suffix="ec"
     )
 
-    # 3 succeed, 2 fail.
+    # Create a verification scan — all runs start PENDING.
     ver_registry = _registry(
         [LLMProvider.OPENAI],
         mention_mode="brand",
-        outcomes={
-            LLMProvider.OPENAI: [
-                None,
-                None,
-                None,
-                ProviderResponseError("fail"),
-                ProviderResponseError("fail"),
-            ]
-        },
     )
     ver_dispatcher = FakeDispatcher()
     result = _create_verification(
@@ -830,8 +778,16 @@ def test_recovery_economics_no_double_charge(db_session: Session) -> None:
     )
     ver_scan_id = result.scan.id
 
-    # Execute all runs.
-    _execute(db_session, ver_scan_id, ver_registry)
+    # Set scan to RUNNING with stale started_at (simulates dispatched worker).
+    scan = db_session.get(Scan, ver_scan_id)
+    assert scan is not None
+    scan.status = ScanStatus.RUNNING
+    scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+    db_session_expire(db_session)
+
+    # Execute ONLY 3 runs; the remaining 2 stay PENDING (never claimed).
+    _execute_n_runs(db_session, ver_scan_id, ver_registry, n=3)
     db_session_expire(db_session)
 
     # Capture post-execution economics.
@@ -839,33 +795,10 @@ def test_recovery_economics_no_double_charge(db_session: Session) -> None:
     post_exec_usage_events = _count_usage_events(db_session, ver_scan_id)
     post_exec_ai_checks = _count_ai_checks_committed(db_session, ver_scan_id)
 
-    # 3 successful runs → 3 UsageEvents, 3 AI Checks.
+    # 3 successful runs → 3 UsageEvents, 3 AI Checks, 3 provider calls.
     assert post_exec_usage_events == 3
     assert post_exec_ai_checks == 3
-    # 5 provider calls (3 succeeded + 2 failed).
-    assert post_exec_provider_requests == 5
-
-    # Simulate stale RUNNING: revert the 2 failed runs to RUNNING.
-    scan = db_session.get(Scan, ver_scan_id)
-    assert scan is not None
-    scan.status = ScanStatus.RUNNING
-    scan.started_at = datetime.now(UTC) - timedelta(minutes=10)
-    scan.completed_at = None
-    scan.successful_runs = 0
-    scan.failed_runs = 0
-
-    runs = list(
-        db_session.execute(select(PromptRun).where(PromptRun.scan_id == ver_scan_id)).scalars()
-    )
-    failed_runs = [r for r in runs if r.status == PromptRunStatus.FAILED]
-    for run in failed_runs:
-        run.status = PromptRunStatus.RUNNING
-        run.completed_at = None
-        run.error_code = None
-        run.error_message = None
-
-    db_session.commit()
-    db_session_expire(db_session)
+    assert post_exec_provider_requests == 3
 
     # Recover.
     ScanRecoveryService(
