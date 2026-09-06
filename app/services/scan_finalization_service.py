@@ -20,15 +20,23 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.core.enums import QuotaReservationStatus, ScanStatus, ScanType, VerificationOutcome
+from app.core.enums import (
+    PromptRunStatus,
+    ProviderErrorCode,
+    QuotaReservationStatus,
+    ScanStatus,
+    ScanType,
+    VerificationOutcome,
+)
 from app.core.exceptions import ConflictError, InfrastructureError
 from app.core.logging import get_logger
 from app.models.project import Project
 from app.models.quota_reservation import QuotaReservation
-from app.models.scan import Scan
+from app.models.scan import PromptRun, Scan
 from app.repositories.scan_repository import PromptRunRepository, ScanRepository
 from app.services.audit_service import AuditService
 from app.services.quota_service import QuotaService
@@ -543,6 +551,40 @@ class ScanRecoveryService:
                 self._session.commit()
                 return False
 
+        # Economic safety: check for RUNNING PromptRuns.
+        # A RUNNING PromptRun means the provider call may have started
+        # or completed.  We must NOT terminalize it as a generic FAILED
+        # with zero usage/cost, and we must NOT release the quota
+        # reservation as if the call never happened.
+        running_runs = list(
+            self._session.execute(
+                select(PromptRun).where(
+                    PromptRun.scan_id == scan.id,
+                    PromptRun.status == PromptRunStatus.RUNNING,
+                )
+            ).scalars()
+        )
+
+        if running_runs:
+            # Economically uncertain: at least one PromptRun is RUNNING,
+            # meaning the provider call may have been billed.
+            # Do NOT finalize, do NOT release quota, do NOT mark FAILED.
+            # Log for manual reconciliation.
+            logger.warning(
+                "stale_scan_recovery_economically_uncertain",
+                scan_id=str(scan.id),
+                running_prompt_runs=len(running_runs),
+                accountings_unresolved=[
+                    str(r.id)
+                    for r in running_runs
+                    if r.error_code == ProviderErrorCode.ACCOUNTING_UNRESOLVED
+                ],
+            )
+            self._session.commit()
+            return False
+
+        # Safe to terminalize: all remaining runs are PENDING (provider
+        # execution never started).
         self._runs.mark_unresolved_failed(
             scan.id,
             completed_at=current,

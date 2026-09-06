@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.enums import CostSource, LLMProvider, ProviderSurface
 from app.core.exceptions import PricingConfigurationError, PricingRuleNotFoundError
 from app.models.pricing import ProviderPriceRule
-from app.providers.base import ProviderResult
+from app.providers.base import ProviderFailureEvidence, ProviderResult, ProviderUsage
 
 _MILLION = Decimal("1000000")
 _THOUSAND = Decimal("1000")
@@ -117,15 +117,56 @@ class ProviderCostCalculator:
             pricing_rule_id=None,
         )
 
+    def calculate_failure(
+        self,
+        evidence: ProviderFailureEvidence,
+        rule: ProviderPriceRule | None,
+    ) -> CostComputation:
+        """Compute cost from failure evidence (case B).
+
+        Same pricing logic as calculate(), but sourced from
+        ProviderFailureEvidence instead of ProviderResult.  The failure
+        evidence has no provider_reported_cost_usd (providers do not report
+        cost in incomplete/empty responses), so only the price-rule path
+        is used.
+        """
+        calculated_cost, local_complete = self._calculate_local_from_usage(
+            evidence.usage, evidence.search_used, rule
+        )
+        if local_complete and calculated_cost is not None and rule is not None:
+            return CostComputation(
+                cost_usd=calculated_cost,
+                calculated_cost_usd=calculated_cost,
+                provider_reported_cost_usd=None,
+                source=CostSource.PRICE_RULE,
+                complete=True,
+                pricing_rule_id=rule.id,
+            )
+        return CostComputation(
+            cost_usd=None,
+            calculated_cost_usd=None,
+            provider_reported_cost_usd=None,
+            source=CostSource.UNKNOWN,
+            complete=False,
+            pricing_rule_id=None,
+        )
+
     def _calculate_local(
         self,
         result: ProviderResult,
         rule: ProviderPriceRule | None,
     ) -> tuple[Decimal | None, bool]:
+        return self._calculate_local_from_usage(result.usage, result.search_used, rule)
+
+    def _calculate_local_from_usage(
+        self,
+        usage: ProviderUsage,
+        search_used: bool,
+        rule: ProviderPriceRule | None,
+    ) -> tuple[Decimal | None, bool]:
         if rule is None:
             return None, False
 
-        usage = result.usage
         total = Decimal("0")
 
         input_tokens = usage.input_tokens
@@ -178,7 +219,7 @@ class ProviderCostCalculator:
         total += self._token_cost(usage.citation_tokens or 0, rule.citation_per_million_usd)
 
         if rule.search_per_1000_usd is not None:
-            if usage.search_requests is None and result.search_used:
+            if usage.search_requests is None and search_used:
                 return None, False
             total += Decimal(usage.search_requests or 0) * rule.search_per_1000_usd / _THOUSAND
 

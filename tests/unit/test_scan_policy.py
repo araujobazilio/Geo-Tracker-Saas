@@ -15,6 +15,7 @@ from app.providers.errors import (
     ProviderAuthenticationError,
     ProviderBadRequestError,
     ProviderConfigurationError,
+    ProviderContractViolationError,
     ProviderError,
     ProviderModeNotAllowedError,
     ProviderRateLimitError,
@@ -36,6 +37,7 @@ ERROR_CODE_CASES = (
     (ProviderResponseError, ProviderErrorCode.MALFORMED_RESPONSE),
     (ProviderSearchError, ProviderErrorCode.SEARCH_ERROR),
     (ProviderModeNotAllowedError, ProviderErrorCode.MODE_NOT_ALLOWED),
+    (ProviderContractViolationError, ProviderErrorCode.PROVIDER_CONTRACT_VIOLATION),
 )
 
 
