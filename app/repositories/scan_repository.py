@@ -9,7 +9,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.enums import PromptRunStatus, ProviderErrorCode, ScanStatus
+from app.core.exceptions import ConflictError
+from app.core.logging import get_logger
 from app.models.scan import PromptRun, ResponseSource, Scan
+
+logger = get_logger("app.scan_repository")
 
 
 class ScanRepository:
@@ -207,3 +211,60 @@ class ResponseSourceRepository:
         self._session.add_all(sources)
         self._session.flush()
         return sources
+
+    def create_batch_idempotent(self, sources: list[ResponseSource]) -> list[ResponseSource]:
+        """Persist ResponseSource rows idempotently.
+
+        For each (prompt_run_id, ordinal):
+        - If no existing row: create it.
+        - If existing row with same URL: no-op (same evidence).
+        - If existing row with different URL: raise ConflictError
+          (evidence conflict — fail-closed, do NOT silently overwrite).
+
+        This makes citation persistence safe for future reconciliation
+        over incident state where citations may already exist.
+        """
+        if not sources:
+            return []
+
+        # Collect all (prompt_run_id, ordinal) pairs to check.
+        run_ids = {s.prompt_run_id for s in sources}
+        existing: dict[tuple[uuid.UUID, int], ResponseSource] = {}
+        for run_id in run_ids:
+            rows = (
+                self._session.execute(
+                    select(ResponseSource).where(ResponseSource.prompt_run_id == run_id)
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                existing[(row.prompt_run_id, row.ordinal)] = row
+
+        new_sources: list[ResponseSource] = []
+        for src in sources:
+            key = (src.prompt_run_id, src.ordinal)
+            if key not in existing:
+                new_sources.append(src)
+            else:
+                existing_row = existing[key]
+                # URL is the minimum identity check.
+                if (existing_row.url or None) != (src.url or None):
+                    logger.warning(
+                        "citation_ordinal_conflict",
+                        prompt_run_id=str(src.prompt_run_id),
+                        ordinal=src.ordinal,
+                        existing_url=existing_row.url,
+                        incoming_url=src.url,
+                    )
+                    raise ConflictError(
+                        f"Citation ordinal conflict for prompt_run={src.prompt_run_id} "
+                        f"ordinal={src.ordinal}: existing_url={existing_row.url!r} "
+                        f"incoming_url={src.url!r}."
+                    )
+                # Same URL — no-op for this source.
+
+        if new_sources:
+            self._session.add_all(new_sources)
+            self._session.flush()
+        return new_sources

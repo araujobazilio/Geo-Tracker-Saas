@@ -32,10 +32,11 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.core.enums import LLMProvider, ProviderExecutionMode, ProviderSurface
-from app.providers.base import ProviderRequest, ProviderResult
+from app.providers.base import ProviderFailureEvidence, ProviderRequest, ProviderResult
 from app.providers.errors import (
     ProviderAuthenticationError,
     ProviderConfigurationError,
+    ProviderContractViolationError,
     ProviderRateLimitError,
     ProviderResponseError,
     ProviderSearchError,
@@ -767,3 +768,316 @@ async def test_response_id_parsed() -> None:
     result = await execute_with_transport(make_transport(handler), make_settings())
 
     assert result.provider_response_id == "resp_json_id"
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.5.10 — Provider failure evidence (case B)
+#
+# Responses that reached the provider and returned a valid envelope with
+# usage/IDs but are NOT functionally usable (empty text, incomplete status,
+# max_tool_calls violation) must carry ProviderFailureEvidence on the raised
+# ProviderResponseError / ProviderSearchError.
+# ---------------------------------------------------------------------------
+
+
+async def test_incomplete_response_carries_evidence() -> None:
+    """status=incomplete, incomplete_details.reason=max_output_tokens,
+    empty output_text, usage present -> ProviderResponseError with evidence."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_incomplete",
+                "model": "gpt-5.5",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+                "output_text": "",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 0,
+                    "total_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 20},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+            },
+            headers={"x-request-id": "req_incomplete_001"},
+        )
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await execute_with_transport(make_transport(handler), make_settings())
+
+    err = exc_info.value
+    assert err.evidence is not None
+    ev = err.evidence
+    assert isinstance(ev, ProviderFailureEvidence)
+    assert ev.provider == LLMProvider.OPENAI
+    assert ev.surface == ProviderSurface.OPENAI_RESPONSES_API
+    assert ev.execution_mode == ProviderExecutionMode.MODEL_ONLY
+    assert ev.requested_model == "gpt-5.5"
+    assert ev.returned_model == "gpt-5.5"
+    assert ev.provider_request_id == "req_incomplete_001"
+    assert ev.provider_response_id == "resp_incomplete"
+    assert ev.usage.input_tokens == 100
+    assert ev.usage.output_tokens == 0
+    assert ev.usage.cached_input_tokens == 20
+    assert ev.usage.reasoning_tokens == 0
+    assert ev.incomplete_reason == "max_output_tokens"
+    assert ev.max_tool_calls_violation is None
+    assert ev.latency_ms >= 0
+
+
+async def test_empty_output_with_usage_carries_evidence() -> None:
+    """output_text empty (no incomplete_details), usage/IDs present ->
+    ProviderResponseError with evidence preserving billable material."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_empty",
+                "model": "gpt-5.5",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": ""}],
+                    }
+                ],
+                "output_text": "",
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 0,
+                    "total_tokens": 50,
+                },
+            },
+            headers={"x-request-id": "req_empty_002"},
+        )
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await execute_with_transport(make_transport(handler), make_settings())
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.provider_request_id == "req_empty_002"
+    assert ev.provider_response_id == "resp_empty"
+    assert ev.usage.input_tokens == 50
+    assert ev.usage.output_tokens == 0
+    assert ev.incomplete_reason is None
+    assert ev.max_tool_calls_violation is None
+
+
+async def test_web_grounded_missing_search_carries_evidence() -> None:
+    """WEB_GROUNDED with no web_search_call but valid envelope ->
+    ProviderSearchError with evidence."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_nosearch_ev",
+                "model": "gpt-5.5",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "No search result", "annotations": []}
+                        ],
+                    }
+                ],
+                "usage": {"input_tokens": 30, "output_tokens": 5, "total_tokens": 35},
+            },
+            headers={"x-request-id": "req_nosearch_ev"},
+        )
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        await execute_with_transport(
+            make_transport(handler),
+            make_settings(),
+            mode=ProviderExecutionMode.WEB_GROUNDED,
+        )
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.provider_request_id == "req_nosearch_ev"
+    assert ev.provider_response_id == "resp_nosearch_ev"
+    assert ev.usage.input_tokens == 30
+    assert ev.search_used is False
+
+
+async def test_max_tool_calls_violation_detected() -> None:
+    """WEB_GROUNDED with search_requests=2 but max_tool_calls=1 ->
+    ProviderContractViolationError even when response_text is valid.
+    The count is NOT clamped.  Evidence carries requested and observed."""
+
+    settings = make_settings(openai_web_search_max_tool_calls=1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_violation",
+                "model": "gpt-5.5",
+                "output": [
+                    {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+                    {"type": "web_search_call", "id": "ws_2", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Result with 2 searches"}],
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 40,
+                    "output_tokens": 10,
+                    "total_tokens": 50,
+                },
+            },
+            headers={"x-request-id": "req_violation"},
+        )
+
+    with pytest.raises(ProviderContractViolationError) as exc_info:
+        await execute_with_transport(
+            make_transport(handler),
+            settings,
+            mode=ProviderExecutionMode.WEB_GROUNDED,
+        )
+
+    err = exc_info.value
+    assert err.evidence is not None
+    ev = err.evidence
+    # Count is preserved, NOT clamped.
+    assert ev.usage.search_requests == 2
+    assert ev.observed_search_requests == 2
+    # Requested limit is snapshotted for historical auditability.
+    assert ev.requested_max_tool_calls == 1
+    assert ev.max_tool_calls_violation == 2
+    # IDs preserved.
+    assert ev.provider_request_id == "req_violation"
+    assert ev.provider_response_id == "resp_violation"
+    # Usage preserved.
+    assert ev.usage.input_tokens == 40
+    assert ev.usage.output_tokens == 10
+    # Error message is deterministic and contains both values.
+    assert "requested=1" in err.message
+    assert "observed=2" in err.message
+
+
+async def test_max_tool_calls_violation_with_empty_text_carries_evidence() -> None:
+    """WEB_GROUNDED with search_requests=2 (max=1) AND empty text ->
+    ProviderResponseError with evidence including max_tool_calls_violation."""
+
+    settings = make_settings(openai_web_search_max_tool_calls=1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_violation_empty",
+                "model": "gpt-5.5",
+                "output": [
+                    {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+                    {"type": "web_search_call", "id": "ws_2", "status": "completed"},
+                ],
+                "output_text": "",
+                "usage": {
+                    "input_tokens": 40,
+                    "output_tokens": 0,
+                    "total_tokens": 40,
+                },
+            },
+            headers={"x-request-id": "req_violation_empty"},
+        )
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await execute_with_transport(
+            make_transport(handler),
+            settings,
+            mode=ProviderExecutionMode.WEB_GROUNDED,
+        )
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.usage.search_requests == 2
+    assert ev.max_tool_calls_violation == 2
+    assert ev.requested_max_tool_calls == 1
+    assert ev.observed_search_requests == 2
+    # Count is NOT clamped.
+    assert ev.usage.search_requests != 1
+
+
+async def test_incomplete_status_without_details_gets_generic_reason() -> None:
+    """status=incomplete but no incomplete_details -> incomplete_reason='incomplete'."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_inc_no_details",
+                "model": "gpt-5.5",
+                "status": "incomplete",
+                "output_text": "",
+                "usage": {"input_tokens": 10, "output_tokens": 0, "total_tokens": 10},
+            },
+            headers={"x-request-id": "req_inc_no_details"},
+        )
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await execute_with_transport(make_transport(handler), make_settings())
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.incomplete_reason == "incomplete"
+
+
+async def test_pre_provider_error_has_no_evidence() -> None:
+    """401 error (case A — before any billable response) -> no evidence."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    with pytest.raises(ProviderAuthenticationError) as exc_info:
+        await execute_with_transport(make_transport(handler), make_settings())
+
+    assert exc_info.value.evidence is None
+
+
+async def test_timeout_error_has_no_evidence() -> None:
+    """Timeout (case A) -> no evidence."""
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("timed out")
+
+    with pytest.raises(ProviderTimeoutError) as exc_info:
+        await execute_with_transport(make_transport(timeout_handler), make_settings())
+
+    assert exc_info.value.evidence is None
+
+
+async def test_evidence_does_not_contain_raw_body() -> None:
+    """ProviderFailureEvidence must not expose raw response body or API key.
+    It only carries structured fields."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_safe",
+                "model": "gpt-5.5",
+                "output_text": "",
+                "usage": {"input_tokens": 5, "output_tokens": 0, "total_tokens": 5},
+                # Hypothetical sensitive field that should NOT leak
+                "secret_internal": "should-not-leak",
+            },
+            headers={"x-request-id": "req_safe"},
+        )
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await execute_with_transport(make_transport(handler), make_settings())
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    # Evidence is a frozen dataclass with only typed fields — no raw body.
+    assert not hasattr(ev, "raw_body")
+    assert not hasattr(ev, "response_body")
+    # Check it doesn't have a metadata/dict field that could leak.
+    assert not hasattr(ev, "metadata")

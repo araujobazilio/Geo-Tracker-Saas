@@ -27,12 +27,14 @@ from app.core.enums import LLMProvider, ProviderExecutionMode, ProviderSurface
 from app.providers.base import (
     ProviderCapabilities,
     ProviderCitation,
+    ProviderFailureEvidence,
     ProviderRequest,
     ProviderResult,
     ProviderUsage,
 )
 from app.providers.errors import (
     ProviderConfigurationError,
+    ProviderContractViolationError,
     ProviderModeNotAllowedError,
     ProviderResponseError,
     ProviderSearchError,
@@ -158,7 +160,19 @@ class OpenAIProviderAdapter:
         provider_response_id = data.get("id")
         returned_model = data.get("model")
 
-        # 6. Parse output text.
+        # 6. Parse incomplete_details (if present) BEFORE any validation
+        #    that might raise.  This is billable evidence.
+        incomplete_reason: str | None = None
+        incomplete_details = data.get("incomplete_details")
+        if isinstance(incomplete_details, dict):
+            reason = incomplete_details.get("reason")
+            if isinstance(reason, str) and reason:
+                incomplete_reason = reason
+        status_field = data.get("status")
+        if isinstance(status_field, str) and status_field == "incomplete" and not incomplete_reason:
+            incomplete_reason = "incomplete"
+
+        # 7. Parse output text.
         output_text = data.get("output_text")
         if not output_text:
             parts: list[str] = []
@@ -173,13 +187,6 @@ class OpenAIProviderAdapter:
                         if isinstance(text, str):
                             parts.append(text)
             output_text = "".join(parts)
-
-        # 7. Validate response_text is not empty.
-        if not output_text or not output_text.strip():
-            raise ProviderResponseError(
-                "OpenAI returned an empty response text.",
-                provider=LLMProvider.OPENAI.value,
-            )
 
         # 8. Parse citations from inline url_citation annotations AND
         #    web_search_call.action.sources. Deduplicate by URL.
@@ -268,16 +275,79 @@ class OpenAIProviderAdapter:
             search_requests=search_requests,
         )
 
-        # 10. Verify WEB_GROUNDED actually performed search.
         search_used = bool(web_search_calls)
+
+        # 9b. Detect max_tool_calls contract violation: the provider returned
+        #     more web_search_call items than the configured limit.  Do NOT
+        #     clamp the count — preserve the raw evidence.  This violation is
+        #     raised even when response_text is valid, because the provider
+        #     did not respect the bounds of the execution request.
+        configured_max_tool_calls = self._settings.openai_web_search_max_tool_calls
+        max_tool_calls_violation: int | None = None
+        if (
+            request.mode == ProviderExecutionMode.WEB_GROUNDED
+            and search_requests is not None
+            and search_requests > configured_max_tool_calls
+        ):
+            max_tool_calls_violation = search_requests
+
+        latency_ms = timer.elapsed_ms()
+
+        # 10. Build failure evidence for responses that have a valid envelope
+        #     but are NOT functionally usable.  This must happen BEFORE raising
+        #     so the exception carries billable evidence.
+        def _build_evidence() -> ProviderFailureEvidence:
+            return ProviderFailureEvidence(
+                provider=LLMProvider.OPENAI,
+                surface=ProviderSurface.OPENAI_RESPONSES_API,
+                execution_mode=request.mode,
+                requested_model=model,
+                returned_model=returned_model,
+                provider_request_id=provider_request_id,
+                provider_response_id=provider_response_id,
+                usage=usage,
+                citations=tuple(citations),
+                latency_ms=latency_ms,
+                search_used=search_used,
+                incomplete_reason=incomplete_reason,
+                max_tool_calls_violation=max_tool_calls_violation,
+                requested_max_tool_calls=(
+                    configured_max_tool_calls
+                    if request.mode == ProviderExecutionMode.WEB_GROUNDED
+                    else None
+                ),
+                observed_search_requests=search_requests,
+            )
+
+        # 11. Validate response_text is not empty.
+        if not output_text or not output_text.strip():
+            raise ProviderResponseError(
+                "OpenAI returned an empty response text.",
+                provider=LLMProvider.OPENAI.value,
+                evidence=_build_evidence(),
+            )
+
+        # 12. Verify WEB_GROUNDED actually performed search.
         if request.mode == ProviderExecutionMode.WEB_GROUNDED and not search_used:
             raise ProviderSearchError(
                 "OpenAI WEB_GROUNDED mode was requested but no web search call "
                 "was observed in the response.",
                 provider=LLMProvider.OPENAI.value,
+                evidence=_build_evidence(),
             )
 
-        latency_ms = timer.elapsed_ms()
+        # 12b. Verify WEB_GROUNDED did not exceed the configured max_tool_calls.
+        #      This is a provider contract violation — the provider returned a
+        #      billable response but did not respect the execution bounds.
+        #      The PromptRun MUST be FAILED even if response_text is valid.
+        if max_tool_calls_violation is not None:
+            raise ProviderContractViolationError(
+                f"OpenAI exceeded requested max_tool_calls: "
+                f"requested={configured_max_tool_calls} "
+                f"observed={search_requests}.",
+                provider=LLMProvider.OPENAI.value,
+                evidence=_build_evidence(),
+            )
 
         result = ProviderResult(
             provider=LLMProvider.OPENAI,

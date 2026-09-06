@@ -126,6 +126,68 @@ class ProviderResult:
     metadata: Mapping[str, str | int | float | bool | None] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ProviderFailureEvidence:
+    """Evidence from a provider response that was received (HTTP 200 with a
+    parseable envelope) but is NOT a successful functional result.
+
+    This carries the billable/audit material that must be persisted even
+    when the PromptRun is marked FAILED:
+
+    - provider_request_id / provider_response_id: identifiers returned by
+      the provider for support/accounting traceability.
+    - returned_model: the model the provider actually used (may differ from
+      requested_model).
+    - usage: normalized token counts (input, output, cached, reasoning,
+      search_requests, etc.).  None fields mean the provider did not
+      report them — never invent values.
+    - citations: sources returned by the provider (preserved for audit even
+      on failure).
+    - latency_ms: measured round-trip latency.
+    - search_used: whether any web_search_call was observed.
+    - incomplete_reason: sanitized reason string when the provider reports
+      an incomplete response (e.g. "max_output_tokens").  None if the
+      response was nominally complete but still empty/unusable.
+    - max_tool_calls_violation: when the provider returned more
+      web_search_call items than the configured limit, this holds the
+      observed count (the raw count is also in usage.search_requests).
+      None when no violation was detected.
+    - requested_max_tool_calls: the max_tool_calls limit that was sent in
+      the request to the provider.  None when the request did not include
+      max_tool_calls (e.g. MODEL_ONLY mode).  This is essential for
+      historical auditability — it allows proving what limit was in force
+      at execution time, even if the configuration changes later.
+    - observed_search_requests: the raw count of web_search_call items
+      observed in the response.  Same value as usage.search_requests when
+      present, but explicitly named for contract violation auditing.
+      None when no web_search_call items were observed.
+
+    IMPORTANT:
+    - This object MUST NOT contain API keys, Authorization headers, or
+      raw response bodies.
+    - It MUST NOT contain chain-of-thought/reasoning text.
+    - It is distinct from ProviderResult: ProviderResult represents a
+      SUCCEEDED execution; ProviderFailureEvidence represents a FAILED
+      execution that still has billable evidence.
+    """
+
+    provider: LLMProvider
+    surface: ProviderSurface
+    execution_mode: ProviderExecutionMode
+    requested_model: str
+    returned_model: str | None
+    provider_request_id: str | None
+    provider_response_id: str | None
+    usage: ProviderUsage
+    citations: tuple[ProviderCitation, ...]
+    latency_ms: int
+    search_used: bool
+    incomplete_reason: str | None = None
+    max_tool_calls_violation: int | None = None
+    requested_max_tool_calls: int | None = None
+    observed_search_requests: int | None = None
+
+
 @runtime_checkable
 class ProviderAdapter(Protocol):
     """Protocol for provider adapters.

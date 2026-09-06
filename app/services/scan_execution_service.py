@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -15,24 +16,104 @@ from app.core.enums import (
     PromptRunStatus,
     ProviderErrorCode,
     ProviderExecutionMode,
+    ProviderSurface,
     QuotaReservationStatus,
     ScanStatus,
     ScanType,
 )
 from app.core.logging import get_logger
 from app.models.quota_reservation import QuotaReservation
-from app.models.scan import PromptRun, Scan
+from app.models.scan import PromptRun, ResponseSource, Scan
 from app.models.tracking import Prompt
-from app.providers.base import ProviderRequest
-from app.providers.errors import ProviderError, ProviderResponseError
+from app.providers.base import (
+    ProviderCitation,
+    ProviderFailureEvidence,
+    ProviderRequest,
+    ProviderResult,
+    ProviderUsage,
+)
+from app.providers.errors import ProviderError
 from app.providers.registry import ProviderRegistry
-from app.repositories.scan_repository import PromptRunRepository, ScanRepository
+from app.repositories.scan_repository import (
+    PromptRunRepository,
+    ResponseSourceRepository,
+    ScanRepository,
+)
 from app.services.audit_service import AuditService
 from app.services.prompt_run_result_recorder import PromptRunResultRecorder
 from app.services.scan_finalization_service import ScanFinalizationService
-from app.services.scanning.errors import map_provider_error, safe_error_message
+from app.services.scanning.errors import (
+    enrich_error_message,
+    map_provider_error,
+    safe_error_message,
+)
 
 logger = get_logger("app.scan_execution")
+
+
+@dataclass(frozen=True)
+class AccountingIncidentEvidence:
+    """Normalized evidence for ACCOUNTING_UNRESOLVED incident persistence.
+
+    Common shape extracted from either ProviderResult (success path) or
+    ProviderFailureEvidence (failure path) so that a single
+    _record_accounting_unresolved implementation can persist both.
+    """
+
+    provider: LLMProvider
+    surface: ProviderSurface
+    execution_mode: ProviderExecutionMode
+    requested_model: str
+    returned_model: str | None
+    provider_request_id: str | None
+    provider_response_id: str | None
+    latency_ms: int
+    search_used: bool
+    usage: ProviderUsage
+    response_text: str | None = None
+    citations: tuple[ProviderCitation, ...] = field(default_factory=tuple)
+    incomplete_reason: str | None = None
+    requested_max_tool_calls: int | None = None
+    observed_search_requests: int | None = None
+
+    @classmethod
+    def from_result(cls, result: ProviderResult) -> AccountingIncidentEvidence:
+        """Normalize a ProviderResult into incident evidence."""
+        return cls(
+            provider=result.provider,
+            surface=result.surface,
+            execution_mode=result.execution_mode,
+            requested_model=result.requested_model,
+            returned_model=result.returned_model,
+            provider_request_id=result.provider_request_id,
+            provider_response_id=result.provider_response_id,
+            latency_ms=result.latency_ms,
+            search_used=result.search_used,
+            usage=result.usage,
+            response_text=result.response_text,
+            citations=result.citations,
+        )
+
+    @classmethod
+    def from_failure_evidence(cls, evidence: ProviderFailureEvidence) -> AccountingIncidentEvidence:
+        """Normalize ProviderFailureEvidence into incident evidence."""
+        return cls(
+            provider=evidence.provider,
+            surface=evidence.surface,
+            execution_mode=evidence.execution_mode,
+            requested_model=evidence.requested_model,
+            returned_model=evidence.returned_model,
+            provider_request_id=evidence.provider_request_id,
+            provider_response_id=evidence.provider_response_id,
+            latency_ms=evidence.latency_ms,
+            search_used=evidence.search_used,
+            usage=evidence.usage,
+            response_text=None,
+            citations=evidence.citations,
+            incomplete_reason=evidence.incomplete_reason,
+            requested_max_tool_calls=evidence.requested_max_tool_calls,
+            observed_search_requests=evidence.observed_search_requests,
+        )
 
 
 class ScanExecutionService:
@@ -106,13 +187,54 @@ class ScanExecutionService:
             await self._execute_run_ids(run_ids)
 
     async def _execute_run_ids(self, run_ids: list[uuid.UUID]) -> None:
-        semaphore = asyncio.Semaphore(self._settings.scan_max_concurrency)
+        """Execute runs with bounded concurrency and economic fail-closed.
 
-        async def bounded(run_id: uuid.UUID) -> None:
-            async with semaphore:
-                await self._execute_run(run_id)
+        Uses explicit task creation + asyncio.wait(FIRST_COMPLETED) instead of
+        asyncio.gather to ensure:
 
-        await asyncio.gather(*(bounded(run_id) for run_id in run_ids))
+        - At most ``scan_max_concurrency`` provider calls are in-flight.
+        - When a fatal accounting error occurs, NO new provider calls start.
+        - Already-started provider calls are NOT cancelled (they may have
+          been billed by the provider).  They are awaited and their results
+          are processed normally.
+        - After all in-flight tasks complete, the fatal error is propagated.
+        - No background tasks remain after this method returns/raises.
+        """
+        from collections import deque
+
+        max_concurrency = self._settings.scan_max_concurrency
+        pending = deque(run_ids)
+        active: set[asyncio.Task[None]] = set()
+        fatal_errors: list[BaseException] = []
+        stop_scheduling = False
+
+        # Fill up to max_concurrency initially.
+        while not stop_scheduling and pending and len(active) < max_concurrency:
+            run_id = pending.popleft()
+            task = asyncio.create_task(self._execute_run(run_id))
+            active.add(task)
+
+        while active:
+            done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    # Fatal accounting/infrastructure error.
+                    # Stop scheduling new calls; do NOT cancel in-flight tasks.
+                    fatal_errors.append(exc)
+                    stop_scheduling = True
+
+            # Refill only if no fatal error has been observed.
+            if not stop_scheduling:
+                while pending and len(active) < max_concurrency:
+                    run_id = pending.popleft()
+                    task = asyncio.create_task(self._execute_run(run_id))
+                    active.add(task)
+
+        # All in-flight tasks have completed.  Propagate fatal errors.
+        if fatal_errors:
+            raise fatal_errors[0]
 
     def _claim_scan(self, scan_id: uuid.UUID) -> bool:
         with self._factory() as session:
@@ -233,6 +355,21 @@ class ScanExecutionService:
             adapter = self._registry.get(LLMProvider(run_snapshot.provider))
             result = await adapter.execute(request)
         except ProviderError as exc:
+            # Case B: provider returned a billable response envelope but the
+            # functional result is unusable (empty text, incomplete, missing
+            # search, max_tool_calls violation).  The exception carries
+            # ProviderFailureEvidence — persist it atomically with usage/cost
+            # and commit one AI Check to quota.
+            if exc.evidence is not None:
+                self._record_failure_with_evidence(
+                    run_id,
+                    exc.evidence,
+                    map_provider_error(exc),
+                    enrich_error_message(safe_error_message(exc), exc.evidence),
+                )
+                return
+            # Case A: error before any billable response (config, auth, 429,
+            # timeout, 5xx, transport).  No usage, no cost, no AI Check.
             self._record_failure(run_id, map_provider_error(exc), safe_error_message(exc))
             return
         except Exception as exc:
@@ -251,23 +388,187 @@ class ScanExecutionService:
         try:
             with self._factory() as session:
                 PromptRunResultRecorder(session).record(run_id, result)
-        except ProviderResponseError as exc:
-            self._record_failure(
-                run_id,
-                ProviderErrorCode.MALFORMED_RESPONSE,
-                safe_error_message(exc),
-            )
         except Exception as exc:
+            # Case C: ProviderResult was obtained (billable response), but
+            # durable accounting failed.  This is NOT a provider failure —
+            # it is an accounting incident.  Persist ACCOUNTING_UNRESOLVED
+            # in a new session, keep the PromptRun RUNNING, and propagate
+            # the exception so the scheduler marks fatal state and
+            # finalize() is never called.
             logger.exception(
-                "prompt_run_accounting_failure",
+                "prompt_run_success_accounting_failure",
                 prompt_run_id=str(run_id),
                 error_type=type(exc).__name__,
+                provider=result.provider.value,
+                requested_model=result.requested_model,
+                provider_request_id=result.provider_request_id,
+                provider_response_id=result.provider_response_id,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                reasoning_tokens=result.usage.reasoning_tokens,
+                search_requests=result.usage.search_requests,
             )
-            self._record_failure(
+            self._record_accounting_unresolved(
                 run_id,
-                ProviderErrorCode.ACCOUNTING_ERROR,
-                "Provider result could not be durably recorded.",
+                AccountingIncidentEvidence.from_result(result),
+                original_error_type=type(exc).__name__,
             )
+            raise
+
+    def _record_failure_with_evidence(
+        self,
+        run_id: uuid.UUID,
+        evidence: ProviderFailureEvidence,
+        error_code: ProviderErrorCode,
+        error_message: str,
+    ) -> None:
+        """Persist billable failure evidence (case B).
+
+        Delegates to PromptRunResultRecorder.record_failure_evidence in a
+        fresh session.  If the recorder fails (e.g. pricing rule missing,
+        quota conflict), an ACCOUNTING_UNRESOLVED incident marker is
+        persisted in a separate session — preserving as much evidence as
+        possible without faking quota commit or UsageEvent.  The PromptRun
+        remains RUNNING with error_code=ACCOUNTING_UNRESOLVED.
+
+        The original exception is then re-raised so it propagates to
+        execute_scan and prevents finalization.
+        """
+        try:
+            with self._factory() as session:
+                PromptRunResultRecorder(session).record_failure_evidence(
+                    run_id, evidence, error_code=error_code, error_message=error_message
+                )
+        except Exception:
+            # Sanitized structured log for operational evidence.
+            logger.exception(
+                "prompt_run_failure_evidence_accounting_failure",
+                prompt_run_id=str(run_id),
+                provider=evidence.provider.value,
+                requested_model=evidence.requested_model,
+                provider_request_id=evidence.provider_request_id,
+                provider_response_id=evidence.provider_response_id,
+                input_tokens=evidence.usage.input_tokens,
+                output_tokens=evidence.usage.output_tokens,
+                reasoning_tokens=evidence.usage.reasoning_tokens,
+                search_requests=evidence.usage.search_requests,
+                incomplete_reason=evidence.incomplete_reason,
+                requested_max_tool_calls=evidence.requested_max_tool_calls,
+                observed_search_requests=evidence.observed_search_requests,
+            )
+            # Attempt to persist an ACCOUNTING_UNRESOLVED incident marker
+            # in a separate session.  This preserves evidence without
+            # faking quota commit or UsageEvent.
+            self._record_accounting_unresolved(
+                run_id,
+                AccountingIncidentEvidence.from_failure_evidence(evidence),
+            )
+            # Re-raise the original exception so it propagates and
+            # prevents finalization.
+            raise
+
+    def _record_accounting_unresolved(
+        self,
+        run_id: uuid.UUID,
+        evidence: AccountingIncidentEvidence,
+        original_error_type: str | None = None,
+    ) -> None:
+        """Persist an ACCOUNTING_UNRESOLVED incident marker.
+
+        Uses a fresh session (separate from the failed recorder session).
+        Persists available evidence fields on the PromptRun WITHOUT:
+        - creating a UsageEvent
+        - committing quota
+        - faking cost_source or pricing_rule_id
+        - marking the run SUCCEEDED or terminally FAILED
+
+        The PromptRun remains RUNNING with error_code=ACCOUNTING_UNRESOLVED
+        so that stale recovery can distinguish this from an ordinary crash.
+
+        Citations are persisted idempotently: existing (prompt_run_id, ordinal)
+        pairs are skipped to avoid IntegrityError on future reconciliation.
+        """
+        try:
+            with self._factory() as session:
+                runs = PromptRunRepository(session)
+                run = runs.get_for_update(run_id)
+                if run is None or run.status != PromptRunStatus.RUNNING:
+                    session.commit()
+                    return
+                # Persist available evidence without faking accounting.
+                run.provider_request_id = evidence.provider_request_id
+                run.provider_response_id = evidence.provider_response_id
+                run.returned_model = evidence.returned_model
+                run.latency_ms = evidence.latency_ms
+                run.search_used = evidence.search_used
+                run.input_tokens = evidence.usage.input_tokens
+                run.output_tokens = evidence.usage.output_tokens
+                run.total_tokens = evidence.usage.total_tokens
+                run.cached_input_tokens = evidence.usage.cached_input_tokens
+                run.cache_write_input_tokens = evidence.usage.cache_write_input_tokens
+                run.reasoning_tokens = evidence.usage.reasoning_tokens
+                run.citation_tokens = evidence.usage.citation_tokens
+                run.search_requests = evidence.usage.search_requests
+                # Persist response_text if available (from ProviderResult).
+                if evidence.response_text is not None:
+                    run.response_text = evidence.response_text
+                # Do NOT set cost fields — cost was not durably calculated.
+                # Do NOT set usage_event_id — no UsageEvent was created.
+                # Do NOT set pricing_rule_id — pricing was not resolved.
+                run.error_code = ProviderErrorCode.ACCOUNTING_UNRESOLVED
+                # Build sanitized deterministic error message.
+                msg = (
+                    "Accounting unresolved after provider response. Manual reconciliation required."
+                )
+                if original_error_type:
+                    msg = f"{msg} original_error_type={original_error_type}."
+                run.error_message = msg[:1000]
+                # PromptRun.status remains RUNNING — not terminalized.
+
+                # Persist citations idempotently: skip existing ordinals.
+                if evidence.citations:
+                    self._persist_citations_idempotent(session, run.id, evidence.citations)
+
+                session.commit()
+        except Exception:
+            # If incident persistence also fails, log and continue.
+            # The original exception will propagate regardless.
+            logger.exception(
+                "accounting_unresolved_incident_persistence_failure",
+                prompt_run_id=str(run_id),
+                provider=evidence.provider.value,
+                provider_request_id=evidence.provider_request_id,
+                provider_response_id=evidence.provider_response_id,
+            )
+
+    def _persist_citations_idempotent(
+        self,
+        session: Session,
+        run_id: uuid.UUID,
+        citations: tuple[ProviderCitation, ...],
+    ) -> None:
+        """Persist ResponseSource rows idempotently via the shared authority.
+
+        Delegates to ResponseSourceRepository.create_batch_idempotent which
+        handles:
+        - skip existing (prompt_run_id, ordinal) with same URL
+        - raise ConflictError on URL mismatch (evidence conflict)
+        - create new ordinals
+        """
+        sources = [
+            ResponseSource(
+                prompt_run_id=run_id,
+                ordinal=ordinal,
+                url=citation.url,
+                title=citation.title,
+                source_type=citation.source_type,
+                start_index=citation.start_index,
+                end_index=citation.end_index,
+                cited_text=citation.cited_text,
+            )
+            for ordinal, citation in enumerate(citations, start=1)
+        ]
+        ResponseSourceRepository(session).create_batch_idempotent(sources)
 
     def _claim_run(self, run_id: uuid.UUID) -> tuple[PromptRun, Prompt] | None:
         with self._factory() as session:
