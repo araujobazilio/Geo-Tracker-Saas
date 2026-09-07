@@ -494,6 +494,13 @@ async def test_usage_with_search_requests() -> None:
     assert result.usage.search_requests == 3
     assert result.usage.input_tokens == 12
     assert result.usage.output_tokens == 8
+    # Provider-reported search count is the explicit billable authority too.
+    assert result.usage.search_action_count == 3
+    # Anthropic exposes no per-item action breakdown; never fabricate it.
+    assert result.usage.web_tool_call_count is None
+    assert result.usage.open_page_action_count is None
+    assert result.usage.find_in_page_action_count is None
+    assert result.usage.unknown_web_action_count is None
 
 
 # ---------------------------------------------------------------------------

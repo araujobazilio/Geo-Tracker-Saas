@@ -275,3 +275,31 @@ All four adapters transmit `max_output_tokens` where supported.
 - This is a **consistency requirement for measurement reproducibility**.
 - Without bounded output, response length variance between providers would
   confound cross-provider comparison.
+
+---
+
+## 18. Web Tool Action Semantics (OpenAI)
+
+OpenAI `web_search_call` output items carry `action.type` in
+{`search`, `open_page`, `find_in_page`}. These are **not** all billable
+web-search calls.
+
+- **`max_tool_calls`** bounds the **total** number of built-in tool calls
+  (across all built-in tools). The adapter enforces this using
+  `web_tool_call_count` (total `web_search_call` items), **not**
+  `search_action_count`.
+- **Billing authority** is `search_action_count` (items with
+  `action.type == "search"`). Only `search` is documented as incurring a
+  web-search tool-call cost.
+- `open_page` and `find_in_page` are tracked separately and are **not**
+  billed under the search tariff.
+- Items with a missing or unrecognized `action.type` are counted as
+  `unknown_web_action_count`. When any unknown action is present, the cost
+  calculation is **fail-closed** (incomplete) — the adapter never assumes
+  an unknown action is non-billable without authoritative documentation.
+- The legacy `search_requests` counter equals `web_tool_call_count` (the
+  total) and is preserved for backward compatibility but is **never** used
+  for billing.
+- The invariant `web_tool_call_count = search + open_page + find_in_page +
+  unknown` holds whenever all five counters are non-NULL. Historical rows
+  with NULL counters remain readable and are not reinterpreted.

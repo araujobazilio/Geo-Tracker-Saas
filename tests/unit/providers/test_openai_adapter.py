@@ -1081,3 +1081,271 @@ async def test_evidence_does_not_contain_raw_body() -> None:
     assert not hasattr(ev, "response_body")
     # Check it doesn't have a metadata/dict field that could leak.
     assert not hasattr(ev, "metadata")
+
+
+# ---------------------------------------------------------------------------
+# Web tool evidence & billing split (Phase 13.5.12G)
+#
+# Every ``web_search_call`` output item is one built-in tool call processed by
+# OpenAI and counts toward ``max_tool_calls`` (bound authority =
+# web_tool_call_count).  Only ``action.type == "search"`` is a documented
+# billable web-search call (billing authority = search_action_count).
+# Legacy ``search_requests`` == web_tool_call_count for compatibility.
+# ---------------------------------------------------------------------------
+
+
+def _ws(item_id: str, action_type: str | None) -> dict[str, Any]:
+    item: dict[str, Any] = {"type": "web_search_call", "id": item_id, "status": "completed"}
+    if action_type is not None:
+        item["action"] = {"type": action_type}
+    return item
+
+
+def _web_response(*items: dict[str, Any], text: str = "grounded answer") -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "id": "resp_web",
+            "model": "gpt-5.5",
+            "output": [
+                *items,
+                {"type": "message", "content": [{"type": "output_text", "text": text}]},
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        },
+        headers={"x-request-id": "req_web"},
+    )
+
+
+async def test_two_search_actions_within_bound() -> None:
+    """2 search, max=2 ? total=2, search=2, legacy=2, no violation."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(_ws("ws_1", "search"), _ws("ws_2", "search"))
+
+    result = await execute_with_transport(
+        make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+    )
+
+    u = result.usage
+    assert u.web_tool_call_count == 2
+    assert u.search_action_count == 2
+    assert u.open_page_action_count == 0
+    assert u.find_in_page_action_count == 0
+    assert u.unknown_web_action_count == 0
+    assert u.search_requests == 2  # legacy == total
+    assert result.search_used is True
+
+
+async def test_one_search_one_open_page_within_bound() -> None:
+    """1 search + 1 open_page, max=2 ? total=2 (no violation), billable search=1."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(_ws("ws_1", "search"), _ws("ws_2", "open_page"))
+
+    result = await execute_with_transport(
+        make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+    )
+
+    u = result.usage
+    assert u.web_tool_call_count == 2
+    assert u.search_action_count == 1
+    assert u.open_page_action_count == 1
+    assert u.find_in_page_action_count == 0
+    assert u.unknown_web_action_count == 0
+    assert u.search_requests == 2  # legacy is TOTAL, not billable count
+
+
+async def test_search_open_find_exceeds_bound_even_with_one_billable_search() -> None:
+    """1 search + 1 open_page + 1 find_in_page, max=2 ? total=3 ? violation.
+    Billable search component remains 1."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(
+        _ws("ws_1", "search"), _ws("ws_2", "open_page"), _ws("ws_3", "find_in_page")
+    )
+
+    with pytest.raises(ProviderContractViolationError) as exc_info:
+        await execute_with_transport(
+            make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+        )
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.requested_max_tool_calls == 2
+    assert ev.observed_web_tool_call_count == 3
+    assert ev.observed_search_requests == 3  # legacy == total
+    assert ev.max_tool_calls_violation == 3
+    assert ev.search_action_count == 1
+    assert ev.open_page_action_count == 1
+    assert ev.find_in_page_action_count == 1
+    assert ev.unknown_web_action_count == 0
+    assert ev.usage.search_action_count == 1
+    assert "requested=2" in exc_info.value.message
+    assert "observed=3" in exc_info.value.message
+
+
+async def test_two_search_one_open_page_exceeds_bound() -> None:
+    """2 search + 1 open_page, max=2 ? total=3 ? violation; billable search=2."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(_ws("ws_1", "search"), _ws("ws_2", "search"), _ws("ws_3", "open_page"))
+
+    with pytest.raises(ProviderContractViolationError) as exc_info:
+        await execute_with_transport(
+            make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+        )
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.observed_web_tool_call_count == 3
+    assert ev.search_action_count == 2
+    assert ev.open_page_action_count == 1
+    assert ev.max_tool_calls_violation == 3
+
+
+async def test_three_search_actions_exceed_bound() -> None:
+    """3 search, max=2 ? total=3 ? violation; billable search=3."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(_ws("ws_1", "search"), _ws("ws_2", "search"), _ws("ws_3", "search"))
+
+    with pytest.raises(ProviderContractViolationError) as exc_info:
+        await execute_with_transport(
+            make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+        )
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.observed_web_tool_call_count == 3
+    assert ev.search_action_count == 3
+    assert ev.open_page_action_count == 0
+    assert ev.max_tool_calls_violation == 3
+
+
+async def test_unknown_action_type_counts_toward_bound_not_billing() -> None:
+    """unknown action + 1 search, max=2 ? total=2 (within bound),
+    search=1, unknown=1.  The unknown item is never assumed billable."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(_ws("ws_1", "search"), _ws("ws_2", "some_future_action"))
+
+    result = await execute_with_transport(
+        make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+    )
+
+    u = result.usage
+    assert u.web_tool_call_count == 2
+    assert u.search_action_count == 1
+    assert u.open_page_action_count == 0
+    assert u.find_in_page_action_count == 0
+    assert u.unknown_web_action_count == 1
+    assert u.search_requests == 2
+
+
+async def test_missing_action_dict_is_classified_unknown() -> None:
+    """A web_search_call item without an action dict ? unknown."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response(_ws("ws_1", None), _ws("ws_2", "search"))
+
+    result = await execute_with_transport(
+        make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+    )
+
+    u = result.usage
+    assert u.web_tool_call_count == 2
+    assert u.search_action_count == 1
+    assert u.unknown_web_action_count == 1
+
+
+async def test_non_dict_action_is_classified_unknown() -> None:
+    """A web_search_call item whose action is not a dict ? unknown."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    item = {"type": "web_search_call", "id": "ws_1", "status": "completed", "action": "search"}
+    resp = _web_response(item)
+
+    result = await execute_with_transport(
+        make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+    )
+
+    assert result.usage.web_tool_call_count == 1
+    assert result.usage.search_action_count == 0
+    assert result.usage.unknown_web_action_count == 1
+
+
+async def test_counter_invariant_holds_for_mixed_actions() -> None:
+    """total == search + open_page + find_in_page + unknown."""
+    settings = make_settings(openai_web_search_max_tool_calls=10)
+    resp = _web_response(
+        _ws("a", "search"),
+        _ws("b", "search"),
+        _ws("c", "open_page"),
+        _ws("d", "find_in_page"),
+        _ws("e", "find_in_page"),
+        _ws("f", None),
+    )
+
+    result = await execute_with_transport(
+        make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+    )
+
+    u = result.usage
+    assert u.web_tool_call_count == 6
+    assert u.search_action_count == 2
+    assert u.open_page_action_count == 1
+    assert u.find_in_page_action_count == 2
+    assert u.unknown_web_action_count == 1
+    assert u.web_tool_call_count == (
+        u.search_action_count
+        + u.open_page_action_count
+        + u.find_in_page_action_count
+        + u.unknown_web_action_count
+    )
+
+
+async def test_model_only_has_no_web_tool_counters() -> None:
+    """MODEL_ONLY: no web_search_call ? all web counters None, legacy None."""
+    result = await execute_with_transport(make_transport(lambda r: _ok_response()), make_settings())
+
+    u = result.usage
+    assert u.web_tool_call_count is None
+    assert u.search_action_count is None
+    assert u.open_page_action_count is None
+    assert u.find_in_page_action_count is None
+    assert u.unknown_web_action_count is None
+    assert u.search_requests is None
+
+
+async def test_web_grounded_no_web_search_call_raises_search_error_with_none_counters() -> None:
+    """WEB_GROUNDED without any web_search_call ? ProviderSearchError; counters None."""
+    settings = make_settings(openai_web_search_max_tool_calls=2)
+    resp = _web_response()  # no web_search_call items
+
+    with pytest.raises(ProviderSearchError) as exc_info:
+        await execute_with_transport(
+            make_transport(lambda r: resp), settings, mode=ProviderExecutionMode.WEB_GROUNDED
+        )
+
+    ev = exc_info.value.evidence
+    assert ev is not None
+    assert ev.observed_web_tool_call_count is None
+    assert ev.search_action_count is None
+    assert ev.unknown_web_action_count is None
+    assert ev.search_used is False
+
+
+async def test_single_built_in_tool_assumption_documented() -> None:
+    """The request body configures exactly ONE built-in tool (web_search).
+    This is the precondition that lets ``web_tool_call_count`` stand in for
+    the total built-in tool-call count that ``max_tool_calls`` bounds.
+    If this test fails, the bound enforcement must be generalized."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return _web_response(_ws("ws_1", "search"))
+
+    await execute_with_transport(
+        make_transport(handler),
+        make_settings(openai_web_search_max_tool_calls=2),
+        mode=ProviderExecutionMode.WEB_GROUNDED,
+    )
+
+    tools = captured["body"]["tools"]
+    assert len(tools) == 1
+    assert tools[0]["type"] == "web_search"
+    assert captured["body"]["max_tool_calls"] == 2

@@ -153,7 +153,7 @@ A returned result must match the run's provider, surface, mode, and requested mo
 
 The usage idempotency key is `prompt-run:{prompt_run_id}:usage`, and each run has at most one linked usage event. If any accounting/evidence write fails, the transaction rolls back and the run becomes `FAILED`; it does not consume an AI Check.
 
-Provider-internal web searches and tool calls can increase provider cost and are recorded as `search_requests` when reported. They do **not** multiply customer quota: one successfully and durably recorded `PromptRun` is exactly one customer AI Check.
+Provider-internal web searches and tool calls can increase provider cost and are recorded as `search_requests` (legacy total) plus the action breakdown (`web_tool_call_count`, `search_action_count`, `open_page_action_count`, `find_in_page_action_count`, `unknown_web_action_count`) when reported. Only `search_action_count` (documented billable `search` actions) drives the web-search tariff; the total `web_tool_call_count` drives `max_tool_calls` enforcement. They do **not** multiply customer quota: one successfully and durably recorded `PromptRun` is exactly one customer AI Check.
 
 ### 6. Failure and finalization
 

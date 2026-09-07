@@ -68,9 +68,17 @@ billable input tokens × input rate / 1,000,000
 + billable output tokens × output rate / 1,000,000
 + reasoning tokens × reasoning rate / 1,000,000 (when separately billed)
 + citation tokens × citation rate / 1,000,000
-+ search requests × search rate / 1,000
++ search actions × search rate / 1,000
 + request fee
 ```
+
+The web-search component uses `search_action_count` (documented billable
+`search` actions), **not** the legacy `search_requests` counter or the total
+`web_tool_call_count`. For OpenAI, `search_requests` and `web_tool_call_count`
+include `open_page`/`find_in_page` items that are not documented as billable
+web-search calls; using them for billing would silently over-charge. When
+`search_used` is true but `search_action_count` is unknown, or when any
+`unknown_web_action_count > 0`, the calculation is incomplete (fail-closed).
 
 The inclusion flags prevent double charging cached or reasoning tokens when provider aggregate fields already include them. Impossible relationships (for example cached input greater than total input) make the local calculation incomplete.
 

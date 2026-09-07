@@ -110,6 +110,7 @@ class TestPinnedRuleCalculatorRegression:
             reasoning_tokens=2000,
             citation_tokens=0,
             search_requests=3,
+            search_action_count=3,
         )
         result = _make_result(usage, search_used=True)
         calc = ProviderCostCalculator()
@@ -228,6 +229,7 @@ class TestPinnedRuleCalculatorRegression:
             reasoning_tokens=0,
             citation_tokens=0,
             search_requests=5,
+            search_action_count=5,
         )
         result = _make_result(usage, search_used=True)
         calc = ProviderCostCalculator()
@@ -256,6 +258,7 @@ class TestPinnedRuleCalculatorRegression:
             reasoning_tokens=30,
             citation_tokens=0,
             search_requests=1,
+            search_action_count=1,
         )
         result = _make_result(usage, search_used=True)
         calc = ProviderCostCalculator()
@@ -276,6 +279,7 @@ class TestPinnedRuleCalculatorRegression:
             reasoning_tokens=4000,
             citation_tokens=0,
             search_requests=10,
+            search_action_count=10,
         )
         result = _make_result(usage, search_used=True)
         calc = ProviderCostCalculator()
@@ -300,3 +304,141 @@ class TestPinnedRuleCalculatorRegression:
             + Decimal("10") * Decimal("10.00") / _THOUSAND
         )
         assert comp.cost_usd == expected, f"Expected {expected}, got {comp.cost_usd}"
+
+
+class TestWebToolBillingSplit:
+    """Web-search tariff is billed on search_action_count ONLY.
+
+    The legacy ``search_requests`` counter and the total
+    ``web_tool_call_count`` include open_page/find_in_page items that are
+    not documented as billable web-search calls.  The tariff must never use
+    them.  Unknown actions make the local cost fail-closed.
+    """
+
+    @staticmethod
+    def _base_tokens() -> dict[str, int]:
+        return {
+            "input_tokens": 1000,
+            "output_tokens": 1000,
+            "total_tokens": 2000,
+            "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "citation_tokens": 0,
+        }
+
+    @staticmethod
+    def _token_component() -> Decimal:
+        return (
+            Decimal("1000") * Decimal("2.00") / _MILLION
+            + Decimal("1000") * Decimal("12.00") / _MILLION
+        )
+
+    def test_one_search_one_open_page_bills_one_search(self) -> None:
+        """1 search + 1 open_page → legacy=2, total=2, billed search=1 → $0.01."""
+        rule = _make_pinned_rule()
+        usage = ProviderUsage(
+            **self._base_tokens(),
+            search_requests=2,
+            web_tool_call_count=2,
+            search_action_count=1,
+            open_page_action_count=1,
+            find_in_page_action_count=0,
+            unknown_web_action_count=0,
+        )
+        comp = ProviderCostCalculator().calculate(_make_result(usage, search_used=True), rule)
+        assert comp.complete is True
+        assert comp.cost_usd == self._token_component() + Decimal("1") * Decimal("10.00") / (
+            _THOUSAND
+        )
+        # Explicitly NOT $0.02.
+        assert comp.cost_usd != self._token_component() + Decimal("2") * Decimal("10.00") / (
+            _THOUSAND
+        )
+
+    def test_two_search_one_open_page_bills_two_searches(self) -> None:
+        """2 search + 1 open_page → total=3 but billed search=2 → $0.02, not $0.03."""
+        rule = _make_pinned_rule()
+        usage = ProviderUsage(
+            **self._base_tokens(),
+            search_requests=3,
+            web_tool_call_count=3,
+            search_action_count=2,
+            open_page_action_count=1,
+            find_in_page_action_count=0,
+            unknown_web_action_count=0,
+        )
+        comp = ProviderCostCalculator().calculate(_make_result(usage, search_used=True), rule)
+        assert comp.complete is True
+        assert comp.cost_usd == self._token_component() + Decimal("2") * Decimal("10.00") / (
+            _THOUSAND
+        )
+
+    def test_pricing_ignores_legacy_search_requests_when_explicit_count_exists(self) -> None:
+        """Legacy counter says 3, explicit billable says 1 → tariff uses 1."""
+        rule = _make_pinned_rule()
+        usage = ProviderUsage(
+            **self._base_tokens(),
+            search_requests=3,
+            web_tool_call_count=3,
+            search_action_count=1,
+            open_page_action_count=1,
+            find_in_page_action_count=1,
+            unknown_web_action_count=0,
+        )
+        comp = ProviderCostCalculator().calculate(_make_result(usage, search_used=True), rule)
+        assert comp.complete is True
+        assert comp.cost_usd == self._token_component() + Decimal("1") * Decimal("10.00") / (
+            _THOUSAND
+        )
+
+    def test_unknown_action_makes_cost_fail_closed(self) -> None:
+        """unknown=1 + search=1 → bound sees 2, but exact cost is NOT declared complete."""
+        rule = _make_pinned_rule()
+        usage = ProviderUsage(
+            **self._base_tokens(),
+            search_requests=2,
+            web_tool_call_count=2,
+            search_action_count=1,
+            open_page_action_count=0,
+            find_in_page_action_count=0,
+            unknown_web_action_count=1,
+        )
+        comp = ProviderCostCalculator().calculate(_make_result(usage, search_used=True), rule)
+        assert comp.complete is False
+        assert comp.cost_usd is None
+        assert comp.calculated_cost_usd is None
+        assert comp.source == CostSource.UNKNOWN
+        assert comp.pricing_rule_id is None
+
+    def test_legacy_only_usage_with_search_used_is_incomplete(self) -> None:
+        """Historical-style usage: search_used=True, legacy search_requests set,
+        but no explicit search_action_count → cost incomplete (fail-closed)."""
+        rule = _make_pinned_rule()
+        usage = ProviderUsage(**self._base_tokens(), search_requests=2)
+        comp = ProviderCostCalculator().calculate(_make_result(usage, search_used=True), rule)
+        assert comp.complete is False
+        assert comp.source == CostSource.UNKNOWN
+
+    def test_no_search_used_without_counters_is_complete(self) -> None:
+        """MODEL_ONLY-style usage: no search, no counters → complete, no search component."""
+        rule = _make_pinned_rule()
+        usage = ProviderUsage(**self._base_tokens())
+        comp = ProviderCostCalculator().calculate(_make_result(usage, search_used=False), rule)
+        assert comp.complete is True
+        assert comp.cost_usd == self._token_component()
+
+    def test_provider_usage_invariant_enforced(self) -> None:
+        """web_tool_call_count must equal the sum of action counters."""
+        import pytest
+
+        with pytest.raises(ValueError, match="must equal the sum"):
+            ProviderUsage(
+                web_tool_call_count=3,
+                search_action_count=1,
+                open_page_action_count=1,
+                find_in_page_action_count=0,
+                unknown_web_action_count=0,
+            )
+        with pytest.raises(ValueError, match="requires all four"):
+            ProviderUsage(web_tool_call_count=1, search_action_count=1)

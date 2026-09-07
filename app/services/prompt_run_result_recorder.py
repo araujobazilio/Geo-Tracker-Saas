@@ -102,6 +102,11 @@ class PromptRunResultRecorder:
                 pricing_rule_id=cost.pricing_rule_id,
                 prompt_run_id=run.id,
                 commit_transaction=False,
+                web_tool_call_count=usage.web_tool_call_count,
+                search_action_count=usage.search_action_count,
+                open_page_action_count=usage.open_page_action_count,
+                find_in_page_action_count=usage.find_in_page_action_count,
+                unknown_web_action_count=usage.unknown_web_action_count,
             )
 
             run.returned_model = result.returned_model
@@ -119,6 +124,11 @@ class PromptRunResultRecorder:
             run.reasoning_tokens = usage.reasoning_tokens
             run.citation_tokens = usage.citation_tokens
             run.search_requests = usage.search_requests
+            run.web_tool_call_count = usage.web_tool_call_count
+            run.search_action_count = usage.search_action_count
+            run.open_page_action_count = usage.open_page_action_count
+            run.find_in_page_action_count = usage.find_in_page_action_count
+            run.unknown_web_action_count = usage.unknown_web_action_count
             run.provider_reported_cost_usd = cost.provider_reported_cost_usd
             run.calculated_cost_usd = cost.calculated_cost_usd
             run.cost_usd = cost.cost_usd
@@ -233,6 +243,11 @@ class PromptRunResultRecorder:
                 pricing_rule_id=cost.pricing_rule_id,
                 prompt_run_id=run.id,
                 commit_transaction=False,
+                web_tool_call_count=usage.web_tool_call_count,
+                search_action_count=usage.search_action_count,
+                open_page_action_count=usage.open_page_action_count,
+                find_in_page_action_count=usage.find_in_page_action_count,
+                unknown_web_action_count=usage.unknown_web_action_count,
             )
 
             run.returned_model = evidence.returned_model
@@ -246,7 +261,13 @@ class PromptRunResultRecorder:
             run.cached_input_tokens = usage.cached_input_tokens
             run.cache_write_input_tokens = usage.cache_write_input_tokens
             run.reasoning_tokens = usage.reasoning_tokens
+            run.citation_tokens = usage.citation_tokens
             run.search_requests = usage.search_requests
+            run.web_tool_call_count = usage.web_tool_call_count
+            run.search_action_count = usage.search_action_count
+            run.open_page_action_count = usage.open_page_action_count
+            run.find_in_page_action_count = usage.find_in_page_action_count
+            run.unknown_web_action_count = usage.unknown_web_action_count
             run.provider_reported_cost_usd = cost.provider_reported_cost_usd
             run.calculated_cost_usd = cost.calculated_cost_usd
             run.cost_usd = cost.cost_usd

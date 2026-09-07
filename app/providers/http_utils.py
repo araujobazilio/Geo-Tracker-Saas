@@ -184,11 +184,20 @@ def log_provider_result(
     search_requests: int | None,
     correlation_id: str | None = None,
     provider_response_id: str | None = None,
+    web_tool_call_count: int | None = None,
+    search_action_count: int | None = None,
+    open_page_action_count: int | None = None,
+    find_in_page_action_count: int | None = None,
+    unknown_web_action_count: int | None = None,
 ) -> None:
     """Log a sanitized structured provider result.
 
     NEVER logs: API keys, Authorization headers, full request headers,
     full response body, or full Prompt.text.
+
+    ``search_requests`` is the legacy provider-native counter (AUDIT/LOGGING
+    only).  The explicit web tool counters are logged alongside it so that
+    operators can distinguish total tool calls from billable search actions.
     """
     logger.info(
         "provider_request_completed",
@@ -204,5 +213,10 @@ def log_provider_result(
         usage_input_tokens=usage_input_tokens,
         usage_output_tokens=usage_output_tokens,
         search_requests=search_requests,
+        web_tool_call_count=web_tool_call_count,
+        search_action_count=search_action_count,
+        open_page_action_count=open_page_action_count,
+        find_in_page_action_count=find_in_page_action_count,
+        unknown_web_action_count=unknown_web_action_count,
         correlation_id=correlation_id,
     )

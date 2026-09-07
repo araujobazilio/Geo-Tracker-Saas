@@ -163,14 +163,21 @@ class PerplexityProviderAdapter:
         citations = self._parse_citations(data)
 
         # 11. Parse complete usage with all fields.
+        #     Perplexity reports the billable search query count directly in
+        #     usage.num_search_queries.  It is both the legacy
+        #     ``search_requests`` and the explicit ``search_action_count``.
+        #     No per-item action breakdown exists, so the OpenAI-specific
+        #     total/open/find/unknown counters remain None.
         usage_data = data.get("usage") or {}
+        num_search_queries = _safe_int(usage_data.get("num_search_queries"))
         usage = ProviderUsage(
             input_tokens=_safe_int(usage_data.get("prompt_tokens")),
             output_tokens=_safe_int(usage_data.get("completion_tokens")),
             total_tokens=_safe_int(usage_data.get("total_tokens")),
             reasoning_tokens=_safe_int(usage_data.get("reasoning_tokens")),
             citation_tokens=_safe_int(usage_data.get("citation_tokens")),
-            search_requests=_safe_int(usage_data.get("num_search_queries")),
+            search_requests=num_search_queries,
+            search_action_count=num_search_queries,
         )
 
         # 12. Parse provider-reported cost (Decimal, not float for money).

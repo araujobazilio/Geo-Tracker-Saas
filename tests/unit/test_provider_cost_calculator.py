@@ -181,7 +181,21 @@ def test_cache_write_tokens_use_cache_write_rate() -> None:
     assert_rule_cost(computation, Decimal("1.000"))
 
 
-def test_search_requests_use_per_thousand_rate() -> None:
+def test_search_actions_use_per_thousand_rate() -> None:
+    """Search tariff is billed on search_action_count (billing authority)."""
+    rule = make_rule(search_per_1000_usd=Decimal("7.50"))
+
+    computation = calculate(
+        make_usage(search_requests=4, search_action_count=4),
+        rule,
+        search_used=True,
+    )
+
+    assert_rule_cost(computation, Decimal("0.030"))
+
+
+def test_legacy_search_requests_alone_is_not_a_billing_authority() -> None:
+    """search_used=True with only the legacy counter → fail-closed (incomplete)."""
     rule = make_rule(search_per_1000_usd=Decimal("7.50"))
 
     computation = calculate(
@@ -190,7 +204,71 @@ def test_search_requests_use_per_thousand_rate() -> None:
         search_used=True,
     )
 
-    assert_rule_cost(computation, Decimal("0.030"))
+    assert computation.complete is False
+    assert computation.cost_usd is None
+    assert computation.source == CostSource.UNKNOWN
+
+
+def test_search_tariff_ignores_total_web_tool_call_count() -> None:
+    """3 web tool calls but only 2 search actions → tariff bills 2, not 3."""
+    rule = make_rule(search_per_1000_usd=Decimal("10"))
+
+    computation = calculate(
+        make_usage(
+            search_requests=3,
+            web_tool_call_count=3,
+            search_action_count=2,
+            open_page_action_count=1,
+            find_in_page_action_count=0,
+            unknown_web_action_count=0,
+        ),
+        rule,
+        search_used=True,
+    )
+
+    assert_rule_cost(computation, Decimal("0.020"))
+
+
+def test_unknown_web_action_forces_incomplete_cost() -> None:
+    rule = make_rule(search_per_1000_usd=Decimal("10"))
+
+    computation = calculate(
+        make_usage(
+            search_requests=2,
+            web_tool_call_count=2,
+            search_action_count=1,
+            open_page_action_count=0,
+            find_in_page_action_count=0,
+            unknown_web_action_count=1,
+        ),
+        rule,
+        search_used=True,
+    )
+
+    assert computation.complete is False
+    assert computation.cost_usd is None
+    assert computation.source == CostSource.UNKNOWN
+
+
+def test_unknown_web_action_forces_incomplete_even_without_search_tariff() -> None:
+    """Rule has no search tariff, but an unclassifiable web action was processed."""
+    rule = make_rule(search_per_1000_usd=None)
+
+    computation = calculate(
+        make_usage(
+            search_requests=1,
+            web_tool_call_count=1,
+            search_action_count=0,
+            open_page_action_count=0,
+            find_in_page_action_count=0,
+            unknown_web_action_count=1,
+        ),
+        rule,
+        search_used=True,
+    )
+
+    assert computation.complete is False
+    assert computation.source == CostSource.UNKNOWN
 
 
 def test_reasoning_included_in_output_is_not_double_charged() -> None:

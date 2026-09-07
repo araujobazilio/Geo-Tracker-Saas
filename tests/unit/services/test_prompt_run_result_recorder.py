@@ -53,6 +53,11 @@ def _make_evidence(
     max_tool_calls_violation: int | None = None,
     requested_max_tool_calls: int | None = None,
     observed_search_requests: int | None = None,
+    observed_web_tool_call_count: int | None = None,
+    search_action_count: int | None = None,
+    open_page_action_count: int | None = None,
+    find_in_page_action_count: int | None = None,
+    unknown_web_action_count: int | None = None,
 ) -> ProviderFailureEvidence:
     return ProviderFailureEvidence(
         provider=provider,
@@ -78,6 +83,11 @@ def _make_evidence(
         max_tool_calls_violation=max_tool_calls_violation,
         requested_max_tool_calls=requested_max_tool_calls,
         observed_search_requests=observed_search_requests,
+        observed_web_tool_call_count=observed_web_tool_call_count,
+        search_action_count=search_action_count,
+        open_page_action_count=open_page_action_count,
+        find_in_page_action_count=find_in_page_action_count,
+        unknown_web_action_count=unknown_web_action_count,
     )
 
 
@@ -897,3 +907,149 @@ def test_incident_citation_persistence_idempotent() -> None:
 
     result = sources_repo.create_batch_idempotent([incoming])
     assert result == []  # No new sources
+
+
+# ---------------------------------------------------------------------------
+# Web tool counters (Phase 13.5.12G) � evidence semantics identical on both
+# the success path and the failure-evidence path.
+# ---------------------------------------------------------------------------
+
+
+def _web_usage() -> ProviderUsage:
+    """2 search + 1 open_page: legacy=3, total=3, billable search=2."""
+    return ProviderUsage(
+        input_tokens=100,
+        output_tokens=10,
+        total_tokens=110,
+        cached_input_tokens=0,
+        reasoning_tokens=0,
+        search_requests=3,
+        web_tool_call_count=3,
+        search_action_count=2,
+        open_page_action_count=1,
+        find_in_page_action_count=0,
+        unknown_web_action_count=0,
+    )
+
+
+def _assert_web_counters_forwarded(call_kwargs: dict[str, object]) -> None:
+    assert call_kwargs["search_requests"] == 3  # legacy == total
+    assert call_kwargs["web_tool_call_count"] == 3
+    assert call_kwargs["search_action_count"] == 2
+    assert call_kwargs["open_page_action_count"] == 1
+    assert call_kwargs["find_in_page_action_count"] == 0
+    assert call_kwargs["unknown_web_action_count"] == 0
+
+
+def _assert_web_counters_on_run(run: PromptRun) -> None:
+    assert run.search_requests == 3
+    assert run.web_tool_call_count == 3
+    assert run.search_action_count == 2
+    assert run.open_page_action_count == 1
+    assert run.find_in_page_action_count == 0
+    assert run.unknown_web_action_count == 0
+
+
+def test_failure_evidence_persists_web_tool_counters_to_run_and_usage_event() -> None:
+    session = _MockSession()
+    run = _make_run()
+    scan = _make_scan()
+    evidence = _make_evidence(
+        usage=_web_usage(),
+        requested_max_tool_calls=2,
+        observed_search_requests=3,
+        max_tool_calls_violation=3,
+        observed_web_tool_call_count=3,
+        search_action_count=2,
+        open_page_action_count=1,
+        find_in_page_action_count=0,
+        unknown_web_action_count=0,
+    )
+
+    recorder, _, _, _, _, quota = _setup_recorder_mocks(session, run=run, scan=scan)
+
+    recorder.record_failure_evidence(
+        run.id,
+        evidence,
+        error_code=ProviderErrorCode.PROVIDER_CONTRACT_VIOLATION,
+        error_message="bound exceeded",
+    )
+
+    assert session.committed is True
+    assert run.status == PromptRunStatus.FAILED
+    _assert_web_counters_on_run(run)
+    quota.commit_ai_checks.assert_called_once()
+    _assert_web_counters_forwarded(quota.commit_ai_checks.call_args.kwargs)
+    # Exactly one AI Check committed.
+    assert quota.commit_ai_checks.call_args.kwargs["quantity"] == 1
+
+
+def test_success_path_persists_web_tool_counters_to_run_and_usage_event() -> None:
+    from app.providers.base import ProviderResult
+
+    session = _MockSession()
+    run = _make_run()
+    scan = _make_scan()
+    result = ProviderResult(
+        provider=LLMProvider.OPENAI,
+        surface=ProviderSurface.OPENAI_RESPONSES_API,
+        execution_mode=ProviderExecutionMode.WEB_GROUNDED,
+        requested_model="gpt-5.6-terra",
+        returned_model="gpt-5.6-terra",
+        response_text="grounded answer",
+        citations=(),
+        usage=_web_usage(),
+        provider_request_id="req_ok",
+        provider_response_id="resp_ok",
+        finish_reason=None,
+        latency_ms=10,
+        search_used=True,
+    )
+
+    recorder, _, _, _, calculator, quota = _setup_recorder_mocks(session, run=run, scan=scan)
+    calculator.calculate.return_value = CostComputation(
+        cost_usd=Decimal("0.02"),
+        calculated_cost_usd=Decimal("0.02"),
+        provider_reported_cost_usd=None,
+        source=CostSource.PRICE_RULE,
+        complete=True,
+        pricing_rule_id=uuid.uuid4(),
+    )
+
+    recorder.record(run.id, result)
+
+    assert session.committed is True
+    assert run.status == PromptRunStatus.SUCCEEDED
+    _assert_web_counters_on_run(run)
+    quota.commit_ai_checks.assert_called_once()
+    _assert_web_counters_forwarded(quota.commit_ai_checks.call_args.kwargs)
+    assert quota.commit_ai_checks.call_args.kwargs["quantity"] == 1
+
+
+def test_failure_evidence_with_null_counters_forwards_none() -> None:
+    """Historical-style evidence (no explicit breakdown) forwards None, never 0."""
+    session = _MockSession()
+    run = _make_run()
+    scan = _make_scan()
+    evidence = _make_evidence(
+        usage=ProviderUsage(input_tokens=5, output_tokens=0, total_tokens=5),
+        search_used=False,
+    )
+
+    recorder, _, _, _, _, quota = _setup_recorder_mocks(session, run=run, scan=scan)
+    recorder.record_failure_evidence(
+        run.id,
+        evidence,
+        error_code=ProviderErrorCode.MALFORMED_RESPONSE,
+        error_message="empty",
+    )
+
+    kw = quota.commit_ai_checks.call_args.kwargs
+    assert kw["search_requests"] is None
+    assert kw["web_tool_call_count"] is None
+    assert kw["search_action_count"] is None
+    assert kw["open_page_action_count"] is None
+    assert kw["find_in_page_action_count"] is None
+    assert kw["unknown_web_action_count"] is None
+    assert run.web_tool_call_count is None
+    assert run.search_action_count is None
