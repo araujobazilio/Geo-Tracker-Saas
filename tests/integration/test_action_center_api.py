@@ -167,6 +167,7 @@ class _ScriptedAdapter:
                 output_tokens=5,
                 total_tokens=15,
                 search_requests=1 if request.mode == ExecMode.WEB_GROUNDED else 0,
+                search_action_count=1 if request.mode == ExecMode.WEB_GROUNDED else 0,
             ),
             provider_request_id=f"request-{len(self.requests)}",
             provider_response_id=f"response-{len(self.requests)}",

@@ -230,14 +230,19 @@ class QuotaService:
         cost_source: CostSource | None,
         pricing_rule_id: uuid.UUID | None,
         prompt_run_id: uuid.UUID | None,
+        web_tool_call_count: int | None = None,
+        search_action_count: int | None = None,
+        open_page_action_count: int | None = None,
+        find_in_page_action_count: int | None = None,
+        unknown_web_action_count: int | None = None,
     ) -> None:
         """Validate that an existing UsageEvent matches the request's material fields.
 
         Compares all material accounting fields: reservation_id,
-        ai_checks, provider, model, tokens, and cost. Used in both the
-        normal idempotency re-check path and the IntegrityError race
-        fallback path. Ensures contradictory provider cost data is
-        never silently discarded.
+        ai_checks, provider, model, tokens, web tool counters, and cost.
+        Used in both the normal idempotency re-check path and the
+        IntegrityError race fallback path. Ensures contradictory provider
+        cost data is never silently discarded.
 
         Raises ConflictError if any material field differs.
         """
@@ -254,6 +259,11 @@ class QuotaService:
             or existing.reasoning_tokens != reasoning_tokens
             or existing.citation_tokens != citation_tokens
             or existing.search_requests != search_requests
+            or existing.web_tool_call_count != web_tool_call_count
+            or existing.search_action_count != search_action_count
+            or existing.open_page_action_count != open_page_action_count
+            or existing.find_in_page_action_count != find_in_page_action_count
+            or existing.unknown_web_action_count != unknown_web_action_count
             or existing.cost_usd != cost_usd
             or existing.provider_reported_cost_usd != provider_reported_cost_usd
             or existing.cost_source != cost_source
@@ -414,6 +424,11 @@ class QuotaService:
         pricing_rule_id: uuid.UUID | None = None,
         prompt_run_id: uuid.UUID | None = None,
         commit_transaction: bool = True,
+        web_tool_call_count: int | None = None,
+        search_action_count: int | None = None,
+        open_page_action_count: int | None = None,
+        find_in_page_action_count: int | None = None,
+        unknown_web_action_count: int | None = None,
     ) -> UsageEvent:
         """Commit N AI Checks against a reservation.
 
@@ -472,6 +487,11 @@ class QuotaService:
                     cost_source,
                     pricing_rule_id,
                     prompt_run_id,
+                    web_tool_call_count=web_tool_call_count,
+                    search_action_count=search_action_count,
+                    open_page_action_count=open_page_action_count,
+                    find_in_page_action_count=find_in_page_action_count,
+                    unknown_web_action_count=unknown_web_action_count,
                 )
                 if commit_transaction:
                     self._session.commit()
@@ -523,6 +543,11 @@ class QuotaService:
                 reasoning_tokens=reasoning_tokens,
                 citation_tokens=citation_tokens,
                 search_requests=search_requests,
+                web_tool_call_count=web_tool_call_count,
+                search_action_count=search_action_count,
+                open_page_action_count=open_page_action_count,
+                find_in_page_action_count=find_in_page_action_count,
+                unknown_web_action_count=unknown_web_action_count,
                 cost_usd=cost_usd,
                 provider_reported_cost_usd=provider_reported_cost_usd,
                 cost_source=cost_source,
@@ -559,6 +584,11 @@ class QuotaService:
                         cost_source,
                         pricing_rule_id,
                         prompt_run_id,
+                        web_tool_call_count=web_tool_call_count,
+                        search_action_count=search_action_count,
+                        open_page_action_count=open_page_action_count,
+                        find_in_page_action_count=find_in_page_action_count,
+                        unknown_web_action_count=unknown_web_action_count,
                     )
                     return existing_event
                 raise ConflictError("Usage idempotency conflict.") from None

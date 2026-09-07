@@ -178,6 +178,34 @@ class PromptRun(UUIDPrimaryKey, Base):
             name="ck_prompt_runs_search_requests_non_negative",
         ),
         CheckConstraint(
+            "web_tool_call_count IS NULL OR web_tool_call_count >= 0",
+            name="ck_prompt_runs_web_tool_call_count_non_negative",
+        ),
+        CheckConstraint(
+            "search_action_count IS NULL OR search_action_count >= 0",
+            name="ck_prompt_runs_search_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "open_page_action_count IS NULL OR open_page_action_count >= 0",
+            name="ck_prompt_runs_open_page_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "find_in_page_action_count IS NULL OR find_in_page_action_count >= 0",
+            name="ck_prompt_runs_find_in_page_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "unknown_web_action_count IS NULL OR unknown_web_action_count >= 0",
+            name="ck_prompt_runs_unknown_web_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "web_tool_call_count IS NULL OR search_action_count IS NULL "
+            "OR open_page_action_count IS NULL OR find_in_page_action_count IS NULL "
+            "OR unknown_web_action_count IS NULL "
+            "OR web_tool_call_count = search_action_count + open_page_action_count "
+            "+ find_in_page_action_count + unknown_web_action_count",
+            name="ck_prompt_runs_web_tool_call_count_sum",
+        ),
+        CheckConstraint(
             "provider_reported_cost_usd IS NULL OR provider_reported_cost_usd >= 0",
             name="ck_prompt_runs_provider_cost_non_negative",
         ),
@@ -219,7 +247,16 @@ class PromptRun(UUIDPrimaryKey, Base):
     cache_write_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     citation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # LEGACY provider-native web-search counter (OpenAI: total web_search_call
+    # items).  Kept for compatibility with historical rows.  Not a billing
+    # authority.
     search_requests: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Explicit web tool evidence (nullable — NULL on historical rows).
+    web_tool_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    search_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    open_page_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    find_in_page_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unknown_web_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     provider_reported_cost_usd: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 10), nullable=True
     )

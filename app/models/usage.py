@@ -73,6 +73,34 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
             name="ck_usage_events_search_requests_non_negative",
         ),
         CheckConstraint(
+            "web_tool_call_count IS NULL OR web_tool_call_count >= 0",
+            name="ck_usage_events_web_tool_call_count_non_negative",
+        ),
+        CheckConstraint(
+            "search_action_count IS NULL OR search_action_count >= 0",
+            name="ck_usage_events_search_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "open_page_action_count IS NULL OR open_page_action_count >= 0",
+            name="ck_usage_events_open_page_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "find_in_page_action_count IS NULL OR find_in_page_action_count >= 0",
+            name="ck_usage_events_find_in_page_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "unknown_web_action_count IS NULL OR unknown_web_action_count >= 0",
+            name="ck_usage_events_unknown_web_action_count_non_negative",
+        ),
+        CheckConstraint(
+            "web_tool_call_count IS NULL OR search_action_count IS NULL "
+            "OR open_page_action_count IS NULL OR find_in_page_action_count IS NULL "
+            "OR unknown_web_action_count IS NULL "
+            "OR web_tool_call_count = search_action_count + open_page_action_count "
+            "+ find_in_page_action_count + unknown_web_action_count",
+            name="ck_usage_events_web_tool_call_count_sum",
+        ),
+        CheckConstraint(
             "cost_usd IS NULL OR cost_usd >= 0", name="ck_usage_events_cost_usd_non_negative"
         ),
         CheckConstraint(
@@ -103,7 +131,15 @@ class UsageEvent(UUIDPrimaryKey, TimestampMixin, Base):
     cache_write_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     citation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # LEGACY provider-native web-search counter.  Not a billing authority.
     search_requests: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Explicit web tool evidence — UsageEvent is a self-sufficient accounting
+    # record and must be able to justify cost_usd without joining PromptRun.
+    web_tool_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    search_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    open_page_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    find_in_page_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    unknown_web_action_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[Decimal | None] = mapped_column(SQL_DECIMAL(18, 10), nullable=True)
     provider_reported_cost_usd: Mapped[Decimal | None] = mapped_column(
         SQL_DECIMAL(18, 10), nullable=True

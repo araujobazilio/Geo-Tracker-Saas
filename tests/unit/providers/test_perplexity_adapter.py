@@ -188,6 +188,13 @@ async def test_web_grounded_success():
     assert result.usage.search_requests == 2
     assert result.usage.citation_tokens == 5
     assert result.usage.reasoning_tokens == 8
+    # num_search_queries is also the explicit billable search count; no
+    # per-item action breakdown exists for Perplexity.
+    assert result.usage.search_action_count == 2
+    assert result.usage.web_tool_call_count is None
+    assert result.usage.open_page_action_count is None
+    assert result.usage.find_in_page_action_count is None
+    assert result.usage.unknown_web_action_count is None
 
     # Provider-reported cost (Decimal).
     assert result.provider_reported_cost_usd == Decimal("0.019")

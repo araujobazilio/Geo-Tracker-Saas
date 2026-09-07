@@ -213,6 +213,12 @@ def _phase6_payload(
         "reasoning_tokens": 19,
         "citation_tokens": 7,
         "search_requests": 3,
+        # Web tool counters: legacy 3 == total 3 == 2 search + 1 open_page.
+        "web_tool_call_count": 3,
+        "search_action_count": 2,
+        "open_page_action_count": 1,
+        "find_in_page_action_count": 0,
+        "unknown_web_action_count": 0,
         "cost_usd": Decimal("0.0123456789"),
         "provider_reported_cost_usd": Decimal("0.0130000000"),
         "cost_source": CostSource.PRICE_RULE,
@@ -279,6 +285,11 @@ class TestPhase6CommitMetadata:
         assert event.reasoning_tokens == 19
         assert event.citation_tokens == 7
         assert event.search_requests == 3
+        assert event.web_tool_call_count == 3
+        assert event.search_action_count == 2
+        assert event.open_page_action_count == 1
+        assert event.find_in_page_action_count == 0
+        assert event.unknown_web_action_count == 0
         assert event.provider_reported_cost_usd == Decimal("0.0130000000")
         assert event.cost_usd == Decimal("0.0123456789")
         assert event.cost_source == CostSource.PRICE_RULE
@@ -293,6 +304,11 @@ class TestPhase6CommitMetadata:
             ("reasoning_tokens", 20),
             ("citation_tokens", 8),
             ("search_requests", 4),
+            ("web_tool_call_count", 4),
+            ("search_action_count", 3),
+            ("open_page_action_count", 0),
+            ("find_in_page_action_count", 1),
+            ("unknown_web_action_count", 1),
             ("cost_source", CostSource.UNKNOWN),
             ("pricing_rule_id", "alternate"),
             ("prompt_run_id", "alternate"),

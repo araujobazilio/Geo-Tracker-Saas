@@ -75,6 +75,7 @@ class AccountingIncidentEvidence:
     incomplete_reason: str | None = None
     requested_max_tool_calls: int | None = None
     observed_search_requests: int | None = None
+    observed_web_tool_call_count: int | None = None
 
     @classmethod
     def from_result(cls, result: ProviderResult) -> AccountingIncidentEvidence:
@@ -113,6 +114,7 @@ class AccountingIncidentEvidence:
             incomplete_reason=evidence.incomplete_reason,
             requested_max_tool_calls=evidence.requested_max_tool_calls,
             observed_search_requests=evidence.observed_search_requests,
+            observed_web_tool_call_count=evidence.observed_web_tool_call_count,
         )
 
 
@@ -452,9 +454,15 @@ class ScanExecutionService:
                 output_tokens=evidence.usage.output_tokens,
                 reasoning_tokens=evidence.usage.reasoning_tokens,
                 search_requests=evidence.usage.search_requests,
+                web_tool_call_count=evidence.usage.web_tool_call_count,
+                search_action_count=evidence.usage.search_action_count,
+                open_page_action_count=evidence.usage.open_page_action_count,
+                find_in_page_action_count=evidence.usage.find_in_page_action_count,
+                unknown_web_action_count=evidence.usage.unknown_web_action_count,
                 incomplete_reason=evidence.incomplete_reason,
                 requested_max_tool_calls=evidence.requested_max_tool_calls,
                 observed_search_requests=evidence.observed_search_requests,
+                observed_web_tool_call_count=evidence.observed_web_tool_call_count,
             )
             # Attempt to persist an ACCOUNTING_UNRESOLVED incident marker
             # in a separate session.  This preserves evidence without
@@ -509,6 +517,11 @@ class ScanExecutionService:
                 run.reasoning_tokens = evidence.usage.reasoning_tokens
                 run.citation_tokens = evidence.usage.citation_tokens
                 run.search_requests = evidence.usage.search_requests
+                run.web_tool_call_count = evidence.usage.web_tool_call_count
+                run.search_action_count = evidence.usage.search_action_count
+                run.open_page_action_count = evidence.usage.open_page_action_count
+                run.find_in_page_action_count = evidence.usage.find_in_page_action_count
+                run.unknown_web_action_count = evidence.usage.unknown_web_action_count
                 # Persist response_text if available (from ProviderResult).
                 if evidence.response_text is not None:
                     run.response_text = evidence.response_text

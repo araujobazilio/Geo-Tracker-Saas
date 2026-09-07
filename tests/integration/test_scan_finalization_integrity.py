@@ -155,6 +155,7 @@ class FakeAdapter:
                 output_tokens=5,
                 total_tokens=15,
                 search_requests=1 if request.mode == ProviderExecutionMode.WEB_GROUNDED else 0,
+                search_action_count=1 if request.mode == ProviderExecutionMode.WEB_GROUNDED else 0,
             ),
             provider_request_id="req-1",
             provider_response_id="resp-1",

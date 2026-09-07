@@ -14,6 +14,15 @@ Key design decisions:
   actually occurred (ProviderSearchError if not).
 - provider_request_id = x-request-id HTTP header (support/tracking ID).
 - provider_response_id = response JSON `id` (generated object ID).
+- Web tool evidence is split into explicit counters:
+    web_tool_call_count        (TOTAL web_search_call items — bound authority)
+    search_action_count        (action.type == "search" — billing authority)
+    open_page_action_count     (action.type == "open_page")
+    find_in_page_action_count  (action.type == "find_in_page")
+    unknown_web_action_count   (missing/unrecognized action — fail-closed)
+  Legacy ``search_requests`` == web_tool_call_count for compatibility.
+- max_tool_calls is enforced against web_tool_call_count (total), never
+  against search_action_count.
 """
 
 from __future__ import annotations
@@ -257,13 +266,62 @@ class OpenAIProviderAdapter:
         if isinstance(output_details, dict):
             reasoning_tokens = _safe_int(output_details.get("reasoning_tokens"))
 
-        # Count web_search_call items for search_requests.
+        # 9a. Web tool evidence.  Every ``web_search_call`` output item is one
+        #     built-in tool call processed by the provider.  Each item carries
+        #     an ``action`` whose ``type`` is one of:
+        #       - "search"        → documented billable web-search action
+        #       - "open_page"     → page navigation (reasoning models)
+        #       - "find_in_page"  → in-page pattern search (reasoning models)
+        #     Anything else (or a missing action dict) is classified as
+        #     unknown.  Only counts are extracted — never queries, URLs, or
+        #     raw payloads.
+        #
+        #     IMPORTANT (future-proofing): this request configures exactly ONE
+        #     built-in tool (web_search).  Therefore, FOR THIS REQUEST,
+        #     total built-in tool calls == web_tool_call_count.  If another
+        #     built-in tool is ever added to ``body["tools"]``, the
+        #     max_tool_calls enforcement below MUST be generalized to count
+        #     ALL built-in tool call output items, not just web_search_call.
         web_search_calls = [
             item
             for item in (data.get("output", []) or [])
             if isinstance(item, dict) and item.get("type") == "web_search_call"
         ]
-        search_requests = len(web_search_calls) if web_search_calls else None
+        web_tool_call_count: int | None
+        search_action_count: int | None
+        open_page_action_count: int | None
+        find_in_page_action_count: int | None
+        unknown_web_action_count: int | None
+        if web_search_calls:
+            web_tool_call_count = len(web_search_calls)
+            search_action_count = 0
+            open_page_action_count = 0
+            find_in_page_action_count = 0
+            unknown_web_action_count = 0
+            for item in web_search_calls:
+                action = item.get("action")
+                action_type = action.get("type") if isinstance(action, dict) else None
+                if action_type == "search":
+                    search_action_count += 1
+                elif action_type == "open_page":
+                    open_page_action_count += 1
+                elif action_type == "find_in_page":
+                    find_in_page_action_count += 1
+                else:
+                    unknown_web_action_count += 1
+        else:
+            web_tool_call_count = None
+            search_action_count = None
+            open_page_action_count = None
+            find_in_page_action_count = None
+            unknown_web_action_count = None
+
+        # LEGACY: ``search_requests`` keeps its historical OpenAI semantics —
+        # the TOTAL number of web_search_call items — so that new rows remain
+        # comparable with rows written before the action breakdown existed.
+        # It is NOT a billing authority; PricingService uses
+        # search_action_count exclusively.
+        search_requests = web_tool_call_count
 
         usage = ProviderUsage(
             input_tokens=input_tokens,
@@ -273,23 +331,30 @@ class OpenAIProviderAdapter:
             cache_write_input_tokens=cache_write_input_tokens,
             reasoning_tokens=reasoning_tokens,
             search_requests=search_requests,
+            web_tool_call_count=web_tool_call_count,
+            search_action_count=search_action_count,
+            open_page_action_count=open_page_action_count,
+            find_in_page_action_count=find_in_page_action_count,
+            unknown_web_action_count=unknown_web_action_count,
         )
 
         search_used = bool(web_search_calls)
 
-        # 9b. Detect max_tool_calls contract violation: the provider returned
-        #     more web_search_call items than the configured limit.  Do NOT
-        #     clamp the count — preserve the raw evidence.  This violation is
-        #     raised even when response_text is valid, because the provider
-        #     did not respect the bounds of the execution request.
+        # 9b. Detect max_tool_calls contract violation.  The OpenAI bound
+        #     applies to the TOTAL number of built-in tool calls processed,
+        #     so the comparison uses web_tool_call_count (all action types),
+        #     NOT search_action_count.  Do NOT clamp the count — preserve the
+        #     raw evidence.  This violation is raised even when response_text
+        #     is valid, because the provider did not respect the bounds of
+        #     the execution request.
         configured_max_tool_calls = self._settings.openai_web_search_max_tool_calls
         max_tool_calls_violation: int | None = None
         if (
             request.mode == ProviderExecutionMode.WEB_GROUNDED
-            and search_requests is not None
-            and search_requests > configured_max_tool_calls
+            and web_tool_call_count is not None
+            and web_tool_call_count > configured_max_tool_calls
         ):
-            max_tool_calls_violation = search_requests
+            max_tool_calls_violation = web_tool_call_count
 
         latency_ms = timer.elapsed_ms()
 
@@ -317,6 +382,11 @@ class OpenAIProviderAdapter:
                     else None
                 ),
                 observed_search_requests=search_requests,
+                observed_web_tool_call_count=web_tool_call_count,
+                search_action_count=search_action_count,
+                open_page_action_count=open_page_action_count,
+                find_in_page_action_count=find_in_page_action_count,
+                unknown_web_action_count=unknown_web_action_count,
             )
 
         # 11. Validate response_text is not empty.
@@ -344,7 +414,10 @@ class OpenAIProviderAdapter:
             raise ProviderContractViolationError(
                 f"OpenAI exceeded requested max_tool_calls: "
                 f"requested={configured_max_tool_calls} "
-                f"observed={search_requests}.",
+                f"observed={web_tool_call_count} "
+                f"(search={search_action_count}, open_page={open_page_action_count}, "
+                f"find_in_page={find_in_page_action_count}, "
+                f"unknown={unknown_web_action_count}).",
                 provider=LLMProvider.OPENAI.value,
                 evidence=_build_evidence(),
             )
@@ -381,6 +454,11 @@ class OpenAIProviderAdapter:
             search_requests=usage.search_requests,
             correlation_id=request.correlation_id,
             provider_response_id=provider_response_id,
+            web_tool_call_count=usage.web_tool_call_count,
+            search_action_count=usage.search_action_count,
+            open_page_action_count=usage.open_page_action_count,
+            find_in_page_action_count=usage.find_in_page_action_count,
+            unknown_web_action_count=usage.unknown_web_action_count,
         )
 
         return result

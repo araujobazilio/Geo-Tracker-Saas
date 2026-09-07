@@ -258,8 +258,31 @@ API keys are server-side secrets and are treated accordingly:
 - **Usage:** `input_tokens`, `output_tokens`, `total_tokens`;
   `input_tokens_details.cached_tokens` → `cached_input_tokens`;
   `output_tokens_details.reasoning_tokens` → `reasoning_tokens`.
-- **Search count:** `search_requests` = the number of `web_search_call` items
-  in the response.
+- **`max_tool_calls` bound:** `max_tool_calls=OPENAI_WEB_SEARCH_MAX_TOOL_CALLS`
+  (default `3`) bounds the **total** number of built-in tool calls in the
+  Response (across all built-in tools, not per tool). Any further attempts by
+  the model to call a tool are ignored by the provider. The adapter enforces
+  this bound fail-closed: if the response contains more `web_search_call`
+  output items than the requested maximum, the adapter raises
+  `ProviderContractViolationError` and preserves the observed counts as
+  evidence.
+- **Search count semantics (web tool action split):**
+  Each `web_search_call` output item carries an `action.type` in
+  {`search`, `open_page`, `find_in_page`}. The adapter classifies every item
+  and tracks five counters:
+  - `web_tool_call_count` — total `web_search_call` output items (bound
+    authority; used for `max_tool_calls` enforcement).
+  - `search_action_count` — items with `action.type == "search"` (billing
+    authority; used for the `search_per_1000_usd` tariff).
+  - `open_page_action_count` — items with `action.type == "open_page"`.
+  - `find_in_page_action_count` — items with `action.type == "find_in_page"`.
+  - `unknown_web_action_count` — items with a missing or unrecognized action
+    type (fail-closed for billing).
+  The legacy `search_requests` counter equals `web_tool_call_count` (the
+  total) and is **not** used for billing. Only `search_action_count` is
+  billable, because OpenAI documentation states that `search` actions incur
+  a tool-call cost while `open_page`/`find_in_page` are not documented as
+  billable web-search calls.
 - **`WEB_GROUNDED` without an observed search** → `ProviderSearchError`.
 - **IDs:** `provider_request_id` = the `x-request-id` HTTP response header;
   `provider_response_id` = the `id` field in the response JSON.

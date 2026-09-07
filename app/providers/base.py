@@ -63,6 +63,36 @@ class ProviderUsage:
     None means the provider did not report this field.
     0 means the provider explicitly reported zero.
     Do NOT convert missing usage to fake zero.
+
+    Web tool counters (additive, backward-compatible):
+
+    - search_requests: LEGACY provider-native counter.  For OpenAI this is
+      the TOTAL number of ``web_search_call`` output items (all action
+      types).  For Anthropic/Perplexity it is the provider-reported search
+      count.  DEPRECATED as a billing authority — kept only for
+      compatibility with historical rows.  New economic code MUST NOT use
+      this field for pricing.
+    - web_tool_call_count: total OpenAI ``web_search_call`` output items,
+      regardless of ``action.type``.  This is the authority for the
+      ``max_tool_calls`` bound check (the OpenAI bound applies to TOTAL
+      built-in tool calls processed).  None when the provider does not
+      expose a per-item breakdown.
+    - search_action_count: number of ``web_search_call`` items whose
+      ``action.type == "search"``.  This is the ONLY documented billable
+      web-search counter and is the authority for the search tariff.
+      For Anthropic/Perplexity this mirrors the provider-reported search
+      count.
+    - open_page_action_count: ``action.type == "open_page"``.
+    - find_in_page_action_count: ``action.type == "find_in_page"``.
+    - unknown_web_action_count: ``action`` missing or unrecognized type.
+      Counts toward the tool bound but is NEVER assumed billable or free;
+      any non-zero value makes local cost calculation fail-closed.
+
+    Invariant (when web_tool_call_count is not None):
+        web_tool_call_count == search_action_count
+                               + open_page_action_count
+                               + find_in_page_action_count
+                               + unknown_web_action_count
     """
 
     input_tokens: int | None = None
@@ -73,6 +103,31 @@ class ProviderUsage:
     reasoning_tokens: int | None = None
     citation_tokens: int | None = None
     search_requests: int | None = None
+    web_tool_call_count: int | None = None
+    search_action_count: int | None = None
+    open_page_action_count: int | None = None
+    find_in_page_action_count: int | None = None
+    unknown_web_action_count: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.web_tool_call_count is None:
+            return
+        parts = (
+            self.search_action_count,
+            self.open_page_action_count,
+            self.find_in_page_action_count,
+            self.unknown_web_action_count,
+        )
+        if any(p is None for p in parts):
+            raise ValueError(
+                "ProviderUsage: web_tool_call_count requires all four action counters."
+            )
+        total = sum(p for p in parts if p is not None)
+        if total != self.web_tool_call_count:
+            raise ValueError(
+                "ProviderUsage: web_tool_call_count must equal the sum of action counters "
+                f"(total={self.web_tool_call_count}, sum={total})."
+            )
 
 
 @dataclass(frozen=True)
@@ -149,18 +204,25 @@ class ProviderFailureEvidence:
       an incomplete response (e.g. "max_output_tokens").  None if the
       response was nominally complete but still empty/unusable.
     - max_tool_calls_violation: when the provider returned more
-      web_search_call items than the configured limit, this holds the
-      observed count (the raw count is also in usage.search_requests).
-      None when no violation was detected.
+      web_search_call items (TOTAL, all action types) than the configured
+      limit, this holds the observed total count.  None when no violation
+      was detected.
     - requested_max_tool_calls: the max_tool_calls limit that was sent in
       the request to the provider.  None when the request did not include
       max_tool_calls (e.g. MODEL_ONLY mode).  This is essential for
       historical auditability — it allows proving what limit was in force
       at execution time, even if the configuration changes later.
-    - observed_search_requests: the raw count of web_search_call items
-      observed in the response.  Same value as usage.search_requests when
-      present, but explicitly named for contract violation auditing.
-      None when no web_search_call items were observed.
+    - observed_search_requests: LEGACY.  The raw TOTAL count of
+      web_search_call items observed in the response (same value as
+      usage.search_requests for OpenAI).  Kept for backward compatibility
+      with historical rows and error messages.  New code should read
+      observed_web_tool_call_count instead.
+    - observed_web_tool_call_count: authoritative TOTAL count of
+      web_search_call output items (all action types).  This is the value
+      compared against requested_max_tool_calls.
+    - search_action_count / open_page_action_count /
+      find_in_page_action_count / unknown_web_action_count: per-action
+      breakdown of observed_web_tool_call_count (mirrors usage.*).
 
     IMPORTANT:
     - This object MUST NOT contain API keys, Authorization headers, or
@@ -186,6 +248,11 @@ class ProviderFailureEvidence:
     max_tool_calls_violation: int | None = None
     requested_max_tool_calls: int | None = None
     observed_search_requests: int | None = None
+    observed_web_tool_call_count: int | None = None
+    search_action_count: int | None = None
+    open_page_action_count: int | None = None
+    find_in_page_action_count: int | None = None
+    unknown_web_action_count: int | None = None
 
 
 @runtime_checkable

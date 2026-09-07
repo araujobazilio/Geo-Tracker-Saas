@@ -218,10 +218,27 @@ class ProviderCostCalculator:
             return None, False
         total += self._token_cost(usage.citation_tokens or 0, rule.citation_per_million_usd)
 
+        # Web-search tariff.  BILLING AUTHORITY is ``search_action_count``
+        # (documented billable "search" actions).  The legacy
+        # ``search_requests`` counter and the total ``web_tool_call_count``
+        # are NEVER used for the tariff: for OpenAI they include
+        # open_page/find_in_page items that are not documented as billable
+        # web-search calls, and would silently over-charge.
+        #
+        # Fail-closed rules:
+        # - search_used but search_action_count unknown → cost incomplete.
+        # - any unknown_web_action_count > 0 → cost incomplete (we cannot
+        #   prove whether the unknown action was a billable search).
         if rule.search_per_1000_usd is not None:
-            if usage.search_requests is None and search_used:
+            if search_used and usage.search_action_count is None:
                 return None, False
-            total += Decimal(usage.search_requests or 0) * rule.search_per_1000_usd / _THOUSAND
+            if usage.unknown_web_action_count is not None and usage.unknown_web_action_count > 0:
+                return None, False
+            total += Decimal(usage.search_action_count or 0) * rule.search_per_1000_usd / _THOUSAND
+        elif usage.unknown_web_action_count is not None and usage.unknown_web_action_count > 0:
+            # Rule has no search tariff, but the provider processed a web
+            # tool action we cannot classify.  Do not assert exactness.
+            return None, False
 
         if rule.request_fee_usd is not None:
             total += rule.request_fee_usd

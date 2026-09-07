@@ -300,12 +300,19 @@ class AnthropicProviderAdapter:
         server_tool_use = usage.get("server_tool_use")
         if isinstance(server_tool_use, dict):
             search_requests = _safe_int(server_tool_use.get("web_search_requests"))
+        # Anthropic reports the billable search request count directly in
+        # usage.server_tool_use.web_search_requests.  That value is both the
+        # legacy ``search_requests`` and the explicit billable
+        # ``search_action_count``.  Anthropic does not expose a per-item
+        # action breakdown, so the OpenAI-specific total/open/find/unknown
+        # counters remain None (never fabricated).
         return ProviderUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=cached_input_tokens,
             cache_write_input_tokens=cache_write_input_tokens,
             search_requests=search_requests,
+            search_action_count=search_requests,
         )
 
     @staticmethod

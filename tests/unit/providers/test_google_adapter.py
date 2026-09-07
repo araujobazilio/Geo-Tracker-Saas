@@ -133,6 +133,13 @@ async def test_model_only_success() -> None:
     assert result.usage.total_tokens == 49
     assert result.usage.cached_input_tokens == 0
     assert result.usage.reasoning_tokens == 22
+    # Google exposes no web tool decomposition; all web counters stay None.
+    assert result.usage.search_requests is None
+    assert result.usage.web_tool_call_count is None
+    assert result.usage.search_action_count is None
+    assert result.usage.open_page_action_count is None
+    assert result.usage.find_in_page_action_count is None
+    assert result.usage.unknown_web_action_count is None
     assert result.returned_model == "gemini-2.5-flash"
     assert result.finish_reason == "completed"
     assert result.search_used is False

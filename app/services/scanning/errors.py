@@ -65,8 +65,9 @@ def enrich_error_message(
     Truncation policy (suffix-first):
     - Secondary evidence has PRIORITY over primary message length.
     - The suffix is built first, then primary is truncated to fit.
-    - requested_max_tool_calls and observed_search_requests are ints
-      and are NEVER truncated.
+    - requested_max_tool_calls, observed_web_tool_call_count (or legacy
+      observed_search_requests) and the per-action counters are ints and
+      are NEVER truncated.
     - incomplete_reason is sanitized to max 200 chars.
     - Final result is always <= 1000 chars.
 
@@ -86,8 +87,19 @@ def enrich_error_message(
     int_parts: list[str] = []
     if evidence.requested_max_tool_calls is not None:
         int_parts.append(f"requested_max_tool_calls={evidence.requested_max_tool_calls}")
-    if evidence.observed_search_requests is not None:
+    if evidence.observed_web_tool_call_count is not None:
+        int_parts.append(f"observed_web_tool_call_count={evidence.observed_web_tool_call_count}")
+    elif evidence.observed_search_requests is not None:
+        # LEGACY fallback for evidence built without the explicit total.
         int_parts.append(f"observed_search_requests={evidence.observed_search_requests}")
+    if evidence.search_action_count is not None:
+        int_parts.append(f"search_action_count={evidence.search_action_count}")
+    if evidence.open_page_action_count is not None:
+        int_parts.append(f"open_page_action_count={evidence.open_page_action_count}")
+    if evidence.find_in_page_action_count is not None:
+        int_parts.append(f"find_in_page_action_count={evidence.find_in_page_action_count}")
+    if evidence.unknown_web_action_count is not None:
+        int_parts.append(f"unknown_web_action_count={evidence.unknown_web_action_count}")
 
     incomplete_reason = None
     if evidence.incomplete_reason:
