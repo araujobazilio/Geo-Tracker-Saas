@@ -33,6 +33,7 @@ import httpx
 
 from app.config import Settings, get_settings
 from app.core.enums import LLMProvider, ProviderExecutionMode, ProviderSurface
+from app.core.logging import get_logger
 from app.providers.base import (
     ProviderCapabilities,
     ProviderCitation,
@@ -48,6 +49,7 @@ from app.providers.errors import (
     ProviderResponseError,
     ProviderSearchError,
 )
+from app.providers.evidence import ProviderEvidenceSink
 from app.providers.http_utils import (
     LatencyTimer,
     build_async_client,
@@ -56,8 +58,10 @@ from app.providers.http_utils import (
     map_transport_error,
     parse_json_response,
 )
+from app.providers.web_actions import classify_openai_web_actions
 
 _PROVIDER_NAME = "OpenAI"
+logger = get_logger("app.providers.openai")
 
 
 class OpenAIProviderAdapter:
@@ -77,12 +81,28 @@ class OpenAIProviderAdapter:
         self,
         settings: Settings | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        evidence_sink: ProviderEvidenceSink | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._transport = transport
+        self._evidence_sink = evidence_sink
 
     def __repr__(self) -> str:
         return f"<OpenAIProviderAdapter model={self._settings.openai_scan_model!r}>"
+
+    def with_evidence_sink(
+        self,
+        evidence_sink: ProviderEvidenceSink,
+        *,
+        settings: Settings | None = None,
+    ) -> OpenAIProviderAdapter:
+        """Return an equivalent adapter instrumented for one validation."""
+
+        return OpenAIProviderAdapter(
+            settings=settings or self._settings,
+            transport=self._transport,
+            evidence_sink=evidence_sink,
+        )
 
     def capabilities(self) -> ProviderCapabilities:
         return self._CAPABILITIES
@@ -155,6 +175,65 @@ class OpenAIProviderAdapter:
                 response = await client.post(url, headers=headers, json=body)
             except Exception as exc:
                 raise map_transport_error(LLMProvider.OPENAI, _PROVIDER_NAME, exc) from exc
+
+            # Capture transport facts before attempting JSON parsing.  The
+            # sink receives only a body fingerprint/length and the non-secret
+            # request ID; Authorization is deliberately excluded.
+            if self._evidence_sink is not None:
+                provider_request_id_for_evidence = response.headers.get("x-request-id")
+                try:
+                    self._evidence_sink.capture_transport(
+                        response_status=response.status_code,
+                        response_headers={"x-request-id": provider_request_id_for_evidence or ""},
+                        response_bytes=response.content,
+                        provider_request_id=provider_request_id_for_evidence,
+                        latency_ms=timer.elapsed_ms(),
+                    )
+                except Exception:
+                    logger.warning(
+                        "provider_transport_evidence_capture_failed",
+                        provider=LLMProvider.OPENAI.value,
+                        correlation_id=request.correlation_id,
+                    )
+
+                # Persist the complete response envelope only after parsing,
+                # through the sink's recursive sanitizer.  Malformed JSON is
+                # represented by a sanitized parse-failure marker while the
+                # transport artifact remains available for diagnosis.
+                response_json: dict[str, Any] | None = None
+                try:
+                    parsed = response.json()
+                    if isinstance(parsed, dict):
+                        response_json = parsed
+                except (TypeError, ValueError):
+                    response_json = None
+                provider_response_id_for_evidence = (
+                    response_json.get("id") if response_json is not None else None
+                )
+                if not isinstance(provider_response_id_for_evidence, str):
+                    provider_response_id_for_evidence = None
+                try:
+                    self._evidence_sink.capture_response(
+                        request=request,
+                        request_body=body,
+                        response_status=response.status_code,
+                        response_headers={"x-request-id": provider_request_id_for_evidence or ""},
+                        response_bytes=response.content,
+                        response_json=response_json,
+                        provider_request_id=provider_request_id_for_evidence,
+                        provider_response_id=provider_response_id_for_evidence,
+                        latency_ms=timer.elapsed_ms(),
+                    )
+                except Exception:
+                    # The provider response must still flow through the
+                    # canonical accounting path.  The operator inspects the
+                    # sink error and reports the run inconclusive; it never
+                    # repeats the paid call.
+                    logger.warning(
+                        "provider_evidence_capture_failed",
+                        provider=LLMProvider.OPENAI.value,
+                        correlation_id=request.correlation_id,
+                    )
 
             # 4. Map HTTP errors.
             if response.status_code >= 400:
@@ -282,39 +361,12 @@ class OpenAIProviderAdapter:
         #     built-in tool is ever added to ``body["tools"]``, the
         #     max_tool_calls enforcement below MUST be generalized to count
         #     ALL built-in tool call output items, not just web_search_call.
-        web_search_calls = [
-            item
-            for item in (data.get("output", []) or [])
-            if isinstance(item, dict) and item.get("type") == "web_search_call"
-        ]
-        web_tool_call_count: int | None
-        search_action_count: int | None
-        open_page_action_count: int | None
-        find_in_page_action_count: int | None
-        unknown_web_action_count: int | None
-        if web_search_calls:
-            web_tool_call_count = len(web_search_calls)
-            search_action_count = 0
-            open_page_action_count = 0
-            find_in_page_action_count = 0
-            unknown_web_action_count = 0
-            for item in web_search_calls:
-                action = item.get("action")
-                action_type = action.get("type") if isinstance(action, dict) else None
-                if action_type == "search":
-                    search_action_count += 1
-                elif action_type == "open_page":
-                    open_page_action_count += 1
-                elif action_type == "find_in_page":
-                    find_in_page_action_count += 1
-                else:
-                    unknown_web_action_count += 1
-        else:
-            web_tool_call_count = None
-            search_action_count = None
-            open_page_action_count = None
-            find_in_page_action_count = None
-            unknown_web_action_count = None
+        web_actions = classify_openai_web_actions(data.get("output"))
+        web_tool_call_count = web_actions.web_tool_call_count
+        search_action_count = web_actions.search_action_count
+        open_page_action_count = web_actions.open_page_action_count
+        find_in_page_action_count = web_actions.find_in_page_action_count
+        unknown_web_action_count = web_actions.unknown_web_action_count
 
         # LEGACY: ``search_requests`` keeps its historical OpenAI semantics —
         # the TOTAL number of web_search_call items — so that new rows remain
@@ -338,7 +390,7 @@ class OpenAIProviderAdapter:
             unknown_web_action_count=unknown_web_action_count,
         )
 
-        search_used = bool(web_search_calls)
+        search_used = web_tool_call_count is not None
 
         # 9b. Detect max_tool_calls contract violation.  The OpenAI bound
         #     applies to the TOTAL number of built-in tool calls processed,
@@ -389,7 +441,17 @@ class OpenAIProviderAdapter:
                 unknown_web_action_count=unknown_web_action_count,
             )
 
-        # 11. Validate response_text is not empty.
+        # 11. An incomplete response is billable evidence but is not a
+        #     successful validation, even if the provider returned partial
+        #     text.  Preserve the envelope through ProviderFailureEvidence.
+        if incomplete_reason is not None:
+            raise ProviderResponseError(
+                "OpenAI returned an incomplete response.",
+                provider=LLMProvider.OPENAI.value,
+                evidence=_build_evidence(),
+            )
+
+        # 12. Validate response_text is not empty.
         if not output_text or not output_text.strip():
             raise ProviderResponseError(
                 "OpenAI returned an empty response text.",
@@ -397,7 +459,7 @@ class OpenAIProviderAdapter:
                 evidence=_build_evidence(),
             )
 
-        # 12. Verify WEB_GROUNDED actually performed search.
+        # 13. Verify WEB_GROUNDED actually performed search.
         if request.mode == ProviderExecutionMode.WEB_GROUNDED and not search_used:
             raise ProviderSearchError(
                 "OpenAI WEB_GROUNDED mode was requested but no web search call "
@@ -406,7 +468,7 @@ class OpenAIProviderAdapter:
                 evidence=_build_evidence(),
             )
 
-        # 12b. Verify WEB_GROUNDED did not exceed the configured max_tool_calls.
+        # 13b. Verify WEB_GROUNDED did not exceed the configured max_tool_calls.
         #      This is a provider contract violation — the provider returned a
         #      billable response but did not respect the execution bounds.
         #      The PromptRun MUST be FAILED even if response_text is valid.

@@ -12,6 +12,8 @@ adapter facts and makes ZERO network calls.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from app.core.enums import LLMProvider
 from app.core.logging import get_logger
 from app.providers.base import ProviderAdapter, ProviderCapabilities
@@ -56,8 +58,16 @@ class ProviderRegistry:
     the application from starting or other providers from working.
     """
 
-    def __init__(self) -> None:
-        self._instances: dict[LLMProvider, ProviderAdapter] = {}
+    def __init__(self, adapters: Mapping[LLMProvider, ProviderAdapter] | None = None) -> None:
+        """Create a registry, optionally with explicitly injected adapters.
+
+        Injection is intentionally narrow and backward-compatible.  It is
+        used by isolated operational validation to instrument exactly one
+        provider while preserving the normal lazy-construction behavior for
+        every other caller.
+        """
+
+        self._instances: dict[LLMProvider, ProviderAdapter] = dict(adapters or {})
 
     def get(self, provider: LLMProvider) -> ProviderAdapter:
         """Get or construct a provider adapter.
@@ -78,6 +88,22 @@ class ProviderRegistry:
         adapter = self._construct(provider)
         self._instances[provider] = adapter
         return adapter
+
+    def explicit_adapter(self, provider: LLMProvider) -> ProviderAdapter | None:
+        """Return only an adapter explicitly injected at construction time."""
+
+        return self._instances.get(provider)
+
+    def with_adapter(self, provider: LLMProvider, adapter: ProviderAdapter) -> ProviderRegistry:
+        """Clone this registry with one explicit provider override.
+
+        Uninstantiated providers remain lazy; this is the narrow override used
+        by the isolated validation operator.
+        """
+
+        instances = dict(self._instances)
+        instances[provider] = adapter
+        return ProviderRegistry(instances)
 
     def capabilities(self, provider: LLMProvider) -> ProviderCapabilities:
         """Return capabilities for a provider WITHOUT performing any API call

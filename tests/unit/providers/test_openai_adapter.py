@@ -828,6 +828,34 @@ async def test_incomplete_response_carries_evidence() -> None:
     assert ev.latency_ms >= 0
 
 
+async def test_incomplete_response_with_partial_text_is_not_success() -> None:
+    """Incomplete provider output remains inconclusive even with text."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_partial_incomplete",
+                "model": "gpt-5.5",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output_text": "partial answer",
+                "output": [
+                    {"type": "web_search_call", "action": {"type": "search"}},
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await execute_with_transport(
+            make_transport(handler), make_settings(), mode=ProviderExecutionMode.WEB_GROUNDED
+        )
+
+    assert exc_info.value.evidence is not None
+    assert exc_info.value.evidence.incomplete_reason == "max_output_tokens"
+
+
 async def test_empty_output_with_usage_carries_evidence() -> None:
     """output_text empty (no incomplete_details), usage/IDs present ->
     ProviderResponseError with evidence preserving billable material."""
