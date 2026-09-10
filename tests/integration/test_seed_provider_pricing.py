@@ -16,13 +16,15 @@ No provider/network calls are made anywhere in these tests.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
 from scripts.seed_provider_pricing import EXIT_FAIL, EXIT_OK, main
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import bindparam, create_engine, select, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -31,8 +33,16 @@ from app.core.exceptions import PricingConfigurationError, PricingRuleNotFoundEr
 from app.models.pricing import ProviderPriceRule
 from app.services.pricing_service import PricingService
 
+_SEED_TEST_PRICING_KEYS = (
+    "openai:responses:gpt-5.6-terra:2026-07-30",
+    "openai:responses:gpt-5.6-terra:earlier",
+    "openai:responses:gpt-5.6-terra:historical",
+    "openai:responses:gpt-5.6-terra:overlapping-end",
+    "openai:responses:gpt-5.6-terra:open-earlier",
+)
 
-def _new_engine(prepared_test_db: str):
+
+def _new_engine(prepared_test_db: str) -> Engine:
     """Create a new engine with NullPool for isolated verification."""
     return create_engine(prepared_test_db, poolclass=NullPool)
 
@@ -58,19 +68,43 @@ def provision_factory(prepared_test_db: str) -> sessionmaker[Session]:
 
 
 @pytest.fixture(autouse=True)
-def _cleanup_pricing_rules(prepared_test_db: str):
-    """Delete all ProviderPriceRule rows before and after each test."""
-    engine = _new_engine(prepared_test_db)
-    with engine.connect() as conn:
-        conn.execute(text("DELETE FROM provider_price_rules"))
-        conn.commit()
-    engine.dispose()
+def _cleanup_pricing_rules(prepared_test_db: str) -> Iterator[None]:
+    """Clean only rows owned by this pricing test module.
+
+    The feature/operator tests intentionally retain committed rows so their
+    independent-session behavior is real.  A global pricing delete would
+    both cross test ownership boundaries and violate the PromptRun FK.
+    """
+
+    def delete_owned_rows() -> None:
+        engine = _new_engine(prepared_test_db)
+        with engine.connect() as conn:
+            referenced = conn.execute(
+                text(
+                    "SELECT COUNT(*) "
+                    "FROM provider_price_rules AS p "
+                    "JOIN prompt_runs AS r ON r.pricing_rule_id = p.id "
+                    "WHERE p.pricing_key IN :pricing_keys"
+                ).bindparams(bindparam("pricing_keys", expanding=True)),
+                {"pricing_keys": _SEED_TEST_PRICING_KEYS},
+            ).scalar_one()
+            if referenced:
+                pytest.fail(
+                    "Seed pricing test rows are still referenced by PromptRuns; "
+                    "refusing unsafe cleanup."
+                )
+            conn.execute(
+                text(
+                    "DELETE FROM provider_price_rules WHERE pricing_key IN :pricing_keys"
+                ).bindparams(bindparam("pricing_keys", expanding=True)),
+                {"pricing_keys": _SEED_TEST_PRICING_KEYS},
+            )
+            conn.commit()
+        engine.dispose()
+
+    delete_owned_rows()
     yield
-    engine = _new_engine(prepared_test_db)
-    with engine.connect() as conn:
-        conn.execute(text("DELETE FROM provider_price_rules"))
-        conn.commit()
-    engine.dispose()
+    delete_owned_rows()
 
 
 class TestCheckModeIntegration:

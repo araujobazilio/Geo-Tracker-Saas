@@ -17,6 +17,17 @@ from app.providers.errors import ProviderConfigurationError
 from app.providers.registry import ProviderRegistry
 
 
+class _InjectedAdapter:
+    provider = LLMProvider.OPENAI
+    surface = ProviderSurface.OPENAI_RESPONSES_API
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(True, True, True, True)
+
+    async def execute(self, request: Any) -> Any:
+        raise AssertionError("not called in registry injection test")
+
+
 def _make_settings(**overrides: Any) -> Settings:
     defaults: dict[str, Any] = {
         "app_env": "test",
@@ -155,3 +166,8 @@ class TestProviderRegistry:
             adapter1 = registry.get(LLMProvider.OPENAI)
             adapter2 = registry.get(LLMProvider.OPENAI)
             assert adapter1 is adapter2
+
+    def test_explicit_adapter_injection_bypasses_lazy_construction(self) -> None:
+        adapter = _InjectedAdapter()
+        registry = ProviderRegistry({LLMProvider.OPENAI: adapter})
+        assert registry.get(LLMProvider.OPENAI) is adapter
